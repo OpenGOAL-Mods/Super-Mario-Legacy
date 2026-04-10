@@ -141,6 +141,21 @@ class LibSM64Manager {
     int process_tree_nodes_visited = 0;
     int process_drawables_seen = 0;
     int errors = 0;
+    // Bone-attached prim diagnostics: whenever a prim has transform_index >= 0,
+    // we increment bone_lookups_attempted. If compute_prim_world_transform
+    // successfully reads the bone matrix it bumps bone_lookups_succeeded;
+    // otherwise it bumps bone_lookups_fell_back (use_root path taken).
+    int bone_lookups_attempted = 0;
+    int bone_lookups_succeeded = 0;
+    int bone_lookups_fell_back = 0;
+    // Captured per-prim transforms (only filled in tests; one entry per prim
+    // processed). Each entry is (jak_x, jak_y, jak_z, transform_index).
+    struct CapturedPrim {
+      float pos[3];
+      int transform_index;
+      bool used_bone;
+    };
+    std::vector<CapturedPrim> captured_prims;
   };
   TestSweepResult test_sweep(u8* ee_mem,
                              u32 ee_mem_size,

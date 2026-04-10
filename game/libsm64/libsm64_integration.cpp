@@ -404,7 +404,7 @@ MarioState LibSM64Manager::get_state() {
 namespace ac {  // "actor collision" — isolated from the rest of the file
 
 constexpr u32 PDRAW_ROOT_OFF = 108;
-constexpr u32 PDRAW_NODE_LIST_OFF = 112;        // process-drawable.node-list (basic)
+constexpr u32 PDRAW_NODE_LIST_OFF = 112;        // process-drawable.node-list (basic), declared 116 - 4
 constexpr u32 CSHAPE_TRANS_OFF = 12;
 constexpr u32 CSHAPE_QUAT_OFF = 28;
 constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
@@ -418,12 +418,13 @@ constexpr u32 MESH_VERTEX_DATA_OFF = 12;
 constexpr u32 MESH_TRIS_OFF = 28;
 constexpr u32 MESH_TRI_SIZE = 8;  // collide-mesh-tri: 3 u8 indices + 1 u8 pad + 1 u32 pat
 // cspace-array (process-drawable.node-list) layout:
-//   inline-array-class header @ 0..15, then `data` (cspace inline) @ 16.
-//   Each cspace is 32 bytes (cspace-array heap-base = 32). Within a cspace:
-//     parent@0, joint@4, joint-num@8, geo@12, bone@16 (basic ptr), ...
-constexpr u32 CSPACE_ARRAY_DATA_OFF = 16;
+//   inline-array-class is a basic. `data` is declared at offset 16; runtime
+//   offset = 12 (declared - 4). Each cspace is a 32-byte structure (cspace-array
+//   heap-base = 32). cspace itself is a `structure` (no type tag), so its field
+//   offsets are NOT -4 adjusted: parent@0, joint@4, joint-num@8, geo@12, bone@16, ...
+constexpr u32 CSPACE_ARRAY_DATA_OFF = 12;       // declared 16 - 4
 constexpr u32 CSPACE_SIZE = 32;
-constexpr u32 CSPACE_BONE_OFF = 16;
+constexpr u32 CSPACE_BONE_OFF = 16;             // structure field, no -4 adjust
 // bone.transform is a 4x4 matrix at offset 0 of `bone`. Column-major:
 //   col0 (offset 0..15)  = X basis
 //   col1 (offset 16..31) = Y basis
@@ -681,13 +682,15 @@ void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
 // extracted from the bone matrix, with scale stripped).
 bool compute_prim_world_transform(u8* ee_mem, u32 mem_size, u32 false_val, u32 pd_node,
                                    int8_t transform_index, const float root_trans[3],
-                                   const float root_rot[9], float out_pos[3], float out_rot[9]) {
+                                   const float root_rot[9], float out_pos[3], float out_rot[9],
+                                   bool* out_used_bone = nullptr) {
   // Default: actor root.
   auto use_root = [&]() {
     out_pos[0] = root_trans[0];
     out_pos[1] = root_trans[1];
     out_pos[2] = root_trans[2];
     std::memcpy(out_rot, root_rot, 9 * sizeof(float));
+    if (out_used_bone) *out_used_bone = false;
     return true;
   };
 
@@ -699,6 +702,16 @@ bool compute_prim_world_transform(u8* ee_mem, u32 mem_size, u32 false_val, u32 p
   if (node_list == 0 || node_list == false_val) return use_root();
   if (!valid_basic_ptr(node_list, mem_size)) return use_root();
 
+  // Bounds-check transform_index against cspace-array.length (offset 0).
+  // Skeleton may not be initialized yet (length == 0) or the index might
+  // be bogus. Either way, fall back to the actor root rather than reading
+  // garbage from beyond the end of the array.
+  u32 cspace_len_raw = 0;
+  if (!read_u32(ee_mem, node_list, mem_size, cspace_len_raw)) return use_root();
+  int32_t cspace_len = static_cast<int32_t>(cspace_len_raw);
+  if (cspace_len <= 0 || cspace_len > 1024) return use_root();  // sanity bound
+  if (static_cast<int32_t>(transform_index) >= cspace_len) return use_root();
+
   // cspace[i] starts at node_list + 16 + i*32. cspace.bone is a basic ptr
   // at +16 within the cspace struct.
   u32 cspace_addr =
@@ -707,14 +720,23 @@ bool compute_prim_world_transform(u8* ee_mem, u32 mem_size, u32 false_val, u32 p
   if (!read_u32(ee_mem, cspace_addr + CSPACE_BONE_OFF, mem_size, bone_ptr)) return use_root();
   if (bone_ptr == 0 || bone_ptr == false_val) return use_root();
   // bone is a structure (not a basic), so no -4 type tag — just check the
-  // raw matrix range is in-bounds.
+  // raw matrix range is in-bounds. Require 16-byte alignment so the matrix
+  // load is well-defined.
+  if ((bone_ptr & 0xF) != 0) return use_root();
   if (!valid_ee_addr(bone_ptr, 64, mem_size)) return use_root();
 
-  // bone.transform: 4x4 column-major, 16 floats. Sanity-check finiteness.
+  // bone.transform: 4x4 column-major, 16 floats. Sanity-check finiteness
+  // AND that translation is within a reasonable Jak-world range, so we
+  // don't push libsm64 absurd transforms when the bone is uninitialized.
   float m[16];
   std::memcpy(m, ee_mem + bone_ptr, 64);
   for (int i = 0; i < 16; i++) {
     if (!std::isfinite(m[i])) return use_root();
+  }
+  // Translation is column 3. Jak world coords are in the millions max
+  // (4096 units/meter). Anything beyond ±1e8 is garbage.
+  for (int i = 0; i < 3; i++) {
+    if (std::abs(m[3 * 4 + i]) > 1.0e8f) return use_root();
   }
 
   // Translation = column 3 (xyz). m[col*4 + row].
@@ -743,6 +765,7 @@ bool compute_prim_world_transform(u8* ee_mem, u32 mem_size, u32 false_val, u32 p
     out_rot[1 * 3 + c] = ly * inv;
     out_rot[2 * 3 + c] = lz * inv;
   }
+  if (out_used_bone) *out_used_bone = true;
   return true;
 }
 
@@ -956,10 +979,29 @@ void do_sweep(WalkCtx& c) {
       // pulls the bone matrix; otherwise it falls back to the actor root.
       float prim_pos[3];
       float prim_rot[9];
+      bool used_bone = false;
       if (!compute_prim_world_transform(c.ee_mem, c.mem_size, c.false_val, node,
                                          cp.transform_index, trans, root_rot, prim_pos,
-                                         prim_rot)) {
+                                         prim_rot, &used_bone)) {
         continue;
+      }
+      if (cp.transform_index >= 0) {
+        c.result.bone_lookups_attempted++;
+        if (used_bone) {
+          c.result.bone_lookups_succeeded++;
+        } else {
+          c.result.bone_lookups_fell_back++;
+        }
+      }
+      // Capture for tests/diagnostics. Bounded to keep production overhead low.
+      if (c.result.captured_prims.size() < 256) {
+        LibSM64Manager::TestSweepResult::CapturedPrim cap{};
+        cap.pos[0] = prim_pos[0];
+        cap.pos[1] = prim_pos[1];
+        cap.pos[2] = prim_pos[2];
+        cap.transform_index = cp.transform_index;
+        cap.used_bone = used_bone;
+        c.result.captured_prims.push_back(cap);
       }
 
       // Build the SM64ObjectTransform for this prim. For root-relative prims
@@ -1085,9 +1127,11 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
   m_actor_sync_frame++;
   if (m_actor_sync_frame == 1 || m_actor_sync_frame == 60 || m_actor_sync_frame == 600) {
     lg::info(
-        "[libsm64] actor-collision frame {}: visited {} nodes, pd_seen {}, meshes {}, tris {}, errors {}, tracking {}",
+        "[libsm64] actor-collision frame {}: visited {} nodes, pd_seen {}, meshes {}, tris {}, errors {}, tracking {}, bone_attempts {}, bone_ok {}, bone_fellback {}",
         m_actor_sync_frame, result.process_tree_nodes_visited, result.process_drawables_seen,
-        result.meshes_found, result.triangles_extracted, result.errors, m_tracked_actors.size());
+        result.meshes_found, result.triangles_extracted, result.errors, m_tracked_actors.size(),
+        result.bone_lookups_attempted, result.bone_lookups_succeeded,
+        result.bone_lookups_fell_back);
   }
 }
 

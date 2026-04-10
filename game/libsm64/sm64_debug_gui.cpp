@@ -170,6 +170,19 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
 
         auto geo = mgr.get_geometry();
         ImGui::Text("Triangles: %d", geo.num_triangles);
+
+        // Ground pound hitbox simulation status.
+        ImGui::Separator();
+        auto hb = mgr.get_ground_pound_hitbox();
+        ImGui::TextColored(hb.active ? ImVec4(1, 0.5f, 0, 1) : ImVec4(0.6f, 0.6f, 0.6f, 1),
+                           "Ground Pound: %s%s",
+                           hb.active ? "ACTIVE" : "idle",
+                           hb.impact_frame ? " (IMPACT)" : "");
+        ImGui::Text("  hitbox center: (%.0f, %.0f, %.0f)", hb.center.x(), hb.center.y(),
+                    hb.center.z());
+        ImGui::Text("  radius: %.0f  y range: [%.0f, %.0f]", hb.radius, hb.bottom_y, hb.top_y);
+        ImGui::Text("  frames active: %u  hits this frame: %u  total hits: %u",
+                    hb.frames_active, hb.hits_this_frame, hb.total_hits);
       }
     }
   }

@@ -61,6 +61,48 @@ struct MarioState {
   int16_t anim_frame = 0;
 };
 
+// Mirror of SM64's mario ground-pound attack hitbox, projected into Jak units.
+// Modeled after libsm64's `act_ground_pound`/`act_ground_pound_land` and the
+// hitbox in object_stuff.c (radius 37, height 160 SM64u, no down-offset). The
+// hitbox is a vertical cylinder centered on Mario; in 2D it's a circle, in Y
+// it spans [mario_feet_y, mario_feet_y + 160 SM64u] (or the Jak unit equiv).
+//
+// `active` is set on every frame the SM64 interaction code would also classify
+// as INT_GROUND_POUND_OR_TWIRL: ACT_GROUND_POUND with vel.y < 0 (i.e. the
+// entire pound) plus the single first frame of ACT_GROUND_POUND_LAND. The
+// `impact_frame` flag distinguishes that 1-frame strong window from the rest
+// of the fall.
+struct GroundPoundHitbox {
+  bool active = false;        // hitbox is dealing damage this frame
+  bool impact_frame = false;  // true on the single landing-impact frame
+  math::Vector3f center{0, 0, 0};  // Mario world position, Jak units
+  float radius = 0.0f;        // cylinder radius, Jak units
+  float bottom_y = 0.0f;      // bottom of cylinder, Jak units (Mario's feet)
+  float top_y = 0.0f;         // top of cylinder, Jak units (Mario's head)
+  uint32_t frames_active = 0; // diagnostic: total frames hitbox has been active
+  uint32_t total_hits = 0;    // diagnostic: cumulative actor hits across frames
+  uint32_t hits_this_frame = 0; // diagnostic: actors hit on the most recent frame
+};
+
+// Cylinder-vs-point overlap check, exposed for unit tests. Returns true if the
+// 2D distance between hitbox.center and actor_pos is < hitbox.radius + actor_radius
+// AND the actor's y is within [hitbox.bottom_y - actor_half_height,
+// hitbox.top_y + actor_half_height]. All inputs in Jak units.
+bool ground_pound_hitbox_overlaps(const GroundPoundHitbox& hb,
+                                   const math::Vector3f& actor_pos,
+                                   float actor_radius,
+                                   float actor_half_height);
+
+// Cylinder-vs-AABB overlap check, exposed for unit tests. Conservative test:
+// the hitbox's vertical [bottom_y, top_y] interval must overlap [aabb_min.y,
+// aabb_max.y], and the hitbox's circle of radius `radius` must overlap the
+// AABB's xz rectangle (closest-point-to-circle test). Used for ground-pound
+// vs collide-mesh hit detection so we don't miss actors whose root pivot is
+// below their collide mesh (most Jak actors).
+bool ground_pound_hitbox_overlaps_aabb(const GroundPoundHitbox& hb,
+                                        const float aabb_min[3],
+                                        const float aabb_max[3]);
+
 struct MarioInputState {
   float stick_x = 0;
   float stick_y = 0;
@@ -98,6 +140,7 @@ class LibSM64Manager {
   // Accessors (threadsafe via mutex)
   MarioGeometry get_geometry();
   MarioState get_state();
+  GroundPoundHitbox get_ground_pound_hitbox();
 
   // Texture atlas (only valid after init)
   const uint8_t* get_texture_data() const { return m_texture_data.data(); }
@@ -176,6 +219,17 @@ class LibSM64Manager {
     float last_trans[3] = {0, 0, 0};
     float last_quat[4] = {0, 0, 0, 1};
     bool seen_this_frame = false;
+    // Local-space AABB of the collide mesh in Jak units, captured once at
+    // extraction time. Used for hit testing — last_trans is the prim anchor
+    // (often at the actor's base), so testing against the prim point misses
+    // anything stacked on top of the mesh.
+    float local_aabb_min[3] = {0, 0, 0};
+    float local_aabb_max[3] = {0, 0, 0};
+    bool has_aabb = false;
+    // World-space AABB of the collide mesh in Jak units, recomputed each
+    // frame from local_aabb_{min,max} + the prim's world transform.
+    float world_aabb_min[3] = {0, 0, 0};
+    float world_aabb_max[3] = {0, 0, 0};
   };
 
   // Settings
@@ -241,6 +295,8 @@ class LibSM64Manager {
   std::mutex m_geo_mutex;
   MarioGeometry m_geometry;
   MarioState m_state;
+  GroundPoundHitbox m_gp_hitbox;
+  uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 #include "common/goal_constants.h"
 #include "common/log/log.h"
@@ -190,6 +191,99 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   m_state.flags = sm64_state.flags;
   m_state.anim_id = sm64_state.animID;
   m_state.anim_frame = sm64_state.animFrame;
+
+  // ---- Ground-pound hitbox simulation -------------------------------------
+  // Replicates SM64's INT_GROUND_POUND_OR_TWIRL classification from
+  // libsm64/src/decomp/game/interaction.c::determine_interaction. We don't
+  // have access to libsm64's per-object collision pool (Jak actors are surface
+  // objects, not behavior objects), so we evaluate the same hitbox geometry
+  // here in C++ against our tracked Jak actors.
+  //
+  // Constants come from libsm64/src/decomp/game/object_stuff.c (Mario hitbox
+  // radius = 37, height = 160, downOffset = 0) and the action IDs from
+  // libsm64/src/decomp/include/sm64.h.
+  constexpr uint32_t kActGroundPound = 0x008008A9;       // ACT_GROUND_POUND
+  constexpr uint32_t kActGroundPoundLand = 0x0080023C;   // ACT_GROUND_POUND_LAND
+  constexpr float kMarioHitboxRadiusSm64 = 37.0f;
+  constexpr float kMarioHitboxHeightSm64 = 160.0f;
+
+  // Reset per-frame flags. We do NOT reset frames_active or total_hits — those
+  // accumulate across the lifetime so the debug GUI can show them. hits_this_frame
+  // is overwritten by update_actor_collision when it runs the hit pass.
+  bool active = false;
+  bool impact = false;
+  if (sm64_state.action == kActGroundPound) {
+    // INT_GROUND_POUND_OR_TWIRL when vel.y < 0. In actionState 0 vel.y is set
+    // to -50 every frame; in actionState 1 air_step preserves it. So just check.
+    if (sm64_state.velocity[1] < 0.0f) {
+      active = true;
+    }
+  } else if (sm64_state.action == kActGroundPoundLand) {
+    // ACT_GROUND_POUND_LAND's handler immediately sets actionState=1 on entry,
+    // so the "actionState == 0" window in determine_interaction is exactly the
+    // first frame Mario is in this action. We detect that via prev_action edge.
+    if (m_prev_action != kActGroundPoundLand) {
+      active = true;
+      impact = true;
+    }
+  }
+
+  m_gp_hitbox.active = active;
+  m_gp_hitbox.impact_frame = impact;
+  m_gp_hitbox.center = m_state.position;  // already in Jak units, Mario's feet
+  m_gp_hitbox.radius = kMarioHitboxRadiusSm64 * SM64_TO_JAK_SCALE;
+  m_gp_hitbox.bottom_y = m_state.position.y();
+  m_gp_hitbox.top_y = m_state.position.y() + kMarioHitboxHeightSm64 * SM64_TO_JAK_SCALE;
+  if (active) {
+    m_gp_hitbox.frames_active++;
+  }
+  if (!active) {
+    // Once the pound finishes, clear the per-frame hit count so the GUI shows 0.
+    m_gp_hitbox.hits_this_frame = 0;
+  }
+
+  m_prev_action = sm64_state.action;
+}
+
+GroundPoundHitbox LibSM64Manager::get_ground_pound_hitbox() {
+  std::lock_guard<std::mutex> lock(m_geo_mutex);
+  return m_gp_hitbox;
+}
+
+// Pure geometry test, exposed for unit tests. Both inputs in Jak units. The
+// 2D check is `dx² + dz² < (hb.radius + actor_radius)²`. The Y check inflates
+// the cylinder by the actor's half-height on both ends to model the actor as a
+// vertical capsule rather than a point.
+bool ground_pound_hitbox_overlaps(const GroundPoundHitbox& hb,
+                                  const math::Vector3f& actor_pos,
+                                  float actor_radius,
+                                  float actor_half_height) {
+  if (!hb.active) return false;
+  float dx = actor_pos.x() - hb.center.x();
+  float dz = actor_pos.z() - hb.center.z();
+  float r = hb.radius + actor_radius;
+  if (dx * dx + dz * dz > r * r) return false;
+  float ay = actor_pos.y();
+  if (ay + actor_half_height < hb.bottom_y) return false;
+  if (ay - actor_half_height > hb.top_y) return false;
+  return true;
+}
+
+bool ground_pound_hitbox_overlaps_aabb(const GroundPoundHitbox& hb,
+                                        const float aabb_min[3],
+                                        const float aabb_max[3]) {
+  if (!hb.active) return false;
+  // Y interval test.
+  if (aabb_max[1] < hb.bottom_y) return false;
+  if (aabb_min[1] > hb.top_y) return false;
+  // XZ: closest point on the AABB rectangle to the hitbox center.
+  float cx = hb.center.x();
+  float cz = hb.center.z();
+  float closest_x = cx < aabb_min[0] ? aabb_min[0] : (cx > aabb_max[0] ? aabb_max[0] : cx);
+  float closest_z = cz < aabb_min[2] ? aabb_min[2] : (cz > aabb_max[2] ? aabb_max[2] : cz);
+  float dx = closest_x - cx;
+  float dz = closest_z - cz;
+  return dx * dx + dz * dz <= hb.radius * hb.radius;
 }
 
 void LibSM64Manager::load_flat_ground(float y_height, float half_extent) {
@@ -584,7 +678,9 @@ inline void quat_to_zxy_euler_degrees(const float q[4], float out_deg[3]) {
 // this is what allows `sm64_surface_object_move` to compute platform velocity
 // each frame and carry Mario along with moving platforms.
 bool extract_mesh_local(u8* ee_mem, u32 mem_size, u32 mesh_ptr,
-                        std::vector<SM64Surface>& out_surfaces) {
+                        std::vector<SM64Surface>& out_surfaces,
+                        float* out_local_aabb_min_jak = nullptr,
+                        float* out_local_aabb_max_jak = nullptr) {
   u32 num_tris = 0, num_verts = 0, vertex_data_ptr = 0;
   if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_TRIS_OFF, mem_size, num_tris)) return false;
   if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_VERTS_OFF, mem_size, num_verts)) return false;
@@ -595,14 +691,24 @@ bool extract_mesh_local(u8* ee_mem, u32 mem_size, u32 mesh_ptr,
   if (!valid_ee_addr(vertex_data_ptr, num_verts * 16u, mem_size)) return false;
   if (!valid_ee_addr(mesh_ptr + MESH_TRIS_OFF, num_tris * MESH_TRI_SIZE, mem_size)) return false;
 
+  float lmin[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max()};
+  float lmax[3] = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
+                    -std::numeric_limits<float>::max()};
   std::vector<std::array<int32_t, 3>> local_verts(num_verts);
   for (u32 i = 0; i < num_verts; i++) {
     float local_v[4];
     if (!read_vec4(ee_mem, vertex_data_ptr + i * 16u, mem_size, local_v)) return false;
+    for (int k = 0; k < 3; k++) {
+      if (local_v[k] < lmin[k]) lmin[k] = local_v[k];
+      if (local_v[k] > lmax[k]) lmax[k] = local_v[k];
+    }
     local_verts[i][0] = static_cast<int32_t>(local_v[0] * JAK_TO_SM64_SCALE);
     local_verts[i][1] = static_cast<int32_t>(local_v[1] * JAK_TO_SM64_SCALE);
     local_verts[i][2] = static_cast<int32_t>(local_v[2] * JAK_TO_SM64_SCALE);
   }
+  if (out_local_aabb_min_jak) std::memcpy(out_local_aabb_min_jak, lmin, sizeof(lmin));
+  if (out_local_aabb_max_jak) std::memcpy(out_local_aabb_max_jak, lmax, sizeof(lmax));
 
   out_surfaces.reserve(out_surfaces.size() + num_tris);
   for (u32 i = 0; i < num_tris; i++) {
@@ -1015,18 +1121,56 @@ void do_sweep(WalkCtx& c) {
       xform.position[2] = prim_pos[2] * JAK_TO_SM64_SCALE;
       rot_mat3_to_zxy_euler_degrees(prim_rot, xform.eulerRotation);
 
+      // Helper: refresh the world-space AABB on the tracked actor from its
+      // local AABB and the prim's current world transform. Conservative — we
+      // transform all 8 corners of the local AABB and take per-axis min/max,
+      // which gives a tight fit for axis-aligned meshes and a loose-but-safe
+      // fit for rotated ones.
+      auto refresh_world_aabb = [&]() {
+        if (!tracked.has_aabb) return;
+        const float* lmin = tracked.local_aabb_min;
+        const float* lmax = tracked.local_aabb_max;
+        float wmin[3] = {std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max()};
+        float wmax[3] = {-std::numeric_limits<float>::max(),
+                         -std::numeric_limits<float>::max(),
+                         -std::numeric_limits<float>::max()};
+        for (int corner = 0; corner < 8; corner++) {
+          float lv[3] = {(corner & 1) ? lmax[0] : lmin[0],
+                         (corner & 2) ? lmax[1] : lmin[1],
+                         (corner & 4) ? lmax[2] : lmin[2]};
+          float wv[3];
+          // wv = prim_rot * lv + prim_pos. prim_rot is row-major 3x3.
+          for (int r = 0; r < 3; r++) {
+            wv[r] = prim_rot[r * 3 + 0] * lv[0] + prim_rot[r * 3 + 1] * lv[1] +
+                    prim_rot[r * 3 + 2] * lv[2] + prim_pos[r];
+          }
+          for (int k = 0; k < 3; k++) {
+            if (wv[k] < wmin[k]) wmin[k] = wv[k];
+            if (wv[k] > wmax[k]) wmax[k] = wv[k];
+          }
+        }
+        std::memcpy(tracked.world_aabb_min, wmin, sizeof(wmin));
+        std::memcpy(tracked.world_aabb_max, wmax, sizeof(wmax));
+      };
+
       if (tracked.has_obj) {
         if (!c.dry_run) {
           sm64_surface_object_move(tracked.sm64_obj_id, &xform);
         }
         std::memcpy(tracked.last_trans, prim_pos, 12);
+        refresh_world_aabb();
         continue;
       }
 
       if (created_this_frame >= MAX_ACTOR_SURFACE_OBJECTS) break;
 
       std::vector<SM64Surface> surfaces;
-      if (!extract_mesh_local(c.ee_mem, c.mem_size, mesh_ptr, surfaces)) {
+      float local_aabb_min[3];
+      float local_aabb_max[3];
+      if (!extract_mesh_local(c.ee_mem, c.mem_size, mesh_ptr, surfaces, local_aabb_min,
+                              local_aabb_max)) {
         c.broken_meshes.insert(mesh_ptr);
         c.result.errors++;
         continue;
@@ -1048,6 +1192,10 @@ void do_sweep(WalkCtx& c) {
         tracked.has_obj = true;
       }
       std::memcpy(tracked.last_trans, prim_pos, 12);
+      std::memcpy(tracked.local_aabb_min, local_aabb_min, sizeof(local_aabb_min));
+      std::memcpy(tracked.local_aabb_max, local_aabb_max, sizeof(local_aabb_max));
+      tracked.has_aabb = true;
+      refresh_world_aabb();
       created_this_frame++;
     }
   }
@@ -1123,6 +1271,58 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       result,
   };
   do_sweep(ctx);
+
+  // ---- Ground-pound hit pass ----------------------------------------------
+  // After the walker has refreshed every tracked actor's last_trans for this
+  // frame, intersect each visible actor against Mario's ground-pound hitbox.
+  // We just count hits for now (visualization in the debug GUI); applying the
+  // attack to GOAL processes is the next step. Done OUTSIDE the walker so the
+  // testable test_sweep path stays focused on collision-mesh extraction.
+  {
+    GroundPoundHitbox hb_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(m_geo_mutex);
+      hb_snapshot = m_gp_hitbox;
+    }
+    uint32_t hits = 0;
+    if (hb_snapshot.active) {
+      for (auto& [k, t] : m_tracked_actors) {
+        if (!t.seen_this_frame) continue;
+        // Prefer the world-space collide-mesh AABB if available — last_trans
+        // is the prim anchor (often at the actor's base), so testing against
+        // the prim point alone misses anything stacked above the pivot.
+        bool hit;
+        if (t.has_aabb) {
+          hit = ground_pound_hitbox_overlaps_aabb(hb_snapshot, t.world_aabb_min, t.world_aabb_max);
+        } else {
+          constexpr float kActorPadRadius = 4096.0f;
+          constexpr float kActorHalfHeight = 4096.0f;
+          math::Vector3f actor_pos(t.last_trans[0], t.last_trans[1], t.last_trans[2]);
+          hit = ground_pound_hitbox_overlaps(hb_snapshot, actor_pos, kActorPadRadius,
+                                              kActorHalfHeight);
+        }
+        if (hit) {
+          hits++;
+          if (m_actor_diag_logs_remaining > 0) {
+            m_actor_diag_logs_remaining--;
+            lg::info(
+                "[libsm64] ground-pound HIT actor pd=0x{:X} prim=0x{:X} aabb=({:.0f},{:.0f},{:.0f})-({:.0f},{:.0f},{:.0f})"
+                " mario=({:.0f},{:.0f},{:.0f}) impact={}",
+                static_cast<u32>(k >> 32), static_cast<u32>(k & 0xFFFFFFFFu),
+                t.world_aabb_min[0], t.world_aabb_min[1], t.world_aabb_min[2],
+                t.world_aabb_max[0], t.world_aabb_max[1], t.world_aabb_max[2],
+                hb_snapshot.center.x(), hb_snapshot.center.y(), hb_snapshot.center.z(),
+                hb_snapshot.impact_frame ? "YES" : "no");
+          }
+        }
+      }
+    }
+    if (hits > 0 || hb_snapshot.active) {
+      std::lock_guard<std::mutex> lock(m_geo_mutex);
+      m_gp_hitbox.hits_this_frame = hits;
+      m_gp_hitbox.total_hits += hits;
+    }
+  }
 
   m_actor_sync_frame++;
   if (m_actor_sync_frame == 1 || m_actor_sync_frame == 60 || m_actor_sync_frame == 600) {

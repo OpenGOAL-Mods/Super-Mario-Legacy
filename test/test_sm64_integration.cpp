@@ -856,6 +856,185 @@ TEST_F(SM64ActorSweepTest, BoneAttachedPrimWithOOBIndexFallsBackToRoot) {
   EXPECT_FLOAT_EQ(r.captured_prims[0].pos[0], 100.0f);
 }
 
+// ============================================================================
+// SM64GroundPoundHitboxTest: pure-geometry test of the ground-pound hitbox
+// model. Verifies the cylinder-vs-actor overlap math and the active/impact-
+// frame gating, independent of any walker state.
+// ============================================================================
+
+class SM64GroundPoundHitboxTest : public ::testing::Test {
+ protected:
+  // Build a hitbox centered at (cx, cy, cz) with radius r and height h.
+  sm64::GroundPoundHitbox make_hitbox(float cx, float cy, float cz, float r, float h,
+                                      bool active = true, bool impact = false) {
+    sm64::GroundPoundHitbox hb;
+    hb.active = active;
+    hb.impact_frame = impact;
+    hb.center = math::Vector3f(cx, cy, cz);
+    hb.radius = r;
+    hb.bottom_y = cy;
+    hb.top_y = cy + h;
+    return hb;
+  }
+};
+
+TEST_F(SM64GroundPoundHitboxTest, InactiveHitboxNeverHits) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000, /*active=*/false);
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, 0, 0), 100, 100));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorAtCenterHits) {
+  auto hb = make_hitbox(100, 200, 300, 1000, 1000);
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(100, 200, 300), 0, 0));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorJustOutsideRadiusMisses) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  // 2D distance ~1100, 0 actor radius — beyond hitbox.radius
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(1100, 500, 0), 0, 0));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorJustInsideRadiusHits) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(900, 500, 0), 0, 0));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorRadiusAddsToHitboxRadius) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  // 2D distance 1500, actor radius 600 → combined reach 1600 > 1500 → HIT
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(1500, 500, 0), 600, 0));
+  // 2D distance 1700 > combined reach 1600 → MISS
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(1700, 500, 0), 600, 0));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorBelowHitboxMisses) {
+  // Hitbox spans y=[0, 1000]. Actor at y=-2000, half-height 100 → top at -1900,
+  // still below 0. MISS.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, -2000, 0), 0, 100));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorAboveHitboxMisses) {
+  // Hitbox spans y=[0, 1000]. Actor at y=2000, half-height 100 → bottom at 1900 > 1000. MISS.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, 2000, 0), 0, 100));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorTouchingBottomEdgeHits) {
+  // Hitbox y=[0, 1000]. Actor at y=-500 with half-height 600 → top at +100,
+  // overlaps the hitbox bottom.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, -500, 0), 0, 600));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ActorTouchingTopEdgeHits) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  // Actor at y=1500 with half-height 600 → bottom at 900, overlaps the top.
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, 1500, 0), 0, 600));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, JakUnitMarioHitboxMatchesSm64) {
+  // Sanity-check the actual Mario constants. SM64: r=37, h=160 SM64u.
+  // Jak units: SM64_TO_JAK_SCALE = 4096/43 ≈ 95.26.
+  constexpr float SM64_TO_JAK = 4096.0f / 43.0f;
+  float r_jak = 37.0f * SM64_TO_JAK;    // ~3525
+  float h_jak = 160.0f * SM64_TO_JAK;   // ~15244
+  auto hb = make_hitbox(0, 0, 0, r_jak, h_jak);
+  // Actor 3000 Jak units away (2D), at Mario's feet → should hit.
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(3000, 0, 0), 0, 0));
+  // Actor 4000 Jak units away (2D), zero actor radius → should miss.
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(4000, 0, 0), 0, 0));
+  // Actor at Mario's head height → should hit.
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, h_jak - 100, 0), 0, 0));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, ImpactFrameStillRequiresActive) {
+  // The impact_frame flag is purely informational — `active` is what gates hits.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000, /*active=*/false, /*impact=*/true);
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(0, 0, 0), 0, 0));
+}
+
+// ---------- AABB-vs-cylinder tests ----------------------------------------
+// Models the real production scenario: an actor's prim anchor is at the base
+// of its collide mesh, and we test the cylinder against the world AABB of the
+// mesh, not the anchor point.
+
+TEST_F(SM64GroundPoundHitboxTest, AabbInactiveHitboxNeverHits) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000, /*active=*/false);
+  float mn[3] = {-100, -100, -100};
+  float mx[3] = {100, 100, 100};
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbCenterContainsHitbox) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  float mn[3] = {-100, -100, -100};
+  float mx[3] = {100, 100, 100};
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbCrateStackedAboveAnchorIsHit) {
+  // Real failure mode: Mario lands on a crate. Crate's prim anchor is at
+  // y=0, but its mesh AABB is [0, 8000] in y (a 2-meter-tall crate). Mario's
+  // ground-pound hitbox is centered on his feet at y=8000 and extends UP.
+  // The OLD point-based test would treat the crate as a point at y=0 and
+  // miss; the AABB test should hit because the crate's top (8000) reaches
+  // the hitbox bottom (8000).
+  auto hb = make_hitbox(0, 8000, 0, 3525, 15244);  // Mario's actual hitbox
+  float mn[3] = {-2000, 0, -2000};
+  float mx[3] = {2000, 8000, 2000};
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbCrateAtMariosFeetWithGapMisses) {
+  // Same Mario hitbox at (0, 8000), but the crate AABB is far below.
+  auto hb = make_hitbox(0, 30000, 0, 3525, 15244);
+  float mn[3] = {-2000, 0, -2000};
+  float mx[3] = {2000, 8000, 2000};
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbXzCornerJustInsideHits) {
+  // AABB corner is the closest point to the hitbox center.
+  // Hitbox at origin, radius 1000. AABB nearest face/corner at (700, 0, 700).
+  // 2D distance = sqrt(700^2 + 700^2) ≈ 989.9 < 1000 → HIT.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  float mn[3] = {700, 0, 700};
+  float mx[3] = {2000, 500, 2000};
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbXzCornerJustOutsideMisses) {
+  // Same hitbox; corner at (800, 0, 800) → distance ≈ 1131 > 1000 → MISS.
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);
+  float mn[3] = {800, 0, 800};
+  float mx[3] = {2000, 500, 2000};
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbBelowYIntervalMisses) {
+  // AABB y range entirely below the hitbox y interval.
+  auto hb = make_hitbox(0, 5000, 0, 1000, 1000);  // y=[5000, 6000]
+  float mn[3] = {-100, 0, -100};
+  float mx[3] = {100, 4000, 100};  // top y = 4000 < 5000
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbAboveYIntervalMisses) {
+  auto hb = make_hitbox(0, 0, 0, 1000, 1000);  // y=[0, 1000]
+  float mn[3] = {-100, 2000, -100};
+  float mx[3] = {100, 3000, 100};
+  EXPECT_FALSE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
+TEST_F(SM64GroundPoundHitboxTest, AabbHitboxInsideAabbHits) {
+  // Hitbox center inside AABB on every axis → trivially overlap.
+  auto hb = make_hitbox(0, 500, 0, 1000, 1000);
+  float mn[3] = {-2000, 0, -2000};
+  float mx[3] = {2000, 2000, 2000};
+  EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps_aabb(hb, mn, mx));
+}
+
 TEST_F(SM64ActorSweepTest, RepeatedSweepsAreIdempotent) {
   u32 mesh = build_simple_mesh();
   u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));

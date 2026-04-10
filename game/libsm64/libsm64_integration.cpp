@@ -404,9 +404,11 @@ MarioState LibSM64Manager::get_state() {
 namespace ac {  // "actor collision" — isolated from the rest of the file
 
 constexpr u32 PDRAW_ROOT_OFF = 108;
+constexpr u32 PDRAW_NODE_LIST_OFF = 112;        // process-drawable.node-list (basic)
 constexpr u32 CSHAPE_TRANS_OFF = 12;
 constexpr u32 CSHAPE_QUAT_OFF = 28;
 constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
+constexpr u32 PRIM_TRANSFORM_INDEX_OFF = 8;     // collide-shape-prim.transform-index (int8)
 constexpr u32 PRIM_MESH_MESH_OFF = 68;
 constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
 constexpr u32 PRIM_GROUP_PRIM_ARRAY_OFF = 76;
@@ -415,6 +417,18 @@ constexpr u32 MESH_NUM_VERTS_OFF = 8;
 constexpr u32 MESH_VERTEX_DATA_OFF = 12;
 constexpr u32 MESH_TRIS_OFF = 28;
 constexpr u32 MESH_TRI_SIZE = 8;  // collide-mesh-tri: 3 u8 indices + 1 u8 pad + 1 u32 pat
+// cspace-array (process-drawable.node-list) layout:
+//   inline-array-class header @ 0..15, then `data` (cspace inline) @ 16.
+//   Each cspace is 32 bytes (cspace-array heap-base = 32). Within a cspace:
+//     parent@0, joint@4, joint-num@8, geo@12, bone@16 (basic ptr), ...
+constexpr u32 CSPACE_ARRAY_DATA_OFF = 16;
+constexpr u32 CSPACE_SIZE = 32;
+constexpr u32 CSPACE_BONE_OFF = 16;
+// bone.transform is a 4x4 matrix at offset 0 of `bone`. Column-major:
+//   col0 (offset 0..15)  = X basis
+//   col1 (offset 16..31) = Y basis
+//   col2 (offset 32..47) = Z basis
+//   col3 (offset 48..63) = world translation (xyz, w)
 
 // Process-tree layout (unboxed-adjusted runtime offsets).
 // process-tree.child is at GOAL :offset 20 -> runtime 16
@@ -492,26 +506,6 @@ inline void quat_to_rot_mat3(const float q[4], float m[9]) {
   m[6] = 2.0f * (xz - wy);         m[7] = 2.0f * (yz + wx);        m[8] = 1.0f - 2.0f * (xx + yy);
 }
 
-inline void transform_point(const float rot[9], const float trans[3], const float local[3],
-                             float out[3]) {
-  out[0] = rot[0] * local[0] + rot[1] * local[1] + rot[2] * local[2] + trans[0];
-  out[1] = rot[3] * local[0] + rot[4] * local[1] + rot[5] * local[2] + trans[1];
-  out[2] = rot[6] * local[0] + rot[7] * local[1] + rot[8] * local[2] + trans[2];
-}
-
-// Has this actor moved enough to re-bake collision?
-// trans delta > 1 Jak unit OR quaternion dot < ~0.9999 (i.e. > ~1° rotation).
-inline bool transform_changed(const float a_trans[3], const float a_quat[4],
-                               const float b_trans[3], const float b_quat[4]) {
-  float dx = a_trans[0] - b_trans[0];
-  float dy = a_trans[1] - b_trans[1];
-  float dz = a_trans[2] - b_trans[2];
-  if (dx * dx + dy * dy + dz * dz > 1.0f) return true;
-  float dot = a_quat[0] * b_quat[0] + a_quat[1] * b_quat[1] + a_quat[2] * b_quat[2] +
-              a_quat[3] * b_quat[3];
-  return std::abs(dot) < 0.9999f;
-}
-
 // Walk the type-parent chain of a basic type, looking for `needle`.
 // Memoizes the result keyed by the starting type pointer.
 bool type_is_descendant(u8* ee_mem, u32 mem_size, u32 type_ptr, u32 needle,
@@ -537,14 +531,59 @@ bool type_is_descendant(u8* ee_mem, u32 mem_size, u32 type_ptr, u32 needle,
   return false;
 }
 
+// Decompose a row-major 3x3 rotation matrix into the (pitch, yaw, roll) Euler
+// angles in degrees that libsm64's `mtxf_rotate_zxy_and_translate` expects in
+// SM64ObjectTransform::eulerRotation. libsm64 internally negates degrees via
+// `CONVERT_ANGLE`, so we precompute -extracted_angle here.
+//
+// Matrix indices: R[row*3+col]. libsm64 builds:
+//   R[1][2] = -sin(pitch)            -> pitch = asin(-R[1][2])
+//   R[1][0] / R[1][1] = sz/cz        -> roll  = atan2(R[1][0], R[1][1])
+//   R[0][2] / R[2][2] = sy/cy        -> yaw   = atan2(R[0][2], R[2][2])
+inline void rot_mat3_to_zxy_euler_degrees(const float rot[9], float out_deg[3]) {
+  float r12 = rot[1 * 3 + 2];
+  float r10 = rot[1 * 3 + 0];
+  float r11 = rot[1 * 3 + 1];
+  float r02 = rot[0 * 3 + 2];
+  float r22 = rot[2 * 3 + 2];
+
+  float sx = -r12;
+  if (sx > 1.0f) sx = 1.0f;
+  if (sx < -1.0f) sx = -1.0f;
+
+  float pitch_rad = std::asin(sx);
+  float yaw_rad, roll_rad;
+  // Gimbal lock guard: when |sx| ~ 1, cos(pitch) ~ 0 and r10/r11 are tiny —
+  // fall back to extracting roll from the (0,0)/(0,1) cell.
+  if (std::abs(sx) > 0.9999f) {
+    roll_rad = 0.0f;
+    yaw_rad = std::atan2(-rot[2 * 3 + 0], rot[0 * 3 + 0]);
+  } else {
+    roll_rad = std::atan2(r10, r11);
+    yaw_rad = std::atan2(r02, r22);
+  }
+
+  constexpr float RAD_TO_DEG = 57.29577951308232f;
+  // Negate to cancel libsm64's CONVERT_ANGLE negation.
+  out_deg[0] = -pitch_rad * RAD_TO_DEG;
+  out_deg[1] = -yaw_rad * RAD_TO_DEG;
+  out_deg[2] = -roll_rad * RAD_TO_DEG;
+}
+
+// Quaternion variant — go via the row-major 3x3 helper above.
+inline void quat_to_zxy_euler_degrees(const float q[4], float out_deg[3]) {
+  float rot[9];
+  quat_to_rot_mat3(q, rot);
+  rot_mat3_to_zxy_euler_degrees(rot, out_deg);
+}
+
 // Extract a single collide-mesh's local-space triangles as SM64Surfaces,
-// transformed by (rot, trans_jak) into world-space SM64 units.
-// Returns false on any read/sanity failure; writes triangles into out_surfaces
-// and increments out_triangles_considered for each triangle the walker looked at
-// (regardless of whether it was emitted).
-bool extract_mesh_world(u8* ee_mem, u32 mem_size, u32 mesh_ptr, const float rot[9],
-                        const float trans_jak[3], std::vector<SM64Surface>& out_surfaces,
-                        int* out_triangles_considered = nullptr) {
+// in actor-local SM64 units (no rotation/translation applied). The caller
+// passes the world transform separately to libsm64 via SM64ObjectTransform —
+// this is what allows `sm64_surface_object_move` to compute platform velocity
+// each frame and carry Mario along with moving platforms.
+bool extract_mesh_local(u8* ee_mem, u32 mem_size, u32 mesh_ptr,
+                        std::vector<SM64Surface>& out_surfaces) {
   u32 num_tris = 0, num_verts = 0, vertex_data_ptr = 0;
   if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_TRIS_OFF, mem_size, num_tris)) return false;
   if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_VERTS_OFF, mem_size, num_verts)) return false;
@@ -552,26 +591,20 @@ bool extract_mesh_world(u8* ee_mem, u32 mem_size, u32 mesh_ptr, const float rot[
 
   if (num_tris == 0 || num_tris > MAX_TRIS_PER_MESH) return false;
   if (num_verts == 0 || num_verts > MAX_VERTS_PER_MESH) return false;
-
-  // Range-check the vertex buffer and the tri buffer up-front.
   if (!valid_ee_addr(vertex_data_ptr, num_verts * 16u, mem_size)) return false;
   if (!valid_ee_addr(mesh_ptr + MESH_TRIS_OFF, num_tris * MESH_TRI_SIZE, mem_size)) return false;
 
-  // Pre-read & transform all vertices into world-space SM64 units.
-  std::vector<std::array<int32_t, 3>> world_verts(num_verts);
+  std::vector<std::array<int32_t, 3>> local_verts(num_verts);
   for (u32 i = 0; i < num_verts; i++) {
     float local_v[4];
     if (!read_vec4(ee_mem, vertex_data_ptr + i * 16u, mem_size, local_v)) return false;
-    float world[3];
-    transform_point(rot, trans_jak, local_v, world);
-    world_verts[i][0] = static_cast<int32_t>(world[0] * JAK_TO_SM64_SCALE);
-    world_verts[i][1] = static_cast<int32_t>(world[1] * JAK_TO_SM64_SCALE);
-    world_verts[i][2] = static_cast<int32_t>(world[2] * JAK_TO_SM64_SCALE);
+    local_verts[i][0] = static_cast<int32_t>(local_v[0] * JAK_TO_SM64_SCALE);
+    local_verts[i][1] = static_cast<int32_t>(local_v[1] * JAK_TO_SM64_SCALE);
+    local_verts[i][2] = static_cast<int32_t>(local_v[2] * JAK_TO_SM64_SCALE);
   }
 
   out_surfaces.reserve(out_surfaces.size() + num_tris);
   for (u32 i = 0; i < num_tris; i++) {
-    if (out_triangles_considered) (*out_triangles_considered)++;
     u32 tri_addr = mesh_ptr + MESH_TRIS_OFF + i * MESH_TRI_SIZE;
     u8 i0 = ee_mem[tri_addr + 0];
     u8 i1 = ee_mem[tri_addr + 1];
@@ -584,19 +617,30 @@ bool extract_mesh_world(u8* ee_mem, u32 mem_size, u32 mesh_ptr, const float rot[
     s.terrain = 1;   // TERRAIN_STONE
     const u8 indices[3] = {i0, i1, i2};
     for (int v = 0; v < 3; v++) {
-      s.vertices[v][0] = world_verts[indices[v]][0];
-      s.vertices[v][1] = world_verts[indices[v]][1];
-      s.vertices[v][2] = world_verts[indices[v]][2];
+      s.vertices[v][0] = local_verts[indices[v]][0];
+      s.vertices[v][1] = local_verts[indices[v]][1];
+      s.vertices[v][2] = local_verts[indices[v]][2];
     }
     out_surfaces.push_back(s);
   }
   return true;
 }
 
-// Recursively collect mesh pointers from a collide-shape-prim hierarchy.
+// Per-prim collection result: identifies the prim, its collide-mesh, and
+// which bone (if any) the prim is attached to via transform-index. We need
+// the prim ptr separately because two prim-meshes in the same group can
+// share the same collide-mesh template — keying tracked actors by mesh_ptr
+// alone collapses them onto each other.
+struct CollectedPrim {
+  u32 prim_ptr;
+  u32 mesh_ptr;
+  int8_t transform_index;
+};
+
+// Recursively collect prim-mesh entries from a collide-shape-prim hierarchy.
 void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
                         u32 prim_mesh_type, u32 prim_group_type,
-                        std::vector<u32>& out_meshes, int depth = 0) {
+                        std::vector<CollectedPrim>& out_prims, int depth = 0) {
   if (prim_ptr == 0 || prim_ptr == false_val || depth > MAX_PRIM_DEPTH) return;
   u32 prim_type;
   if (!read_basic_type(ee_mem, prim_ptr, mem_size, prim_type)) return;
@@ -605,7 +649,13 @@ void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
     u32 mesh_ptr;
     if (!read_u32(ee_mem, prim_ptr + PRIM_MESH_MESH_OFF, mem_size, mesh_ptr)) return;
     if (mesh_ptr != 0 && mesh_ptr != false_val) {
-      out_meshes.push_back(mesh_ptr);
+      // transform-index is an int8 in collide-shape-prim. -2 = no joint
+      // attachment, >=0 = bone index into process-drawable.node-list.
+      int8_t xform_idx = -2;
+      if (valid_ee_addr(prim_ptr + PRIM_TRANSFORM_INDEX_OFF, 1, mem_size)) {
+        xform_idx = static_cast<int8_t>(ee_mem[prim_ptr + PRIM_TRANSFORM_INDEX_OFF]);
+      }
+      out_prims.push_back({prim_ptr, mesh_ptr, xform_idx});
     }
   } else if (prim_type == prim_group_type) {
     u32 num_prims;
@@ -616,10 +666,84 @@ void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
       if (!read_u32(ee_mem, prim_ptr + PRIM_GROUP_PRIM_ARRAY_OFF + i * 4, mem_size, child)) break;
       if (child == 0 || child == false_val) continue;
       collect_mesh_prims(ee_mem, mem_size, child, false_val, prim_mesh_type, prim_group_type,
-                         out_meshes, depth + 1);
+                         out_prims, depth + 1);
     }
   }
   // spheres and other prim types are ignored.
+}
+
+// Resolve a prim's per-prim world transform. For prims with transform_index >= 0
+// and a valid node-list, looks up `process-drawable.node-list[index].bone.transform`
+// and decomposes it into translation + rotation. For everything else falls back
+// to the actor's root cshape trans/quat (the existing behavior).
+//
+// out_pos is in Jak units; out_rot is row-major 3x3 (orthonormal rotation
+// extracted from the bone matrix, with scale stripped).
+bool compute_prim_world_transform(u8* ee_mem, u32 mem_size, u32 false_val, u32 pd_node,
+                                   int8_t transform_index, const float root_trans[3],
+                                   const float root_rot[9], float out_pos[3], float out_rot[9]) {
+  // Default: actor root.
+  auto use_root = [&]() {
+    out_pos[0] = root_trans[0];
+    out_pos[1] = root_trans[1];
+    out_pos[2] = root_trans[2];
+    std::memcpy(out_rot, root_rot, 9 * sizeof(float));
+    return true;
+  };
+
+  if (transform_index < 0) return use_root();
+
+  // process-drawable.node-list — basic ptr to a cspace-array.
+  u32 node_list = 0;
+  if (!read_u32(ee_mem, pd_node + PDRAW_NODE_LIST_OFF, mem_size, node_list)) return false;
+  if (node_list == 0 || node_list == false_val) return use_root();
+  if (!valid_basic_ptr(node_list, mem_size)) return use_root();
+
+  // cspace[i] starts at node_list + 16 + i*32. cspace.bone is a basic ptr
+  // at +16 within the cspace struct.
+  u32 cspace_addr =
+      node_list + CSPACE_ARRAY_DATA_OFF + static_cast<u32>(transform_index) * CSPACE_SIZE;
+  u32 bone_ptr = 0;
+  if (!read_u32(ee_mem, cspace_addr + CSPACE_BONE_OFF, mem_size, bone_ptr)) return use_root();
+  if (bone_ptr == 0 || bone_ptr == false_val) return use_root();
+  // bone is a structure (not a basic), so no -4 type tag — just check the
+  // raw matrix range is in-bounds.
+  if (!valid_ee_addr(bone_ptr, 64, mem_size)) return use_root();
+
+  // bone.transform: 4x4 column-major, 16 floats. Sanity-check finiteness.
+  float m[16];
+  std::memcpy(m, ee_mem + bone_ptr, 64);
+  for (int i = 0; i < 16; i++) {
+    if (!std::isfinite(m[i])) return use_root();
+  }
+
+  // Translation = column 3 (xyz). m[col*4 + row].
+  out_pos[0] = m[3 * 4 + 0];
+  out_pos[1] = m[3 * 4 + 1];
+  out_pos[2] = m[3 * 4 + 2];
+
+  // Build row-major 3x3 rotation from columns 0/1/2 of the bone matrix.
+  // out_rot[row*3 + col] = m[col*4 + row]
+  for (int r = 0; r < 3; r++) {
+    for (int c = 0; c < 3; c++) {
+      out_rot[r * 3 + c] = m[c * 4 + r];
+    }
+  }
+
+  // Strip scale by normalizing each column (each column is a basis vector).
+  // Bone matrices in jak1 are typically scale=1 anyway, but be safe.
+  for (int c = 0; c < 3; c++) {
+    float lx = out_rot[0 * 3 + c];
+    float ly = out_rot[1 * 3 + c];
+    float lz = out_rot[2 * 3 + c];
+    float len2 = lx * lx + ly * ly + lz * lz;
+    if (len2 < 1e-12f || !std::isfinite(len2)) return use_root();
+    float inv = 1.0f / std::sqrt(len2);
+    out_rot[0 * 3 + c] = lx * inv;
+    out_rot[1 * 3 + c] = ly * inv;
+    out_rot[2 * 3 + c] = lz * inv;
+  }
+  return true;
 }
 
 }  // namespace ac
@@ -668,11 +792,13 @@ struct WalkCtx {
   LibSM64Manager::TestSweepResult& result;
 };
 
-// Compose a tracking key from (process-drawable address, mesh address). Two
-// different actor instances can share the same collide-mesh template, so we
-// can't key by mesh alone.
-inline uint64_t make_actor_key(u32 pd_node, u32 mesh_ptr) {
-  return (static_cast<uint64_t>(pd_node) << 32) | static_cast<uint64_t>(mesh_ptr);
+// Compose a tracking key from (process-drawable address, collide-shape-prim
+// address). We key on the prim — not the mesh — because two prims inside the
+// same prim-group can share a single collide-mesh template (e.g. mirrored
+// sub-pieces) yet need their own libsm64 surface object because their
+// `transform-index` (and therefore world transform) differs.
+inline uint64_t make_actor_key(u32 pd_node, u32 prim_ptr) {
+  return (static_cast<uint64_t>(pd_node) << 32) | static_cast<uint64_t>(prim_ptr);
 }
 
 // Perform one actor-collision sweep. Returns normally on any expected failure
@@ -785,10 +911,10 @@ void do_sweep(WalkCtx& c) {
     if (!read_u32(c.ee_mem, root + CSHAPE_ROOT_PRIM_OFF, c.mem_size, root_prim)) continue;
     if (root_prim == 0 || root_prim == c.false_val) continue;
 
-    std::vector<u32> mesh_ptrs;
+    std::vector<CollectedPrim> prims;
     collect_mesh_prims(c.ee_mem, c.mem_size, root_prim, c.false_val, c.prim_mesh_type,
-                       c.prim_group_type, mesh_ptrs);
-    if (mesh_ptrs.empty()) continue;
+                       c.prim_group_type, prims);
+    if (prims.empty()) continue;
 
     // Read the actor's world transform.
     float trans[4], quat[4];
@@ -805,28 +931,60 @@ void do_sweep(WalkCtx& c) {
       quat[3] = 1.0f;
     }
 
-    float rot[9];
-    quat_to_rot_mat3(quat, rot);
+    // Pre-compute the actor root rotation matrix once — used as the fallback
+    // for prims that aren't bone-attached.
+    float root_rot[9];
+    quat_to_rot_mat3(quat, root_rot);
 
-    for (u32 mesh_ptr : mesh_ptrs) {
+    for (const CollectedPrim& cp : prims) {
+      u32 prim_ptr = cp.prim_ptr;
+      u32 mesh_ptr = cp.mesh_ptr;
+
       // Skip meshes we've already decided are broken.
       if (c.broken_meshes.count(mesh_ptr)) continue;
 
-      // Key by (process-drawable, mesh) so two actor instances that share the
-      // same collide-mesh template each get their own libsm64 surface object.
-      uint64_t key = make_actor_key(node, mesh_ptr);
+      // Key by (process-drawable, prim) so multiple prims inside one
+      // prim-group that share a mesh template each get their own libsm64
+      // surface object. Each bone-attached prim shows up as a distinct
+      // entry — effectively `<actor>-1`, `<actor>-2`, etc.
+      uint64_t key = make_actor_key(node, prim_ptr);
       auto& tracked = c.tracked_actors[key];
       tracked.seen_this_frame = true;
 
-      // Fast-path: already have an object and transform hasn't changed.
-      if (tracked.has_obj && !transform_changed(trans, quat, tracked.last_trans, tracked.last_quat)) {
+      // Resolve this prim's per-prim world transform. For prims attached to
+      // a bone (transform_index >= 0) this walks the actor's node-list and
+      // pulls the bone matrix; otherwise it falls back to the actor root.
+      float prim_pos[3];
+      float prim_rot[9];
+      if (!compute_prim_world_transform(c.ee_mem, c.mem_size, c.false_val, node,
+                                         cp.transform_index, trans, root_rot, prim_pos,
+                                         prim_rot)) {
+        continue;
+      }
+
+      // Build the SM64ObjectTransform for this prim. For root-relative prims
+      // this is the actor pose; for bone-attached prims it's the bone's world
+      // pose pulled from the cspace-array. In either case we use the
+      // sm64_surface_object_move flow (NOT destroy/recreate) so libsm64 can
+      // compute platform velocity from the per-frame delta and carry Mario.
+      SM64ObjectTransform xform{};
+      xform.position[0] = prim_pos[0] * JAK_TO_SM64_SCALE;
+      xform.position[1] = prim_pos[1] * JAK_TO_SM64_SCALE;
+      xform.position[2] = prim_pos[2] * JAK_TO_SM64_SCALE;
+      rot_mat3_to_zxy_euler_degrees(prim_rot, xform.eulerRotation);
+
+      if (tracked.has_obj) {
+        if (!c.dry_run) {
+          sm64_surface_object_move(tracked.sm64_obj_id, &xform);
+        }
+        std::memcpy(tracked.last_trans, prim_pos, 12);
         continue;
       }
 
       if (created_this_frame >= MAX_ACTOR_SURFACE_OBJECTS) break;
 
       std::vector<SM64Surface> surfaces;
-      if (!extract_mesh_world(c.ee_mem, c.mem_size, mesh_ptr, rot, trans, surfaces, nullptr)) {
+      if (!extract_mesh_local(c.ee_mem, c.mem_size, mesh_ptr, surfaces)) {
         c.broken_meshes.insert(mesh_ptr);
         c.result.errors++;
         continue;
@@ -840,28 +998,14 @@ void do_sweep(WalkCtx& c) {
       c.result.triangles_extracted += (int)surfaces.size();
 
       if (!c.dry_run) {
-        // If we already had an object for this (actor, mesh) pair, destroy it
-        // (world-space vertices changed so a pure move() isn't enough).
-        if (tracked.has_obj) {
-          sm64_surface_object_delete(tracked.sm64_obj_id);
-          tracked.sm64_obj_id = 0;
-          tracked.has_obj = false;
-        }
-
         SM64SurfaceObject obj{};
-        obj.transform.position[0] = 0.0f;
-        obj.transform.position[1] = 0.0f;
-        obj.transform.position[2] = 0.0f;
-        obj.transform.eulerRotation[0] = 0.0f;
-        obj.transform.eulerRotation[1] = 0.0f;
-        obj.transform.eulerRotation[2] = 0.0f;
+        obj.transform = xform;
         obj.surfaceCount = static_cast<uint32_t>(surfaces.size());
         obj.surfaces = surfaces.data();
         tracked.sm64_obj_id = sm64_surface_object_create(&obj);
         tracked.has_obj = true;
       }
-      std::memcpy(tracked.last_trans, trans, 12);
-      std::memcpy(tracked.last_quat, quat, 16);
+      std::memcpy(tracked.last_trans, prim_pos, 12);
       created_this_frame++;
     }
   }

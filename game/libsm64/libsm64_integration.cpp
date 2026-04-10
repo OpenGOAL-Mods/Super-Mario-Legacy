@@ -5,6 +5,8 @@
 
 #include "libsm64_integration.h"
 
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 
@@ -81,6 +83,12 @@ bool LibSM64Manager::init(const std::string& rom_path) {
 
 void LibSM64Manager::shutdown() {
   if (!m_initialized) return;
+
+  // Drop any tracked actor collision objects before terminating libsm64.
+  clear_actor_collision();
+  m_type_cache = {};
+  m_is_process_drawable_cache.clear();
+  m_is_collide_shape_cache.clear();
 
   if (m_mario_id >= 0) {
     sm64_mario_delete(m_mario_id);
@@ -363,6 +371,584 @@ MarioGeometry LibSM64Manager::get_geometry() {
 MarioState LibSM64Manager::get_state() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
   return m_state;
+}
+
+// ========================================================================
+// Dynamic actor collision
+// ========================================================================
+//
+// Every "tick" we walk the Jak process tree rooted at *active-pool*, find
+// process-drawables whose root is a collide-shape (or subclass) that owns a
+// collide-mesh (directly via collide-shape-prim-mesh, or via a nested
+// collide-shape-prim-group). For each such mesh we bake its local vertices
+// into world space using the actor's current trans+quat and register it with
+// libsm64 via sm64_surface_object_create. Subsequent frames re-bake on motion
+// and either move the existing object (same signature: skip) or delete+recreate.
+//
+// GOAL runtime offsets — remember boxed (basic) types subtract 4 from the
+// declared offset, see goalc/compiler/compilation/Type.cpp:1632.
+//
+//   process-drawable.root                :offset 112  -> runtime 108
+//   collide-shape.trans (from trs)       :offset 16   -> runtime 12
+//   collide-shape.quat  (from trsq)      :offset 32   -> runtime 28
+//   collide-shape.root-prim              :offset 160  -> runtime 156
+//   collide-shape-prim.prim-core         :offset 16   -> runtime 12 (inline)
+//   collide-shape-prim-mesh.mesh         :offset 72   -> runtime 68
+//   collide-shape-prim-group.num-prims   :offset 72   -> runtime 68
+//   collide-shape-prim-group.prim[0]     :offset 80   -> runtime 76
+//   collide-mesh.num-tris                :offset 8    -> runtime 4
+//   collide-mesh.num-verts               :offset 12   -> runtime 8
+//   collide-mesh.vertex-data             :offset 16   -> runtime 12 (pointer to inline array)
+//   collide-mesh.tris (inline array)     :offset 32   -> runtime 28 (in-place, 8 bytes each)
+
+namespace ac {  // "actor collision" — isolated from the rest of the file
+
+constexpr u32 PDRAW_ROOT_OFF = 108;
+constexpr u32 CSHAPE_TRANS_OFF = 12;
+constexpr u32 CSHAPE_QUAT_OFF = 28;
+constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
+constexpr u32 PRIM_MESH_MESH_OFF = 68;
+constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
+constexpr u32 PRIM_GROUP_PRIM_ARRAY_OFF = 76;
+constexpr u32 MESH_NUM_TRIS_OFF = 4;
+constexpr u32 MESH_NUM_VERTS_OFF = 8;
+constexpr u32 MESH_VERTEX_DATA_OFF = 12;
+constexpr u32 MESH_TRIS_OFF = 28;
+constexpr u32 MESH_TRI_SIZE = 8;  // collide-mesh-tri: 3 u8 indices + 1 u8 pad + 1 u32 pat
+
+// Process-tree layout (unboxed-adjusted runtime offsets).
+// process-tree.child is at GOAL :offset 20 -> runtime 16
+// process-tree.brother is at GOAL :offset 16 -> runtime 12
+constexpr u32 PTREE_BROTHER_OFF = 12;
+constexpr u32 PTREE_CHILD_OFF = 16;
+
+// Limits, tunable
+constexpr int MAX_PROCESS_TREE_NODES = 4096;     // safety cap on DFS
+constexpr int MAX_ACTOR_SURFACE_OBJECTS = 32;    // cap new objects per frame
+constexpr u32 MAX_VERTS_PER_MESH = 256;          // collide-mesh uses u8 indices
+constexpr u32 MAX_TRIS_PER_MESH = 512;
+constexpr int MAX_PRIM_DEPTH = 8;
+constexpr u32 MAX_PRIMS_IN_GROUP = 64;
+constexpr int MAX_TYPE_CHAIN_DEPTH = 32;
+
+// Is `addr` a plausible EE-memory pointer that can hold `size` bytes?
+// Rejects null/tiny/unaligned-ish pointers and anything past the end.
+inline bool valid_ee_addr(u32 addr, u32 size, u32 mem_size) {
+  if (addr < 16) return false;                        // no real GOAL object lives this low
+  if (size == 0) return false;
+  if (addr > mem_size) return false;
+  if (size > mem_size) return false;
+  if (addr + size > mem_size) return false;            // also catches a+s overflow given a<mem_size
+  return true;
+}
+
+// A u32 read that bails on out-of-bounds.
+inline bool read_u32(u8* mem, u32 addr, u32 mem_size, u32& out) {
+  if (!valid_ee_addr(addr, 4, mem_size)) return false;
+  std::memcpy(&out, mem + addr, 4);
+  return true;
+}
+
+inline bool read_vec4(u8* mem, u32 addr, u32 mem_size, float out[4]) {
+  if (!valid_ee_addr(addr, 16, mem_size)) return false;
+  std::memcpy(out, mem + addr, 16);
+  return true;
+}
+
+// Read the type pointer for a basic object (stored at basic_ptr - 4).
+inline bool read_basic_type(u8* mem, u32 basic_ptr, u32 mem_size, u32& type_out) {
+  if (basic_ptr < 16) return false;                    // same floor as valid_ee_addr
+  return read_u32(mem, basic_ptr - 4, mem_size, type_out);
+}
+
+// Build a rotation matrix from a unit quaternion (x, y, z, w).
+// Result is row-major: out = M * v. Translation is added separately.
+inline void quat_to_rot_mat3(const float q[4], float m[9]) {
+  float x = q[0], y = q[1], z = q[2], w = q[3];
+  float xx = x * x, yy = y * y, zz = z * z;
+  float xy = x * y, xz = x * z, yz = y * z;
+  float wx = w * x, wy = w * y, wz = w * z;
+  m[0] = 1.0f - 2.0f * (yy + zz);  m[1] = 2.0f * (xy - wz);        m[2] = 2.0f * (xz + wy);
+  m[3] = 2.0f * (xy + wz);         m[4] = 1.0f - 2.0f * (xx + zz); m[5] = 2.0f * (yz - wx);
+  m[6] = 2.0f * (xz - wy);         m[7] = 2.0f * (yz + wx);        m[8] = 1.0f - 2.0f * (xx + yy);
+}
+
+inline void transform_point(const float rot[9], const float trans[3], const float local[3],
+                             float out[3]) {
+  out[0] = rot[0] * local[0] + rot[1] * local[1] + rot[2] * local[2] + trans[0];
+  out[1] = rot[3] * local[0] + rot[4] * local[1] + rot[5] * local[2] + trans[1];
+  out[2] = rot[6] * local[0] + rot[7] * local[1] + rot[8] * local[2] + trans[2];
+}
+
+// Has this actor moved enough to re-bake collision?
+// trans delta > 1 Jak unit OR quaternion dot < ~0.9999 (i.e. > ~1° rotation).
+inline bool transform_changed(const float a_trans[3], const float a_quat[4],
+                               const float b_trans[3], const float b_quat[4]) {
+  float dx = a_trans[0] - b_trans[0];
+  float dy = a_trans[1] - b_trans[1];
+  float dz = a_trans[2] - b_trans[2];
+  if (dx * dx + dy * dy + dz * dz > 1.0f) return true;
+  float dot = a_quat[0] * b_quat[0] + a_quat[1] * b_quat[1] + a_quat[2] * b_quat[2] +
+              a_quat[3] * b_quat[3];
+  return std::abs(dot) < 0.9999f;
+}
+
+// Walk the type-parent chain of a basic type, looking for `needle`.
+// Memoizes the result keyed by the starting type pointer.
+bool type_is_descendant(u8* ee_mem, u32 mem_size, u32 type_ptr, u32 needle,
+                        std::unordered_map<u32, bool>& cache) {
+  if (type_ptr == 0 || needle == 0) return false;
+  auto it = cache.find(type_ptr);
+  if (it != cache.end()) return it->second;
+
+  u32 cur = type_ptr;
+  for (int i = 0; i < MAX_TYPE_CHAIN_DEPTH; i++) {
+    if (cur == 0) break;
+    if (cur == needle) {
+      cache[type_ptr] = true;
+      return true;
+    }
+    // Type struct (basic): symbol @4->0, parent @8->4 after BASIC_OFFSET.
+    u32 parent;
+    if (!read_u32(ee_mem, cur + 4, mem_size, parent)) break;
+    if (parent == cur) break;  // self-loop (object's parent)
+    cur = parent;
+  }
+  cache[type_ptr] = false;
+  return false;
+}
+
+// Extract a single collide-mesh's local-space triangles as SM64Surfaces,
+// transformed by (rot, trans_jak) into world-space SM64 units.
+// Returns false on any read/sanity failure; writes triangles into out_surfaces
+// and increments out_triangles_considered for each triangle the walker looked at
+// (regardless of whether it was emitted).
+bool extract_mesh_world(u8* ee_mem, u32 mem_size, u32 mesh_ptr, const float rot[9],
+                        const float trans_jak[3], std::vector<SM64Surface>& out_surfaces,
+                        int* out_triangles_considered = nullptr) {
+  u32 num_tris = 0, num_verts = 0, vertex_data_ptr = 0;
+  if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_TRIS_OFF, mem_size, num_tris)) return false;
+  if (!read_u32(ee_mem, mesh_ptr + MESH_NUM_VERTS_OFF, mem_size, num_verts)) return false;
+  if (!read_u32(ee_mem, mesh_ptr + MESH_VERTEX_DATA_OFF, mem_size, vertex_data_ptr)) return false;
+
+  if (num_tris == 0 || num_tris > MAX_TRIS_PER_MESH) return false;
+  if (num_verts == 0 || num_verts > MAX_VERTS_PER_MESH) return false;
+
+  // Range-check the vertex buffer and the tri buffer up-front.
+  if (!valid_ee_addr(vertex_data_ptr, num_verts * 16u, mem_size)) return false;
+  if (!valid_ee_addr(mesh_ptr + MESH_TRIS_OFF, num_tris * MESH_TRI_SIZE, mem_size)) return false;
+
+  // Pre-read & transform all vertices into world-space SM64 units.
+  std::vector<std::array<int32_t, 3>> world_verts(num_verts);
+  for (u32 i = 0; i < num_verts; i++) {
+    float local_v[4];
+    if (!read_vec4(ee_mem, vertex_data_ptr + i * 16u, mem_size, local_v)) return false;
+    float world[3];
+    transform_point(rot, trans_jak, local_v, world);
+    world_verts[i][0] = static_cast<int32_t>(world[0] * JAK_TO_SM64_SCALE);
+    world_verts[i][1] = static_cast<int32_t>(world[1] * JAK_TO_SM64_SCALE);
+    world_verts[i][2] = static_cast<int32_t>(world[2] * JAK_TO_SM64_SCALE);
+  }
+
+  out_surfaces.reserve(out_surfaces.size() + num_tris);
+  for (u32 i = 0; i < num_tris; i++) {
+    if (out_triangles_considered) (*out_triangles_considered)++;
+    u32 tri_addr = mesh_ptr + MESH_TRIS_OFF + i * MESH_TRI_SIZE;
+    u8 i0 = ee_mem[tri_addr + 0];
+    u8 i1 = ee_mem[tri_addr + 1];
+    u8 i2 = ee_mem[tri_addr + 2];
+    if (i0 >= num_verts || i1 >= num_verts || i2 >= num_verts) continue;
+
+    SM64Surface s{};
+    s.type = 0;      // SURFACE_DEFAULT
+    s.force = 0;
+    s.terrain = 1;   // TERRAIN_STONE
+    const u8 indices[3] = {i0, i1, i2};
+    for (int v = 0; v < 3; v++) {
+      s.vertices[v][0] = world_verts[indices[v]][0];
+      s.vertices[v][1] = world_verts[indices[v]][1];
+      s.vertices[v][2] = world_verts[indices[v]][2];
+    }
+    out_surfaces.push_back(s);
+  }
+  return true;
+}
+
+// Recursively collect mesh pointers from a collide-shape-prim hierarchy.
+void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
+                        u32 prim_mesh_type, u32 prim_group_type,
+                        std::vector<u32>& out_meshes, int depth = 0) {
+  if (prim_ptr == 0 || prim_ptr == false_val || depth > MAX_PRIM_DEPTH) return;
+  u32 prim_type;
+  if (!read_basic_type(ee_mem, prim_ptr, mem_size, prim_type)) return;
+
+  if (prim_type == prim_mesh_type) {
+    u32 mesh_ptr;
+    if (!read_u32(ee_mem, prim_ptr + PRIM_MESH_MESH_OFF, mem_size, mesh_ptr)) return;
+    if (mesh_ptr != 0 && mesh_ptr != false_val) {
+      out_meshes.push_back(mesh_ptr);
+    }
+  } else if (prim_type == prim_group_type) {
+    u32 num_prims;
+    if (!read_u32(ee_mem, prim_ptr + PRIM_GROUP_NUM_PRIMS_OFF, mem_size, num_prims)) return;
+    if (num_prims == 0 || num_prims > MAX_PRIMS_IN_GROUP) return;
+    for (u32 i = 0; i < num_prims; i++) {
+      u32 child;
+      if (!read_u32(ee_mem, prim_ptr + PRIM_GROUP_PRIM_ARRAY_OFF + i * 4, mem_size, child)) break;
+      if (child == 0 || child == false_val) continue;
+      collect_mesh_prims(ee_mem, mem_size, child, false_val, prim_mesh_type, prim_group_type,
+                         out_meshes, depth + 1);
+    }
+  }
+  // spheres and other prim types are ignored.
+}
+
+}  // namespace ac
+
+void LibSM64Manager::clear_actor_collision() {
+  if (m_tracked_actors.empty()) {
+    m_broken_meshes.clear();
+    return;
+  }
+  for (auto& [mesh_addr, tracked] : m_tracked_actors) {
+    if (tracked.has_obj) {
+      sm64_surface_object_delete(tracked.sm64_obj_id);
+    }
+  }
+  m_tracked_actors.clear();
+  m_broken_meshes.clear();
+  lg::info("[libsm64] Cleared all actor surface objects");
+}
+
+// --------------------------------------------------------------------------
+// The real per-frame entry point and a test-visible variant.
+// --------------------------------------------------------------------------
+//
+// Both share the same walker. The "real" version pulls parameters from the
+// live kernel via find_symbol_from_c; the test variant takes everything as
+// explicit arguments so unit tests can drive it against a synthetic buffer.
+
+namespace {
+
+// Internal walker state passed around by the sweep routine.
+struct WalkCtx {
+  u8* ee_mem;
+  u32 mem_size;
+  u32 false_val;
+  u32 active_pool_sym;
+  u32 process_drawable_type;
+  u32 collide_shape_type;
+  u32 prim_mesh_type;
+  u32 prim_group_type;
+  bool dry_run;
+  int& diag_logs_remaining;
+  std::unordered_map<u32, bool>& is_process_drawable_cache;
+  std::unordered_map<u32, bool>& is_collide_shape_cache;
+  std::unordered_map<u32, LibSM64Manager::TrackedActor>& tracked_actors;
+  std::unordered_set<u32>& broken_meshes;
+  LibSM64Manager::TestSweepResult& result;
+};
+
+// Perform one actor-collision sweep. Returns normally on any expected failure
+// (unreadable memory, missing types, etc.) — the walker never throws or crashes.
+void do_sweep(WalkCtx& c) {
+  using namespace ac;
+
+  if (c.ee_mem == nullptr) return;
+  if (c.mem_size < 1024) return;
+  if (c.false_val == 0) return;
+  if (c.active_pool_sym == 0 || c.process_drawable_type == 0 || c.collide_shape_type == 0 ||
+      c.prim_mesh_type == 0 || c.prim_group_type == 0) {
+    return;
+  }
+
+  // Read the *active-pool* symbol value (= pointer to the active pool process-tree).
+  u32 root_process;
+  if (!read_u32(c.ee_mem, c.active_pool_sym, c.mem_size, root_process)) return;
+  if (root_process == 0 || root_process == c.false_val) return;
+
+  // Start DFS from the active pool's first child (the pool itself is a
+  // process-tree basic, not a process-drawable we want to extract).
+  std::vector<u32> stack;
+  stack.reserve(256);
+  {
+    u32 first_child;
+    if (read_u32(c.ee_mem, root_process + PTREE_CHILD_OFF, c.mem_size, first_child) &&
+        first_child != 0 && first_child != c.false_val) {
+      stack.push_back(first_child);
+    }
+  }
+
+  // Reset per-frame seen flags on previously tracked actors.
+  for (auto& [k, v] : c.tracked_actors) v.seen_this_frame = false;
+
+  std::unordered_set<u32> visited_set;  // cycle guard: never re-enqueue a node
+  visited_set.reserve(512);
+
+  int created_this_frame = 0;
+
+  while (!stack.empty() && c.result.process_tree_nodes_visited < MAX_PROCESS_TREE_NODES) {
+    u32 node = stack.back();
+    stack.pop_back();
+
+    if (node == 0 || node == c.false_val) continue;
+    if (!visited_set.insert(node).second) continue;   // already walked
+    c.result.process_tree_nodes_visited++;
+
+    // Read brother/child even if this node has nothing for us — we still need to
+    // traverse siblings/children. Validate them as plausible EE addresses BEFORE
+    // pushing onto the stack so we never enqueue an OOB pointer (which would
+    // cost us a node-visit slot and pollute the visited_set).
+    constexpr u32 MIN_NODE_FOOTPRINT = 128;  // a process-tree node is much larger
+    u32 brother = 0, child = 0;
+    read_u32(c.ee_mem, node + PTREE_BROTHER_OFF, c.mem_size, brother);
+    read_u32(c.ee_mem, node + PTREE_CHILD_OFF, c.mem_size, child);
+    if (brother != 0 && brother != c.false_val &&
+        valid_ee_addr(brother, MIN_NODE_FOOTPRINT, c.mem_size) &&
+        visited_set.find(brother) == visited_set.end()) {
+      stack.push_back(brother);
+    }
+    if (child != 0 && child != c.false_val &&
+        valid_ee_addr(child, MIN_NODE_FOOTPRINT, c.mem_size) &&
+        visited_set.find(child) == visited_set.end()) {
+      stack.push_back(child);
+    }
+
+    // Only process-drawable nodes have a useful root; type-check via parent chain.
+    u32 node_type;
+    if (!read_basic_type(c.ee_mem, node, c.mem_size, node_type)) continue;
+    if (!type_is_descendant(c.ee_mem, c.mem_size, node_type, c.process_drawable_type,
+                             c.is_process_drawable_cache)) {
+      continue;
+    }
+    c.result.process_drawables_seen++;
+
+    // Read root (collide-shape or subclass) from process-drawable @108.
+    u32 root;
+    if (!read_u32(c.ee_mem, node + PDRAW_ROOT_OFF, c.mem_size, root)) continue;
+    if (root == 0 || root == c.false_val) continue;
+
+    u32 root_type;
+    if (!read_basic_type(c.ee_mem, root, c.mem_size, root_type)) continue;
+    if (!type_is_descendant(c.ee_mem, c.mem_size, root_type, c.collide_shape_type,
+                             c.is_collide_shape_cache)) {
+      continue;
+    }
+
+    // Read root-prim and walk the prim tree to find any meshes.
+    u32 root_prim;
+    if (!read_u32(c.ee_mem, root + CSHAPE_ROOT_PRIM_OFF, c.mem_size, root_prim)) continue;
+    if (root_prim == 0 || root_prim == c.false_val) continue;
+
+    std::vector<u32> mesh_ptrs;
+    collect_mesh_prims(c.ee_mem, c.mem_size, root_prim, c.false_val, c.prim_mesh_type,
+                       c.prim_group_type, mesh_ptrs);
+    if (mesh_ptrs.empty()) continue;
+
+    // Read the actor's world transform.
+    float trans[4], quat[4];
+    if (!read_vec4(c.ee_mem, root + CSHAPE_TRANS_OFF, c.mem_size, trans)) continue;
+    if (!read_vec4(c.ee_mem, root + CSHAPE_QUAT_OFF, c.mem_size, quat)) continue;
+
+    // Sanity: finite trans, unit-ish quaternion. Replace garbage rotations with identity.
+    if (!std::isfinite(trans[0]) || !std::isfinite(trans[1]) || !std::isfinite(trans[2])) {
+      continue;
+    }
+    float qlen2 = quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3];
+    if (!std::isfinite(qlen2) || qlen2 < 0.5f || qlen2 > 1.5f) {
+      quat[0] = quat[1] = quat[2] = 0.0f;
+      quat[3] = 1.0f;
+    }
+
+    float rot[9];
+    quat_to_rot_mat3(quat, rot);
+
+    for (u32 mesh_ptr : mesh_ptrs) {
+      // Skip meshes we've already decided are broken.
+      if (c.broken_meshes.count(mesh_ptr)) continue;
+
+      auto& tracked = c.tracked_actors[mesh_ptr];
+      tracked.seen_this_frame = true;
+
+      // Fast-path: already have an object and transform hasn't changed.
+      if (tracked.has_obj && !transform_changed(trans, quat, tracked.last_trans, tracked.last_quat)) {
+        continue;
+      }
+
+      if (created_this_frame >= MAX_ACTOR_SURFACE_OBJECTS) break;
+
+      // Rebuild world-space triangles.
+      std::vector<SM64Surface> surfaces;
+      int tris_seen = 0;
+      if (!extract_mesh_world(c.ee_mem, c.mem_size, mesh_ptr, rot, trans, surfaces, &tris_seen)) {
+        c.broken_meshes.insert(mesh_ptr);
+        c.result.errors++;
+        if (c.diag_logs_remaining > 0) {
+          lg::warn("[libsm64] actor mesh @0x{:X}: extract_mesh_world failed, blacklisted",
+                   mesh_ptr);
+          c.diag_logs_remaining--;
+        }
+        continue;
+      }
+      if (surfaces.empty()) {
+        c.broken_meshes.insert(mesh_ptr);
+        continue;
+      }
+
+      c.result.meshes_found++;
+      c.result.triangles_extracted += (int)surfaces.size();
+
+      if (!c.dry_run) {
+        // If we already had an object for this mesh, destroy it (world-space
+        // vertices changed so a pure move() isn't enough).
+        if (tracked.has_obj) {
+          sm64_surface_object_delete(tracked.sm64_obj_id);
+          tracked.sm64_obj_id = 0;
+          tracked.has_obj = false;
+        }
+
+        SM64SurfaceObject obj{};
+        obj.transform.position[0] = 0.0f;
+        obj.transform.position[1] = 0.0f;
+        obj.transform.position[2] = 0.0f;
+        obj.transform.eulerRotation[0] = 0.0f;
+        obj.transform.eulerRotation[1] = 0.0f;
+        obj.transform.eulerRotation[2] = 0.0f;
+        obj.surfaceCount = static_cast<uint32_t>(surfaces.size());
+        obj.surfaces = surfaces.data();
+
+        tracked.sm64_obj_id = sm64_surface_object_create(&obj);
+        tracked.has_obj = true;
+      }
+      std::memcpy(tracked.last_trans, trans, 12);
+      std::memcpy(tracked.last_quat, quat, 16);
+      created_this_frame++;
+
+      if (c.diag_logs_remaining > 0) {
+        lg::info(
+            "[libsm64] actor mesh @0x{:X}: {} tris (of {} considered), trans=({:.0f},{:.0f},{:.0f}), dry_run={}, obj_id={}",
+            mesh_ptr, surfaces.size(), tris_seen, trans[0], trans[1], trans[2],
+            c.dry_run ? 1 : 0, tracked.has_obj ? (int)tracked.sm64_obj_id : -1);
+        c.diag_logs_remaining--;
+      }
+    }
+  }
+
+  // Reap actors that disappeared this frame.
+  for (auto it = c.tracked_actors.begin(); it != c.tracked_actors.end();) {
+    if (!it->second.seen_this_frame) {
+      if (it->second.has_obj && !c.dry_run) {
+        sm64_surface_object_delete(it->second.sm64_obj_id);
+      }
+      it = c.tracked_actors.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+}  // namespace
+
+void LibSM64Manager::update_actor_collision(u8* ee_mem) {
+  if (!m_initialized || !dynamic_actor_collision || !ee_mem) return;
+
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  // Lazily populate the type cache via find_symbol_from_c (read-only — does NOT
+  // allocate new symbol slots). Any missing symbol → silently bail; we'll retry
+  // next frame.
+  if (!m_type_cache.ready) {
+    auto pd = jak1::find_symbol_from_c("process-drawable");
+    auto cs = jak1::find_symbol_from_c("collide-shape");
+    auto pm = jak1::find_symbol_from_c("collide-shape-prim-mesh");
+    auto pg = jak1::find_symbol_from_c("collide-shape-prim-group");
+    auto ap = jak1::find_symbol_from_c("*active-pool*");
+    if (pd.offset == 0 || cs.offset == 0 || pm.offset == 0 || pg.offset == 0 ||
+        ap.offset == 0) {
+      return;  // symbol table doesn't have one of our keys yet; retry next frame
+    }
+    u32 pd_val = pd->value;
+    u32 cs_val = cs->value;
+    u32 pm_val = pm->value;
+    u32 pg_val = pg->value;
+    if (pd_val == 0 || pd_val == false_val || cs_val == 0 || cs_val == false_val ||
+        pm_val == 0 || pm_val == false_val || pg_val == 0 || pg_val == false_val) {
+      return;  // types symbols exist but haven't been bound to Type structs yet
+    }
+    m_type_cache.process_drawable = pd_val;
+    m_type_cache.collide_shape = cs_val;
+    m_type_cache.prim_mesh = pm_val;
+    m_type_cache.prim_group = pg_val;
+    m_type_cache.active_pool_sym = ap.offset;
+    m_type_cache.ready = true;
+    lg::info("[libsm64] Actor collision type cache ready: pd=0x{:X} cs=0x{:X} pm=0x{:X} pg=0x{:X} ap_sym=0x{:X} false=0x{:X}",
+             pd_val, cs_val, pm_val, pg_val, ap.offset, false_val);
+  }
+
+  TestSweepResult result;
+  WalkCtx ctx{
+      ee_mem,
+      EE_MAIN_MEM_SIZE,
+      false_val,
+      m_type_cache.active_pool_sym,
+      m_type_cache.process_drawable,
+      m_type_cache.collide_shape,
+      m_type_cache.prim_mesh,
+      m_type_cache.prim_group,
+      dynamic_actor_collision_dry_run,
+      m_actor_diag_logs_remaining,
+      m_is_process_drawable_cache,
+      m_is_collide_shape_cache,
+      m_tracked_actors,
+      m_broken_meshes,
+      result,
+  };
+  do_sweep(ctx);
+
+  m_actor_sync_frame++;
+  if (m_actor_sync_frame == 1 || m_actor_sync_frame == 60 || m_actor_sync_frame == 600) {
+    lg::info(
+        "[libsm64] actor-collision frame {}: visited {} nodes, pd_seen {}, meshes {}, tris {}, errors {}, tracking {}",
+        m_actor_sync_frame, result.process_tree_nodes_visited, result.process_drawables_seen,
+        result.meshes_found, result.triangles_extracted, result.errors, m_tracked_actors.size());
+  }
+}
+
+LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
+                                                           u32 ee_mem_size,
+                                                           u32 false_val,
+                                                           u32 active_pool_sym,
+                                                           u32 process_drawable_type,
+                                                           u32 collide_shape_type,
+                                                           u32 prim_mesh_type,
+                                                           u32 prim_group_type,
+                                                           bool dry_run) {
+  TestSweepResult result;
+  int dummy_diag_remaining = 0;  // tests shouldn't spam lg::info
+  std::unordered_map<u32, bool> pd_cache, cs_cache;
+  std::unordered_map<u32, TrackedActor> tracked;
+  std::unordered_set<u32> broken;
+
+  WalkCtx ctx{
+      ee_mem,
+      ee_mem_size,
+      false_val,
+      active_pool_sym,
+      process_drawable_type,
+      collide_shape_type,
+      prim_mesh_type,
+      prim_group_type,
+      dry_run,
+      dummy_diag_remaining,
+      pd_cache,
+      cs_cache,
+      tracked,
+      broken,
+      result,
+  };
+  do_sweep(ctx);
+  return result;
 }
 
 }  // namespace sm64

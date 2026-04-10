@@ -1,12 +1,17 @@
 /*!
  * @file test_sm64_integration.cpp
  * Tests for the libsm64 integration safety checks.
- * Validates that write_mario_pos_to_target properly handles:
- *   - null/false target pointers
- *   - out-of-bounds memory access
- *   - null root pointers inside the target process
- *   - valid writes to well-formed memory
+ *
+ * Two suites:
+ *  - SM64SyncTest: write_mario_pos_to_target boundary handling.
+ *  - SM64ActorSweepTest: the dynamic-actor-collision walker (test_sweep) against
+ *    a synthetic EE memory buffer. Exercises happy paths plus every defensive
+ *    branch (cycles, broken meshes, NaN transforms, OOB pointers, etc.).
  */
+
+#include <cmath>
+#include <cstring>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -142,4 +147,532 @@ TEST_F(SM64SyncTest, BoundaryRootExactlyAtLimit) {
   setup_valid_target(target_addr, root_addr);
   EXPECT_TRUE(
       sm64::LibSM64Manager::write_mario_pos_to_target(mem, MEM_SIZE, FALSE_VAL, target_addr, pos));
+}
+
+// ============================================================================
+// SM64ActorSweepTest: dynamic actor-collision walker
+// ============================================================================
+//
+// These tests build a synthetic EE memory buffer that mimics the bits of GOAL
+// runtime layout that LibSM64Manager::test_sweep() walks: an *active-pool*
+// symbol pointing to a process tree of process-drawables, each holding a
+// collide-shape root with a collide-shape-prim-{mesh,group} hierarchy that
+// references collide-meshes.
+//
+// All offsets here MUST stay in sync with libsm64_integration.cpp's `namespace
+// ac` constants. They are duplicated rather than #included because those
+// constants live in an anonymous namespace inside the .cpp.
+class SM64ActorSweepTest : public ::testing::Test {
+ protected:
+  static constexpr u32 MEM_SIZE = 256 * 1024;  // 256 KB plenty for test fixtures
+  static constexpr u32 FALSE_VAL = 0x40;       // arbitrary "#f" address
+
+  // Distinct, plausible-looking type pointers. type_is_descendant() will hit
+  // the cur==needle short-circuit on the first iteration so we don't need to
+  // build a parent chain.
+  static constexpr u32 PD_TYPE = 0x80;     // process-drawable type
+  static constexpr u32 CS_TYPE = 0x90;     // collide-shape type
+  static constexpr u32 PM_TYPE = 0xA0;     // collide-shape-prim-mesh type
+  static constexpr u32 PG_TYPE = 0xB0;     // collide-shape-prim-group type
+  static constexpr u32 OTHER_TYPE = 0xC0;  // some unrelated basic type
+
+  // Runtime offsets (declared GOAL offset minus 4 for boxed types).
+  static constexpr u32 PTREE_BROTHER_OFF = 12;
+  static constexpr u32 PTREE_CHILD_OFF = 16;
+  static constexpr u32 PDRAW_ROOT_OFF = 108;
+  static constexpr u32 CSHAPE_TRANS_OFF = 12;
+  static constexpr u32 CSHAPE_QUAT_OFF = 28;
+  static constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
+  static constexpr u32 PRIM_MESH_MESH_OFF = 68;
+  static constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
+  static constexpr u32 PRIM_GROUP_PRIM_ARRAY_OFF = 76;
+  static constexpr u32 MESH_NUM_TRIS_OFF = 4;
+  static constexpr u32 MESH_NUM_VERTS_OFF = 8;
+  static constexpr u32 MESH_VERTEX_DATA_OFF = 12;
+  static constexpr u32 MESH_TRIS_OFF = 28;
+  static constexpr u32 MESH_TRI_SIZE = 8;
+
+  std::vector<u8> mem;
+  u32 cursor = 0;
+
+  // Address of the active-pool symbol cell (= where the symbol's value lives).
+  u32 active_pool_sym = 0;
+
+  void SetUp() override {
+    mem.assign(MEM_SIZE, 0);
+    // Start the bump allocator above 0x100 so addresses are always >= 16 (the
+    // valid_ee_addr floor) and well clear of FALSE_VAL.
+    cursor = 0x200;
+
+    // Allocate a 4-byte cell for the active-pool symbol value.
+    active_pool_sym = alloc_raw(4, 4);
+  }
+
+  // Bump-allocate `size` bytes aligned to `align`. Returns the base address.
+  u32 alloc_raw(u32 size, u32 align = 16) {
+    cursor = (cursor + align - 1) & ~(align - 1);
+    EXPECT_LE(cursor + size, MEM_SIZE) << "test fixture exhausted mock memory";
+    u32 r = cursor;
+    cursor += size;
+    return r;
+  }
+
+  // Allocate a "basic" GOAL object: reserves `size` bytes for the body plus
+  // 4 bytes prefix that holds the type tag. Returns the basic_ptr (the body
+  // address). Caller can then read/write fields at basic_ptr + offset.
+  u32 alloc_basic(u32 size, u32 type_ptr, u32 align = 16) {
+    // Allocate `size + 4`, then position basic_ptr so basic_ptr - 4 is the type.
+    // We want basic_ptr aligned, so allocate aligned base then offset by 4 isn't
+    // ideal — instead allocate (4 + aligned size) and set basic_ptr to base+4.
+    // For test purposes alignment of basic_ptr to 4 is sufficient.
+    u32 base = alloc_raw(size + 4, 4);
+    u32 basic_ptr = base + 4;
+    write_u32(basic_ptr - 4, type_ptr);
+    return basic_ptr;
+  }
+
+  void write_u32(u32 addr, u32 v) {
+    ASSERT_LE(addr + 4, MEM_SIZE);
+    std::memcpy(mem.data() + addr, &v, 4);
+  }
+  void write_f32(u32 addr, float v) {
+    ASSERT_LE(addr + 4, MEM_SIZE);
+    std::memcpy(mem.data() + addr, &v, 4);
+  }
+  void write_u8(u32 addr, u8 v) {
+    ASSERT_LE(addr + 1, MEM_SIZE);
+    mem[addr] = v;
+  }
+  void write_vec4(u32 addr, float x, float y, float z, float w = 1.0f) {
+    write_f32(addr + 0, x);
+    write_f32(addr + 4, y);
+    write_f32(addr + 8, z);
+    write_f32(addr + 12, w);
+  }
+
+  // ---- High-level builders ------------------------------------------------
+
+  // Make a 1-tri collide-mesh with 3 unit vertices. Returns the mesh ptr.
+  // The vertex data lives in a separate allocation so we can also corrupt
+  // the vertex_data pointer in tests.
+  u32 build_simple_mesh(u32 num_tris = 1, u32 num_verts = 3) {
+    // Vertex buffer: num_verts * 16 bytes.
+    u32 vbuf = alloc_raw(num_verts * 16, 16);
+    for (u32 i = 0; i < num_verts; i++) {
+      write_vec4(vbuf + i * 16, (float)i, 0.0f, 0.0f, 1.0f);
+    }
+    // Mesh body: large enough to hold the inline tri array.
+    u32 body_size = MESH_TRIS_OFF + num_tris * MESH_TRI_SIZE + 16;
+    u32 mesh_ptr = alloc_basic(body_size, /*type=*/0x200);  // mesh isn't type-checked
+    write_u32(mesh_ptr + MESH_NUM_TRIS_OFF, num_tris);
+    write_u32(mesh_ptr + MESH_NUM_VERTS_OFF, num_verts);
+    write_u32(mesh_ptr + MESH_VERTEX_DATA_OFF, vbuf);
+    // Triangles: indices 0,1,2 by default; pat=0
+    for (u32 i = 0; i < num_tris; i++) {
+      u32 tri = mesh_ptr + MESH_TRIS_OFF + i * MESH_TRI_SIZE;
+      write_u8(tri + 0, 0);
+      write_u8(tri + 1, 1);
+      write_u8(tri + 2, 2);
+      write_u8(tri + 3, 0);
+      write_u32(tri + 4, 0);
+    }
+    return mesh_ptr;
+  }
+
+  // Wrap a mesh in a collide-shape-prim-mesh basic. Returns the prim ptr.
+  u32 build_prim_mesh(u32 mesh_ptr) {
+    u32 prim = alloc_basic(PRIM_MESH_MESH_OFF + 16, PM_TYPE);
+    write_u32(prim + PRIM_MESH_MESH_OFF, mesh_ptr);
+    return prim;
+  }
+
+  // Wrap a list of prim ptrs (mesh or group) into a collide-shape-prim-group.
+  u32 build_prim_group(const std::vector<u32>& children) {
+    u32 size = PRIM_GROUP_PRIM_ARRAY_OFF + (u32)children.size() * 4 + 16;
+    u32 grp = alloc_basic(size, PG_TYPE);
+    write_u32(grp + PRIM_GROUP_NUM_PRIMS_OFF, (u32)children.size());
+    for (size_t i = 0; i < children.size(); i++) {
+      write_u32(grp + PRIM_GROUP_PRIM_ARRAY_OFF + (u32)i * 4, children[i]);
+    }
+    return grp;
+  }
+
+  // Build a collide-shape with the given root prim and identity transform.
+  u32 build_collide_shape(u32 root_prim, float tx = 0.0f, float ty = 0.0f, float tz = 0.0f) {
+    u32 size = CSHAPE_ROOT_PRIM_OFF + 16;
+    u32 cs = alloc_basic(size, CS_TYPE);
+    write_vec4(cs + CSHAPE_TRANS_OFF, tx, ty, tz, 1.0f);
+    write_vec4(cs + CSHAPE_QUAT_OFF, 0.0f, 0.0f, 0.0f, 1.0f);  // identity quat
+    write_u32(cs + CSHAPE_ROOT_PRIM_OFF, root_prim);
+    return cs;
+  }
+
+  // Build a process-drawable basic with the given collide-shape root.
+  u32 build_process_drawable(u32 cs_ptr) {
+    u32 size = PDRAW_ROOT_OFF + 16;
+    u32 pd = alloc_basic(size, PD_TYPE);
+    write_u32(pd + PDRAW_ROOT_OFF, cs_ptr);
+    return pd;
+  }
+
+  // Build a non-PD basic so we can test the walker skips it cleanly.
+  u32 build_other_node() {
+    u32 size = PDRAW_ROOT_OFF + 16;
+    return alloc_basic(size, OTHER_TYPE);
+  }
+
+  // Stitch a list of nodes into a process tree by setting child/brother.
+  // The first node becomes the active pool's child; siblings are linked
+  // through the brother chain.
+  void install_children(const std::vector<u32>& siblings) {
+    // Create an active-pool root node that will hold the chain via its child.
+    u32 root = alloc_basic(PTREE_CHILD_OFF + 16, OTHER_TYPE);
+    write_u32(active_pool_sym, root);
+    if (siblings.empty()) {
+      write_u32(root + PTREE_CHILD_OFF, 0);
+      return;
+    }
+    write_u32(root + PTREE_CHILD_OFF, siblings[0]);
+    for (size_t i = 0; i + 1 < siblings.size(); i++) {
+      write_u32(siblings[i] + PTREE_BROTHER_OFF, siblings[i + 1]);
+    }
+  }
+
+  // Convenience: run test_sweep with the standard parameters.
+  sm64::LibSM64Manager::TestSweepResult run_sweep(bool dry_run = true) {
+    return sm64::LibSM64Manager::instance().test_sweep(
+        mem.data(), MEM_SIZE, FALSE_VAL, active_pool_sym, PD_TYPE, CS_TYPE, PM_TYPE, PG_TYPE,
+        dry_run);
+  }
+};
+
+// ---- Defensive bail-outs ----------------------------------------------------
+
+TEST_F(SM64ActorSweepTest, NullEEMemBailsCleanly) {
+  auto r = sm64::LibSM64Manager::instance().test_sweep(nullptr, MEM_SIZE, FALSE_VAL,
+                                                        active_pool_sym, PD_TYPE, CS_TYPE, PM_TYPE,
+                                                        PG_TYPE, true);
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 0);
+}
+
+TEST_F(SM64ActorSweepTest, TooSmallMemBailsCleanly) {
+  // mem_size < 1024 should be rejected up-front.
+  auto r = sm64::LibSM64Manager::instance().test_sweep(mem.data(), 100, FALSE_VAL, active_pool_sym,
+                                                        PD_TYPE, CS_TYPE, PM_TYPE, PG_TYPE, true);
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+}
+
+TEST_F(SM64ActorSweepTest, ZeroFalseValBailsCleanly) {
+  auto r = sm64::LibSM64Manager::instance().test_sweep(mem.data(), MEM_SIZE, /*false_val=*/0,
+                                                        active_pool_sym, PD_TYPE, CS_TYPE, PM_TYPE,
+                                                        PG_TYPE, true);
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+}
+
+TEST_F(SM64ActorSweepTest, MissingTypePointersBailCleanly) {
+  // Any of the type pointers being 0 should bail.
+  auto r = sm64::LibSM64Manager::instance().test_sweep(mem.data(), MEM_SIZE, FALSE_VAL,
+                                                        active_pool_sym, /*pd=*/0, CS_TYPE,
+                                                        PM_TYPE, PG_TYPE, true);
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+}
+
+TEST_F(SM64ActorSweepTest, EmptyActivePoolWalksZeroNodes) {
+  // Active pool symbol value is 0 (default-zeroed mem).
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 0);
+}
+
+TEST_F(SM64ActorSweepTest, ActivePoolWithNoChildrenWalksZeroNodes) {
+  install_children({});
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 0);
+  EXPECT_EQ(r.meshes_found, 0);
+}
+
+// ---- Happy paths ------------------------------------------------------------
+
+TEST_F(SM64ActorSweepTest, SinglePDWithPrimMeshFindsOneMesh) {
+  u32 mesh = build_simple_mesh();
+  u32 prim = build_prim_mesh(mesh);
+  u32 cs = build_collide_shape(prim);
+  u32 pd = build_process_drawable(cs);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 1);
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  EXPECT_EQ(r.meshes_found, 1);
+  EXPECT_EQ(r.triangles_extracted, 1);
+  EXPECT_EQ(r.errors, 0);
+}
+
+TEST_F(SM64ActorSweepTest, SinglePDWithPrimGroupFindsAllMeshes) {
+  u32 m1 = build_simple_mesh(2);
+  u32 m2 = build_simple_mesh(3);
+  u32 pm1 = build_prim_mesh(m1);
+  u32 pm2 = build_prim_mesh(m2);
+  u32 grp = build_prim_group({pm1, pm2});
+  u32 cs = build_collide_shape(grp);
+  u32 pd = build_process_drawable(cs);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 2);
+  EXPECT_EQ(r.triangles_extracted, 5);
+}
+
+TEST_F(SM64ActorSweepTest, NestedPrimGroupsAreFlattened) {
+  u32 m1 = build_simple_mesh();
+  u32 m2 = build_simple_mesh();
+  u32 m3 = build_simple_mesh();
+  u32 pm1 = build_prim_mesh(m1);
+  u32 pm2 = build_prim_mesh(m2);
+  u32 pm3 = build_prim_mesh(m3);
+  u32 inner = build_prim_group({pm2, pm3});
+  u32 outer = build_prim_group({pm1, inner});
+  u32 cs = build_collide_shape(outer);
+  u32 pd = build_process_drawable(cs);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 3);
+}
+
+TEST_F(SM64ActorSweepTest, MultiplePDsAcrossSiblingsAndChildren) {
+  // pd1 -> brother -> pd2; pd2 -> child -> pd3
+  u32 m1 = build_simple_mesh();
+  u32 m2 = build_simple_mesh();
+  u32 m3 = build_simple_mesh();
+  u32 pd1 = build_process_drawable(build_collide_shape(build_prim_mesh(m1)));
+  u32 pd2 = build_process_drawable(build_collide_shape(build_prim_mesh(m2)));
+  u32 pd3 = build_process_drawable(build_collide_shape(build_prim_mesh(m3)));
+  install_children({pd1, pd2});
+  // Hand-link pd3 as child of pd2.
+  write_u32(pd2 + PTREE_CHILD_OFF, pd3);
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 3);
+  EXPECT_EQ(r.meshes_found, 3);
+}
+
+// ---- Skipping unrelated nodes ----------------------------------------------
+
+TEST_F(SM64ActorSweepTest, NonPDNodeIsSkippedButTraversed) {
+  // A "process" node that is NOT a process-drawable, with a PD child.
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  u32 other = build_other_node();
+  write_u32(other + PTREE_CHILD_OFF, pd);
+  install_children({other});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 2);
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  EXPECT_EQ(r.meshes_found, 1);
+}
+
+TEST_F(SM64ActorSweepTest, PDWithNonCollideShapeRootIsSkipped) {
+  u32 fake_root = alloc_basic(200, OTHER_TYPE);
+  u32 pd = build_process_drawable(fake_root);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 0);
+}
+
+TEST_F(SM64ActorSweepTest, PDWithNullRootIsSkipped) {
+  u32 pd = build_process_drawable(0);
+  install_children({pd});
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  EXPECT_EQ(r.meshes_found, 0);
+}
+
+TEST_F(SM64ActorSweepTest, PDWithFalseRootIsSkipped) {
+  u32 pd = build_process_drawable(FALSE_VAL);
+  install_children({pd});
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  EXPECT_EQ(r.meshes_found, 0);
+}
+
+// ---- Cycle and bounds safety -----------------------------------------------
+
+TEST_F(SM64ActorSweepTest, BrotherSelfLoopTerminates) {
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+  // Now point pd's brother back at itself.
+  write_u32(pd + PTREE_BROTHER_OFF, pd);
+
+  auto r = run_sweep();
+  // Visited once (cycle guard prevents re-walk).
+  EXPECT_EQ(r.process_tree_nodes_visited, 1);
+  EXPECT_EQ(r.meshes_found, 1);
+}
+
+TEST_F(SM64ActorSweepTest, ChildSelfLoopTerminates) {
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+  write_u32(pd + PTREE_CHILD_OFF, pd);
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 1);
+}
+
+TEST_F(SM64ActorSweepTest, MutualBrotherCycleTerminates) {
+  u32 m1 = build_simple_mesh();
+  u32 m2 = build_simple_mesh();
+  u32 pd1 = build_process_drawable(build_collide_shape(build_prim_mesh(m1)));
+  u32 pd2 = build_process_drawable(build_collide_shape(build_prim_mesh(m2)));
+  install_children({pd1, pd2});
+  // Make pd2's brother point back at pd1 (already-visited).
+  write_u32(pd2 + PTREE_BROTHER_OFF, pd1);
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_tree_nodes_visited, 2);
+  EXPECT_EQ(r.meshes_found, 2);
+}
+
+TEST_F(SM64ActorSweepTest, ChildPointerOutOfBoundsIsRejected) {
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+  // Plant a wildly OOB brother pointer.
+  write_u32(pd + PTREE_BROTHER_OFF, MEM_SIZE + 0x1000);
+
+  auto r = run_sweep();
+  // pd is still walked. The bad brother is silently ignored.
+  EXPECT_EQ(r.process_tree_nodes_visited, 1);
+  EXPECT_EQ(r.meshes_found, 1);
+}
+
+TEST_F(SM64ActorSweepTest, TinyChildPointerIsRejected) {
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+  // A pointer < 16 should be rejected by valid_ee_addr without read.
+  // It is non-zero and not the false value, so it survives the early skip.
+  write_u32(pd + PTREE_BROTHER_OFF, 8);
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 1);
+  EXPECT_EQ(r.errors, 0);  // bad pointer is not counted as a hard error
+}
+
+// ---- Mesh corruption / blacklisting ----------------------------------------
+
+TEST_F(SM64ActorSweepTest, MeshWithBadVertexDataIsBlacklisted) {
+  u32 mesh = build_simple_mesh();
+  // Corrupt the vertex_data pointer to OOB.
+  write_u32(mesh + MESH_VERTEX_DATA_OFF, MEM_SIZE + 0x1000);
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 1);
+}
+
+TEST_F(SM64ActorSweepTest, MeshWithZeroTrisIsRejected) {
+  u32 mesh = build_simple_mesh(/*num_tris=*/0);
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 0);
+  // num_tris==0 returns false from extract_mesh_world → counted as error.
+  EXPECT_EQ(r.errors, 1);
+}
+
+TEST_F(SM64ActorSweepTest, MeshWithTooManyTrisIsRejected) {
+  u32 mesh = build_simple_mesh();
+  // Spike num_tris way above MAX_TRIS_PER_MESH (512).
+  write_u32(mesh + MESH_NUM_TRIS_OFF, 100000);
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 1);
+}
+
+TEST_F(SM64ActorSweepTest, MeshWithTooManyVertsIsRejected) {
+  u32 mesh = build_simple_mesh();
+  write_u32(mesh + MESH_NUM_VERTS_OFF, 100000);
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 1);
+}
+
+// ---- Garbage transforms -----------------------------------------------------
+
+TEST_F(SM64ActorSweepTest, NaNTranslationSkipsActor) {
+  u32 mesh = build_simple_mesh();
+  u32 cs = build_collide_shape(build_prim_mesh(mesh));
+  // Overwrite trans with NaN.
+  float nan_v = std::nanf("");
+  write_vec4(cs + CSHAPE_TRANS_OFF, nan_v, nan_v, nan_v, 1.0f);
+  u32 pd = build_process_drawable(cs);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 1);
+  // The actor is skipped before mesh extraction.
+  EXPECT_EQ(r.meshes_found, 0);
+  EXPECT_EQ(r.errors, 0);
+}
+
+TEST_F(SM64ActorSweepTest, GarbageQuaternionFallsBackToIdentity) {
+  u32 mesh = build_simple_mesh();
+  u32 cs = build_collide_shape(build_prim_mesh(mesh));
+  // Non-unit quaternion (way out of [0.5, 1.5] range): falls back to identity,
+  // mesh extraction still succeeds.
+  write_vec4(cs + CSHAPE_QUAT_OFF, 100.0f, 100.0f, 100.0f, 100.0f);
+  u32 pd = build_process_drawable(cs);
+  install_children({pd});
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.meshes_found, 1);
+}
+
+// ---- Mass / stress ----------------------------------------------------------
+
+TEST_F(SM64ActorSweepTest, ManyActorsAllProcessed) {
+  std::vector<u32> pds;
+  for (int i = 0; i < 16; i++) {
+    u32 m = build_simple_mesh(2);
+    pds.push_back(build_process_drawable(build_collide_shape(build_prim_mesh(m))));
+  }
+  install_children(pds);
+
+  auto r = run_sweep();
+  EXPECT_EQ(r.process_drawables_seen, 16);
+  EXPECT_EQ(r.meshes_found, 16);
+  EXPECT_EQ(r.triangles_extracted, 32);
+}
+
+TEST_F(SM64ActorSweepTest, RepeatedSweepsAreIdempotent) {
+  u32 mesh = build_simple_mesh();
+  u32 pd = build_process_drawable(build_collide_shape(build_prim_mesh(mesh)));
+  install_children({pd});
+
+  // Each call gets a fresh tracked map (test_sweep is stateless wrt the
+  // singleton's state), so results should be identical across runs.
+  for (int i = 0; i < 5; i++) {
+    auto r = run_sweep();
+    EXPECT_EQ(r.meshes_found, 1);
+    EXPECT_EQ(r.errors, 0);
+  }
 }

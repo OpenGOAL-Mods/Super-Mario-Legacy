@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/common_types.h"
@@ -115,10 +117,61 @@ class LibSM64Manager {
                                         u32 target_ptr,
                                         const math::Vector3f& mario_pos);
 
+  // Dynamic actor collision: walks the Jak process tree each tick, finds
+  // process-drawables with collide-shape meshes, and bridges them into libsm64
+  // as surface objects so Mario can stand on/collide with moving platforms,
+  // crates, enemies, etc.
+  //
+  // Call this from the game-side tick (it walks EE memory via `ee_mem`).
+  // Safe to call when disabled — it's a no-op then.
+  void update_actor_collision(u8* ee_mem);
+
+  // Tear down all tracked actor surface objects (on level change, disable, etc.)
+  void clear_actor_collision();
+
+  // --- Testing hooks ---------------------------------------------------------
+  // Run one actor-collision sweep against a custom EE memory buffer (with a
+  // custom "false" value and EE memory size). Used by unit tests to validate
+  // the DFS/extraction logic without needing a real game. Returns the number
+  // of meshes that were successfully extracted (and in dry_run mode, the
+  // number that *would* have been submitted to libsm64).
+  struct TestSweepResult {
+    int meshes_found = 0;
+    int triangles_extracted = 0;
+    int process_tree_nodes_visited = 0;
+    int process_drawables_seen = 0;
+    int errors = 0;
+  };
+  TestSweepResult test_sweep(u8* ee_mem,
+                             u32 ee_mem_size,
+                             u32 false_val,
+                             u32 active_pool_sym,
+                             u32 process_drawable_type,
+                             u32 collide_shape_type,
+                             u32 prim_mesh_type,
+                             u32 prim_group_type,
+                             bool dry_run = true);
+
+  // Per-actor tracking record. Public so the internal sweep walker (which lives
+  // in an anonymous namespace in the .cpp) can refer to it from a context struct.
+  // m_tracked_actors itself is still private.
+  struct TrackedActor {
+    uint32_t sm64_obj_id = 0;
+    bool has_obj = false;   // sm64_obj_id=0 is a valid libsm64 id, so track separately
+    float last_trans[3] = {0, 0, 0};
+    float last_quat[4] = {0, 0, 0, 1};
+    bool seen_this_frame = false;
+  };
+
   // Settings
   bool enabled = false;
-  bool follow_mario = false;      // Lock Jak's position to Mario's
-  bool auto_sync_collision = false; // Auto-reload collision when levels change
+  bool follow_mario = false;          // Lock Jak's position to Mario's
+  bool auto_sync_collision = false;   // Auto-reload static collision when levels change
+  bool dynamic_actor_collision = false; // Walk process tree and mirror collide-meshes
+  // When set, update_actor_collision walks the tree and logs what it finds
+  // but never calls into libsm64. Used to validate the walker in isolation
+  // without risking crashes in libsm64 itself.
+  bool dynamic_actor_collision_dry_run = false;
 
  private:
   LibSM64Manager() = default;
@@ -131,6 +184,36 @@ class LibSM64Manager {
   int32_t m_mario_id = -1;
   int m_loaded_surface_count = 0;
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)
+
+  // ---- Dynamic actor collision state ------------------------------------------------
+  // Cached type pointers (populated lazily on first actor-collision tick).
+  // These are the .value of the type symbols, i.e. addresses of Type structs.
+  struct TypeCache {
+    bool ready = false;
+    u32 active_pool_sym = 0;   // symbol address of *active-pool*
+    u32 process_drawable = 0;  // type ptr
+    u32 collide_shape = 0;     // type ptr (includes collide-shape-moving + control-info)
+    u32 prim_mesh = 0;         // type ptr for collide-shape-prim-mesh
+    u32 prim_group = 0;        // type ptr for collide-shape-prim-group
+  } m_type_cache;
+
+  // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant
+  std::unordered_map<u32, bool> m_is_process_drawable_cache;
+  std::unordered_map<u32, bool> m_is_collide_shape_cache;
+
+  // Tracked actor collision objects, keyed by the collide-mesh EE address.
+  // Value: the libsm64 surface object id and a "signature" of the last transform
+  // we submitted, so we can detect movement and only update when needed.
+  // (TrackedActor struct itself is declared in the public section above.)
+  std::unordered_map<u32, TrackedActor> m_tracked_actors;
+
+  // Set of mesh pointers that have failed extraction — we blacklist them to
+  // avoid re-trying every frame and spamming logs.
+  std::unordered_set<u32> m_broken_meshes;
+
+  // Throttling and diagnostics
+  int m_actor_sync_frame = 0;
+  int m_actor_diag_logs_remaining = 5;
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

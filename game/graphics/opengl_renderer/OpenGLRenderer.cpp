@@ -1045,6 +1045,12 @@ void OpenGLRenderer::tick_mario_sm64() {
     mgr.sync_jak_to_mario(g_ee_main_mem, 0);
   }
 
+  // Dynamic actor collision: walk the process tree and mirror collide-shapes
+  // as libsm64 surface objects so Mario can stand on moving actors.
+  if (mgr.dynamic_actor_collision) {
+    mgr.update_actor_collision(g_ee_main_mem);
+  }
+
   // Auto-sync collision when loaded levels change
   if (mgr.auto_sync_collision && m_render_state.loader) {
     auto levels = m_render_state.loader->get_in_use_levels();

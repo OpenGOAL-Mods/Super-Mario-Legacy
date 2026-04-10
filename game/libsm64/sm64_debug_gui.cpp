@@ -38,6 +38,17 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
     ImGui::SetTooltip("Automatically reload SM64 collision surfaces\n"
                      "when Jak levels load or unload.");
   }
+  bool prev_dynamic_actor_collision = mgr.dynamic_actor_collision;
+  ImGui::Checkbox("Dynamic Actor Collision", &mgr.dynamic_actor_collision);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Walk the Jak process tree each frame and mirror\n"
+                     "actor collide-shapes (moving platforms, crates, enemies)\n"
+                     "into libsm64 as surface objects so Mario can stand on\n"
+                     "and collide with them.");
+  }
+  if (prev_dynamic_actor_collision && !mgr.dynamic_actor_collision) {
+    mgr.clear_actor_collision();
+  }
   ImGui::Separator();
 
   // Initialization

@@ -51,6 +51,7 @@ class OpenGlDebugGui {
   bool should_draw_filters_menu() const { return master_enable && m_filters_menu; }
   bool should_draw_loader_menu() const { return master_enable && m_draw_loader; }
   bool should_draw_overlord_debug() const { return master_enable && m_draw_overlord; }
+  bool should_draw_sm64() const { return master_enable && m_sm64_window; }
 
   bool should_advance_frame() { return m_frame_timer.should_advance_frame(); }
   bool should_gl_finish() const { return m_frame_timer.do_gl_finish; }
@@ -82,6 +83,7 @@ class OpenGlDebugGui {
   bool m_draw_overlord = false;
   bool m_subtitle_editor = false;
   bool m_filters_menu = false;
+  bool m_sm64_window = false;
   bool m_want_screenshot = false;
   float target_fps_input = 60.f;
 };

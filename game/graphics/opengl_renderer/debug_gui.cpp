@@ -127,6 +127,7 @@ void OpenGlDebugGui::draw(const DmaStats& dma_stats) {
       }
       ImGui::MenuItem("Subtitle Editor", nullptr, &m_subtitle_editor);
       ImGui::MenuItem("Debug Text Filter", nullptr, &m_filters_menu);
+      ImGui::MenuItem("libsm64 (Mario 64)", nullptr, &m_sm64_window);
       ImGui::EndMenu();
     }
 

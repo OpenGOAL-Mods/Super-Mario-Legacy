@@ -315,6 +315,9 @@ build_third_party_lib(xdelta3 xdelta3)
 include_directories(third-party/discord-rpc/include)
 build_third_party_lib(discord-rpc discord-rpc)
 
+# libsm64 - Super Mario 64 as a library
+build_third_party_lib(libsm64 libsm64)
+
 # build zydis third party library for disassembling x86
 # TODO - Once under CMake 3.13's policy CMP0077, override with `set()` instead
 option(ZYDIS_BUILD_TOOLS "Zydis: Build tools" OFF)

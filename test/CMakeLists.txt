@@ -3,6 +3,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/offline/CMakeLists.txt)
 
 add_executable(goalc-test
         ${CMAKE_CURRENT_LIST_DIR}/test_main.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/test_sm64_integration.cpp
         ${CMAKE_CURRENT_LIST_DIR}/test_reader.cpp
         ${CMAKE_CURRENT_LIST_DIR}/test_goos.cpp
         ${CMAKE_CURRENT_LIST_DIR}/test_listener_deci2.cpp

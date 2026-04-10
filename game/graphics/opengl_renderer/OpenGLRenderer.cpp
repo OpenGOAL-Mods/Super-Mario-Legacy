@@ -1,5 +1,7 @@
 #include "OpenGLRenderer.h"
 
+#include <cmath>
+
 #include "common/goal_constants.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
@@ -25,7 +27,9 @@
 #include "game/graphics/opengl_renderer/ocean/OceanMidAndFar.h"
 #include "game/graphics/opengl_renderer/ocean/OceanNear.h"
 #include "game/graphics/opengl_renderer/sprite/Sprite3.h"
+#include "game/graphics/display.h"
 #include "game/graphics/pipelines/opengl.h"
+#include "game/libsm64/libsm64_integration.h"
 
 #include "third-party/imgui/imgui.h"
 #include "third-party/imgui/imgui_stdlib.h"
@@ -978,6 +982,113 @@ void OpenGLRenderer::blit_display(ScopedProfilerNode& prof) {
   }
 }
 
+void OpenGLRenderer::tick_mario_sm64() {
+  auto& mgr = sm64::LibSM64Manager::instance();
+  if (!mgr.enabled || !mgr.is_initialized() || !mgr.has_mario()) return;
+
+  // SM64 runs at 30Hz — only tick every other frame at 60fps
+  static int tick_counter = 0;
+  tick_counter++;
+  if (tick_counter % 2 != 0) return;
+
+  // Build SM64 inputs from the Jak camera and input state
+  sm64::MarioInputState input{};
+
+  // Compute camera look direction as vector from camera to Mario (projected onto XZ plane).
+  // SM64 uses this to orient stick input relative to the camera facing direction.
+  if (m_render_state.has_pc_data) {
+    auto mario_state = mgr.get_state();
+    float dx = mario_state.position.x() - m_render_state.camera_pos.x();
+    float dz = mario_state.position.z() - m_render_state.camera_pos.z();
+    float len = std::sqrt(dx * dx + dz * dz);
+    if (len > 0.001f) {
+      input.cam_look_x = dx / len;
+      input.cam_look_z = dz / len;
+    }
+  }
+
+  // Read pad data from the display's input manager
+  auto display = Display::GetMainDisplay();
+  if (display) {
+    auto input_mgr = display->get_input_manager();
+    if (input_mgr) {
+      auto pad_data = input_mgr->get_current_data(0);
+      if (pad_data.has_value()) {
+        auto& pad = *pad_data.value();
+        // Left analog stick -> SM64 stick input (-1 to 1 range)
+        auto [lx, ly] = pad.analog_left();
+        input.stick_x = (static_cast<float>(lx) - 127.0f) / 127.0f;
+        // libsm64 convention: positive stick_y = forward (toward camera look direction)
+        // Pad ly: up on stick = low value, so (ly - 127) is negative for forward — no extra flip.
+        input.stick_y = (static_cast<float>(ly) - 127.0f) / 127.0f;
+
+        // Apply deadzone to prevent stick drift
+        constexpr float DEADZONE = 0.15f;
+        if (std::abs(input.stick_x) < DEADZONE) input.stick_x = 0.0f;
+        if (std::abs(input.stick_y) < DEADZONE) input.stick_y = 0.0f;
+
+        // Button mapping:
+        // Cross (X) -> A (jump)
+        // Square -> B (punch)
+        // L2 -> Z (crouch/ground pound)
+        input.button_a = pad.cross().first;
+        input.button_b = pad.square().first;
+        input.button_z = pad.l2().first;
+      }
+    }
+  }
+
+  mgr.tick(input);
+
+  // Sync Jak's position to Mario's if follow mode is enabled
+  if (mgr.follow_mario) {
+    mgr.sync_jak_to_mario(g_ee_main_mem, 0);
+  }
+
+  // Auto-sync collision when loaded levels change
+  if (mgr.auto_sync_collision && m_render_state.loader) {
+    auto levels = m_render_state.loader->get_in_use_levels();
+    std::set<u64> current_ids;
+    for (auto* lev : levels) {
+      current_ids.insert(lev->load_id);
+    }
+    if (current_ids != m_sm64_last_level_ids) {
+      m_sm64_last_level_ids = current_ids;
+      // Merge collision from all loaded levels
+      std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
+      for (auto* lev : levels) {
+        if (lev->level) {
+          auto& verts = lev->level->collision.vertices;
+          all_verts.insert(all_verts.end(), verts.begin(), verts.end());
+        }
+      }
+      if (!all_verts.empty()) {
+        mgr.load_level_collision(all_verts);
+      }
+    }
+  }
+}
+
+void OpenGLRenderer::render_mario_sm64(ScopedProfilerNode& prof) {
+  auto& mgr = sm64::LibSM64Manager::instance();
+  if (!mgr.enabled || !mgr.is_initialized() || !mgr.has_mario()) return;
+  if (!m_render_state.has_pc_data) return;
+
+  // Initialize MarioRenderer on first use
+  if (!m_mario_renderer.is_initialized()) {
+    m_mario_renderer.init(m_render_state.shaders);
+  }
+
+  // Activate the Mario shader
+  m_render_state.shaders[ShaderId::MARIO_SM64].activate();
+
+  m_mario_renderer.render(
+      m_render_state.camera_matrix[0].data(),
+      m_render_state.camera_hvdf_off.data(),
+      m_render_state.camera_pos.data(),
+      m_render_state.camera_fog.x());
+}
+
 /*!
  * Main render function. This is called from the gfx loop with the chain passed from the game.
  */
@@ -1017,6 +1128,14 @@ void OpenGLRenderer::render(DmaFollower dma, const RenderOptions& settings) {
       // reset.
       m_texture_animator->clear_stale_textures(m_render_state.frame_idx);
     }
+  }
+
+  // tick + render Mario from libsm64 after game buckets (needs camera data) but before blit
+  {
+    g_current_renderer = "mario-sm64";
+    auto prof = m_profiler.root()->make_scoped_child("mario-sm64");
+    tick_mario_sm64();
+    render_mario_sm64(prof);
   }
 
   // blit framebuffer so that it can be used as a texture by the game later
@@ -1122,6 +1241,14 @@ void OpenGLRenderer::render(DmaFollower dma, const RenderOptions& settings) {
   if (settings.draw_filters_window) {
     g_current_renderer = "filters-window";
     m_filters_menu.draw_window();
+  }
+
+  if (settings.draw_sm64_window) {
+    g_current_renderer = "sm64-debug";
+    m_sm64_debug_gui.set_visible(true);
+    m_sm64_debug_gui.draw(m_render_state.loader, m_render_state.camera_pos.data());
+  } else {
+    m_sm64_debug_gui.set_visible(false);
   }
 
   if (settings.gpu_sync) {

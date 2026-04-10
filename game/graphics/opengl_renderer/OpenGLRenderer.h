@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <set>
 
 #include "common/dma/dma_chain_read.h"
 
@@ -14,6 +15,8 @@
 #include "game/graphics/opengl_renderer/foreground/Generic2.h"
 #include "game/graphics/opengl_renderer/foreground/Merc2.h"
 #include "game/graphics/opengl_renderer/opengl_utils.h"
+#include "game/libsm64/MarioRenderer.h"
+#include "game/libsm64/sm64_debug_gui.h"
 #include "game/tools/filter_menu/filter_menu.h"
 #include "game/tools/subtitle_editor/subtitle_editor.h"
 
@@ -24,6 +27,7 @@ struct RenderOptions {
   bool draw_small_profiler_window = false;
   bool draw_subtitle_editor_window = false;
   bool draw_filters_window = false;
+  bool draw_sm64_window = false;
 
   // internal rendering settings - The OpenGLRenderer will internally use this resolution/format.
   int msaa_samples = 1;
@@ -81,6 +85,8 @@ class OpenGLRenderer {
   void dispatch_buckets_jak2(DmaFollower dma, ScopedProfilerNode& prof, bool sync_after_buckets);
   void dispatch_buckets_jak3(DmaFollower dma, ScopedProfilerNode& prof, bool sync_after_buckets);
 
+  void render_mario_sm64(ScopedProfilerNode& prof);
+  void tick_mario_sm64();
   void do_pcrtc_effects(float alp,
                         int brightness_contrast_color,
                         int brightness_contrast_alpha,
@@ -128,6 +134,9 @@ class OpenGLRenderer {
   std::array<float, (int)BucketCategory::MAX_CATEGORIES> m_category_times;
   FullScreenDraw m_blackout_renderer;
   CollideMeshRenderer m_collide_renderer;
+  sm64::MarioRenderer m_mario_renderer;
+  sm64::SM64DebugGui m_sm64_debug_gui;
+  std::set<u64> m_sm64_last_level_ids;  // Track loaded levels for auto-sync collision
 
   float m_last_pmode_alp = 1.;
   bool m_enable_fast_blackout_loads = true;

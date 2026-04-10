@@ -201,19 +201,24 @@ class LibSM64Manager {
   std::unordered_map<u32, bool> m_is_process_drawable_cache;
   std::unordered_map<u32, bool> m_is_collide_shape_cache;
 
-  // Tracked actor collision objects, keyed by the collide-mesh EE address.
+  // Tracked actor collision objects, keyed by ((process-drawable EE addr) << 32 |
+  // collide-mesh EE addr). Different actor instances can SHARE the same
+  // collide-mesh template (e.g., crates), so keying by mesh alone caused two
+  // actors to stomp on each other's libsm64 surface object every frame.
   // Value: the libsm64 surface object id and a "signature" of the last transform
   // we submitted, so we can detect movement and only update when needed.
   // (TrackedActor struct itself is declared in the public section above.)
-  std::unordered_map<u32, TrackedActor> m_tracked_actors;
+  std::unordered_map<uint64_t, TrackedActor> m_tracked_actors;
 
   // Set of mesh pointers that have failed extraction — we blacklist them to
   // avoid re-trying every frame and spamming logs.
   std::unordered_set<u32> m_broken_meshes;
 
-  // Throttling and diagnostics
+  // Throttling and diagnostics. The log budget is intentionally large so that
+  // when the feature crashes, the most recent lines in the log file pinpoint
+  // which mesh / which step died. Reset on shutdown().
   int m_actor_sync_frame = 0;
-  int m_actor_diag_logs_remaining = 5;
+  int m_actor_diag_logs_remaining = 500;
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

@@ -442,6 +442,25 @@ inline bool valid_ee_addr(u32 addr, u32 size, u32 mem_size) {
   return true;
 }
 
+// Stricter check for a *basic pointer*: must satisfy alignment that real
+// jak1 basics use (low 3 bits == 4, since basics are 8-byte aligned at the
+// type tag and basic_ptr = type_tag + 4), and must live above the kernel
+// scratch / symbol-table region. Walking garbage interpreted as basic ptrs
+// was crashing the dynamic-actor-collision walker — see crash log analysis
+// in 14:42 trace where node 0x4BD3CC's `brother` field decoded as 0x36837
+// (unaligned + below the heap floor) and walking it died.
+//
+// MIN_HEAP_ADDR is intentionally generous: kernel/symbol-table state lives
+// well below 1 MB in jak1, so anything below this is definitely not a real
+// heap-allocated basic.
+inline bool valid_basic_ptr(u32 addr, u32 mem_size) {
+  constexpr u32 MIN_HEAP_ADDR = 0x100000;  // 1 MB
+  if (addr < MIN_HEAP_ADDR) return false;
+  if ((addr & 0x7u) != 4u) return false;
+  // Need at least the type tag at addr-4 plus a small payload.
+  return valid_ee_addr(addr, 32, mem_size);
+}
+
 // A u32 read that bails on out-of-bounds.
 inline bool read_u32(u8* mem, u32 addr, u32 mem_size, u32& out) {
   if (!valid_ee_addr(addr, 4, mem_size)) return false;
@@ -644,10 +663,17 @@ struct WalkCtx {
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
   std::unordered_map<u32, bool>& is_collide_shape_cache;
-  std::unordered_map<u32, LibSM64Manager::TrackedActor>& tracked_actors;
+  std::unordered_map<uint64_t, LibSM64Manager::TrackedActor>& tracked_actors;
   std::unordered_set<u32>& broken_meshes;
   LibSM64Manager::TestSweepResult& result;
 };
+
+// Compose a tracking key from (process-drawable address, mesh address). Two
+// different actor instances can share the same collide-mesh template, so we
+// can't key by mesh alone.
+inline uint64_t make_actor_key(u32 pd_node, u32 mesh_ptr) {
+  return (static_cast<uint64_t>(pd_node) << 32) | static_cast<uint64_t>(mesh_ptr);
+}
 
 // Perform one actor-collision sweep. Returns normally on any expected failure
 // (unreadable memory, missing types, etc.) — the walker never throws or crashes.
@@ -667,15 +693,31 @@ void do_sweep(WalkCtx& c) {
   if (!read_u32(c.ee_mem, c.active_pool_sym, c.mem_size, root_process)) return;
   if (root_process == 0 || root_process == c.false_val) return;
 
-  // Start DFS from the active pool's first child (the pool itself is a
-  // process-tree basic, not a process-drawable we want to extract).
+  // process-tree.child / .brother are (pointer process-tree) — ppointers, not
+  // direct pointers. The kernel sets each to the address of some other
+  // process's `self` slot so it can rewrite the slot if the process moves.
+  // To get the actual process-tree basic ptr we deref once. See
+  // gkernel.gc / ppointer->process.
+  auto deref_ppointer = [&c](u32 pp, u32& out_node) -> bool {
+    if (pp == 0 || pp == c.false_val) return false;
+    if (!valid_ee_addr(pp, 4, c.mem_size)) return false;
+    u32 actual = 0;
+    if (!read_u32(c.ee_mem, pp, c.mem_size, actual)) return false;
+    if (actual == 0 || actual == c.false_val) return false;
+    if (!valid_basic_ptr(actual, c.mem_size)) return false;
+    out_node = actual;
+    return true;
+  };
+
   std::vector<u32> stack;
   stack.reserve(256);
   {
-    u32 first_child;
-    if (read_u32(c.ee_mem, root_process + PTREE_CHILD_OFF, c.mem_size, first_child) &&
-        first_child != 0 && first_child != c.false_val) {
-      stack.push_back(first_child);
+    u32 child_pp;
+    if (read_u32(c.ee_mem, root_process + PTREE_CHILD_OFF, c.mem_size, child_pp)) {
+      u32 first_child = 0;
+      if (deref_ppointer(child_pp, first_child)) {
+        stack.push_back(first_child);
+      }
     }
   }
 
@@ -695,21 +737,19 @@ void do_sweep(WalkCtx& c) {
     if (!visited_set.insert(node).second) continue;   // already walked
     c.result.process_tree_nodes_visited++;
 
-    // Read brother/child even if this node has nothing for us — we still need to
-    // traverse siblings/children. Validate them as plausible EE addresses BEFORE
-    // pushing onto the stack so we never enqueue an OOB pointer (which would
-    // cost us a node-visit slot and pollute the visited_set).
-    constexpr u32 MIN_NODE_FOOTPRINT = 128;  // a process-tree node is much larger
+    // The popped node itself must look like a basic pointer.
+    if (!valid_basic_ptr(node, c.mem_size)) continue;
+
+    // Read brother/child ppointers and deref to actual process-tree basic ptrs.
+    u32 brother_pp = 0, child_pp = 0;
+    read_u32(c.ee_mem, node + PTREE_BROTHER_OFF, c.mem_size, brother_pp);
+    read_u32(c.ee_mem, node + PTREE_CHILD_OFF, c.mem_size, child_pp);
     u32 brother = 0, child = 0;
-    read_u32(c.ee_mem, node + PTREE_BROTHER_OFF, c.mem_size, brother);
-    read_u32(c.ee_mem, node + PTREE_CHILD_OFF, c.mem_size, child);
-    if (brother != 0 && brother != c.false_val &&
-        valid_ee_addr(brother, MIN_NODE_FOOTPRINT, c.mem_size) &&
+    if (deref_ppointer(brother_pp, brother) &&
         visited_set.find(brother) == visited_set.end()) {
       stack.push_back(brother);
     }
-    if (child != 0 && child != c.false_val &&
-        valid_ee_addr(child, MIN_NODE_FOOTPRINT, c.mem_size) &&
+    if (deref_ppointer(child_pp, child) &&
         visited_set.find(child) == visited_set.end()) {
       stack.push_back(child);
     }
@@ -717,6 +757,9 @@ void do_sweep(WalkCtx& c) {
     // Only process-drawable nodes have a useful root; type-check via parent chain.
     u32 node_type;
     if (!read_basic_type(c.ee_mem, node, c.mem_size, node_type)) continue;
+    // Self-referential type tag (node_type == node) is garbage; same for
+    // unaligned / too-low type ptrs.
+    if (node_type == node || !valid_basic_ptr(node_type, c.mem_size)) continue;
     if (!type_is_descendant(c.ee_mem, c.mem_size, node_type, c.process_drawable_type,
                              c.is_process_drawable_cache)) {
       continue;
@@ -727,9 +770,11 @@ void do_sweep(WalkCtx& c) {
     u32 root;
     if (!read_u32(c.ee_mem, node + PDRAW_ROOT_OFF, c.mem_size, root)) continue;
     if (root == 0 || root == c.false_val) continue;
+    if (!valid_basic_ptr(root, c.mem_size)) continue;
 
     u32 root_type;
     if (!read_basic_type(c.ee_mem, root, c.mem_size, root_type)) continue;
+    if (!valid_basic_ptr(root_type, c.mem_size)) continue;
     if (!type_is_descendant(c.ee_mem, c.mem_size, root_type, c.collide_shape_type,
                              c.is_collide_shape_cache)) {
       continue;
@@ -767,7 +812,10 @@ void do_sweep(WalkCtx& c) {
       // Skip meshes we've already decided are broken.
       if (c.broken_meshes.count(mesh_ptr)) continue;
 
-      auto& tracked = c.tracked_actors[mesh_ptr];
+      // Key by (process-drawable, mesh) so two actor instances that share the
+      // same collide-mesh template each get their own libsm64 surface object.
+      uint64_t key = make_actor_key(node, mesh_ptr);
+      auto& tracked = c.tracked_actors[key];
       tracked.seen_this_frame = true;
 
       // Fast-path: already have an object and transform hasn't changed.
@@ -777,17 +825,10 @@ void do_sweep(WalkCtx& c) {
 
       if (created_this_frame >= MAX_ACTOR_SURFACE_OBJECTS) break;
 
-      // Rebuild world-space triangles.
       std::vector<SM64Surface> surfaces;
-      int tris_seen = 0;
-      if (!extract_mesh_world(c.ee_mem, c.mem_size, mesh_ptr, rot, trans, surfaces, &tris_seen)) {
+      if (!extract_mesh_world(c.ee_mem, c.mem_size, mesh_ptr, rot, trans, surfaces, nullptr)) {
         c.broken_meshes.insert(mesh_ptr);
         c.result.errors++;
-        if (c.diag_logs_remaining > 0) {
-          lg::warn("[libsm64] actor mesh @0x{:X}: extract_mesh_world failed, blacklisted",
-                   mesh_ptr);
-          c.diag_logs_remaining--;
-        }
         continue;
       }
       if (surfaces.empty()) {
@@ -799,8 +840,8 @@ void do_sweep(WalkCtx& c) {
       c.result.triangles_extracted += (int)surfaces.size();
 
       if (!c.dry_run) {
-        // If we already had an object for this mesh, destroy it (world-space
-        // vertices changed so a pure move() isn't enough).
+        // If we already had an object for this (actor, mesh) pair, destroy it
+        // (world-space vertices changed so a pure move() isn't enough).
         if (tracked.has_obj) {
           sm64_surface_object_delete(tracked.sm64_obj_id);
           tracked.sm64_obj_id = 0;
@@ -816,21 +857,12 @@ void do_sweep(WalkCtx& c) {
         obj.transform.eulerRotation[2] = 0.0f;
         obj.surfaceCount = static_cast<uint32_t>(surfaces.size());
         obj.surfaces = surfaces.data();
-
         tracked.sm64_obj_id = sm64_surface_object_create(&obj);
         tracked.has_obj = true;
       }
       std::memcpy(tracked.last_trans, trans, 12);
       std::memcpy(tracked.last_quat, quat, 16);
       created_this_frame++;
-
-      if (c.diag_logs_remaining > 0) {
-        lg::info(
-            "[libsm64] actor mesh @0x{:X}: {} tris (of {} considered), trans=({:.0f},{:.0f},{:.0f}), dry_run={}, obj_id={}",
-            mesh_ptr, surfaces.size(), tris_seen, trans[0], trans[1], trans[2],
-            c.dry_run ? 1 : 0, tracked.has_obj ? (int)tracked.sm64_obj_id : -1);
-        c.diag_logs_remaining--;
-      }
     }
   }
 
@@ -927,7 +959,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
   TestSweepResult result;
   int dummy_diag_remaining = 0;  // tests shouldn't spam lg::info
   std::unordered_map<u32, bool> pd_cache, cs_cache;
-  std::unordered_map<u32, TrackedActor> tracked;
+  std::unordered_map<uint64_t, TrackedActor> tracked;
   std::unordered_set<u32> broken;
 
   WalkCtx ctx{

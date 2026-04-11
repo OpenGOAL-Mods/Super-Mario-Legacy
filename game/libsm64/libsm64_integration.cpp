@@ -5,6 +5,8 @@
 
 #include "libsm64_integration.h"
 
+#include "sm64_audio.h"
+
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -25,8 +27,13 @@ extern "C" {
 
 namespace sm64 {
 
-static void sm64_debug_print(const char* msg) {
-  lg::info("[libsm64] {}", msg);
+[[maybe_unused]] static void sm64_debug_print(const char* msg) {
+  // libsm64's audio engine (audio/load.c, audio/external.c) fires DEBUG_PRINT
+  // from the cubeb worker thread on every audio tick. Routing any of that
+  // through lg stalls the audio thread on stdio and torches the main-thread
+  // FPS. We keep this stub around for manual re-registration when debugging
+  // libsm64 internals, but don't wire it up by default.
+  lg::debug("[libsm64] {}", msg);
 }
 
 LibSM64Manager& LibSM64Manager::instance() {
@@ -66,14 +73,26 @@ bool LibSM64Manager::init(const std::string& rom_path) {
 
   lg::info("[libsm64] ROM loaded: {} bytes", static_cast<size_t>(rom_size));
 
-  // Register debug print callback
-  sm64_register_debug_print_function(sm64_debug_print);
+  // NOTE: intentionally NOT registering sm64_debug_print — libsm64's audio
+  // engine spams DEBUG_PRINT on every audio tick from the cubeb worker
+  // thread, which stalls on the log and destroys FPS. Re-enable manually if
+  // you need to debug libsm64 internals.
 
   // Allocate texture atlas buffer
   m_texture_data.resize(4 * TEXTURE_WIDTH * TEXTURE_HEIGHT);
 
   // Initialize the library
   sm64_global_init(rom_data.data(), m_texture_data.data());
+
+  // Boot the N64 audio engine from the same ROM, then kick off the cubeb
+  // worker thread so audio starts playing immediately (title-screen jingle,
+  // sfx, etc.). Failures are non-fatal — we just run silent.
+  sm64_audio_init(rom_data.data());
+  m_audio = std::make_unique<SM64AudioPlayer>(m_sm64_lock);
+  m_audio->set_volume(m_audio_volume);
+  if (!m_audio->start()) {
+    lg::warn("[libsm64] Audio stream failed to start; continuing without audio");
+  }
 
   // Pre-allocate tick buffers
   m_tick_position_buf.resize(9 * GEO_MAX_TRIANGLES);
@@ -151,8 +170,28 @@ bool LibSM64Manager::init_autodetect() {
   return init(picked.string());
 }
 
+void LibSM64Manager::set_audio_volume(int volume) {
+  if (volume < 0) volume = 0;
+  if (volume > 100) volume = 100;
+  m_audio_volume = volume;
+  if (m_audio) {
+    m_audio->set_volume(volume);
+  }
+}
+
+int LibSM64Manager::get_audio_volume() const {
+  return m_audio_volume;
+}
+
 void LibSM64Manager::shutdown() {
   if (!m_initialized) return;
+
+  // Stop the audio worker thread first so it can't race against the global
+  // terminate below. Destruct before we drop libsm64 state.
+  if (m_audio) {
+    m_audio->stop();
+    m_audio.reset();
+  }
 
   // Drop any tracked actor collision objects before terminating libsm64.
   clear_actor_collision();
@@ -223,7 +262,12 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   sm64_geo.color = m_tick_color_buf.data();
   sm64_geo.uv = m_tick_uv_buf.data();
 
-  sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
+  {
+    // Serialize against the audio worker thread — libsm64's global state is
+    // not reentrant and sm64_audio_tick() runs on cubeb's callback thread.
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
+  }
 
   // Copy results into our managed buffers (threadsafe)
   std::lock_guard<std::mutex> lock(m_geo_mutex);

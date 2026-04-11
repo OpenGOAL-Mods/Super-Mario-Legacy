@@ -96,6 +96,15 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
   if (prev_dynamic_actor_collision && !mgr.dynamic_actor_collision) {
     mgr.clear_actor_collision();
   }
+
+  int volume = mgr.get_audio_volume();
+  if (ImGui::SliderInt("Mario Volume", &volume, 0, 100, "%d%%")) {
+    mgr.set_audio_volume(volume);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Volume of the SM64 audio stream (music + sfx).");
+  }
+
   ImGui::Separator();
 
   // Initialization

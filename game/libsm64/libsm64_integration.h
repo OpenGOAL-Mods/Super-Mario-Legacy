@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -26,6 +27,8 @@ struct SM64MarioState;
 struct SM64MarioGeometryBuffers;
 
 namespace sm64 {
+
+class SM64AudioPlayer;
 
 // Maximum triangles output by libsm64 per frame
 static constexpr int GEO_MAX_TRIANGLES = 1024;
@@ -151,6 +154,10 @@ class LibSM64Manager {
   MarioState get_state();
   GroundPoundHitbox get_ground_pound_hitbox();
 
+  // Audio volume (0..100). Applied on the cubeb worker thread, lock-free.
+  void set_audio_volume(int volume);
+  int get_audio_volume() const;
+
   // Texture atlas (only valid after init)
   const uint8_t* get_texture_data() const { return m_texture_data.data(); }
   int get_texture_width() const { return TEXTURE_WIDTH; }
@@ -262,6 +269,7 @@ class LibSM64Manager {
   std::string m_last_rom_path;  // path of the ROM passed to the last successful init
   int32_t m_mario_id = -1;
   int m_loaded_surface_count = 0;
+  int m_audio_volume = 100;  // latched value, also mirrored into m_audio on start
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)
 
   // ---- Dynamic actor collision state ------------------------------------------------
@@ -300,6 +308,14 @@ class LibSM64Manager {
   int m_actor_diag_logs_remaining = 500;
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
+
+  // Serializes calls into libsm64 global state. sm64_mario_tick() and
+  // sm64_audio_tick() both touch shared internal state, so the audio worker
+  // thread holds this while pulling PCM, and the main thread holds it during
+  // tick(). Separate from m_geo_mutex which only guards the Mario geometry
+  // read/write snapshots.
+  std::mutex m_sm64_lock;
+  std::unique_ptr<SM64AudioPlayer> m_audio;
 
   // Double-buffered geometry for thread safety
   std::mutex m_geo_mutex;

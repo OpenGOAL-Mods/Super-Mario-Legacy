@@ -109,6 +109,20 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
                      "the water surface Y into libsm64 so Mario enters and\n"
                      "exits swim state along with Jak.");
   }
+  bool prev_yakow_grab = mgr.yakow_grab;
+  ImGui::Checkbox("Yakow Grab (punch near cow to pick up)", &mgr.yakow_grab);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Walks the Jak process tree each frame looking for\n"
+                     "yakow actors. When Mario is within grab range and\n"
+                     "presses Square (B), the closest yakow is glued to\n"
+                     "Mario's hand via the libsm64 fake-held-object API.\n"
+                     "Press Square again to throw the yakow (Mario runs the\n"
+                     "native throw action). Toggling off releases any held\n"
+                     "yakow and restores its normal AI.");
+  }
+  if (prev_yakow_grab && !mgr.yakow_grab) {
+    mgr.clear_yakow_grab();
+  }
 
   int volume = mgr.get_audio_volume();
   if (ImGui::SliderInt("Mario Volume", &volume, 0, 100, "%d%%")) {

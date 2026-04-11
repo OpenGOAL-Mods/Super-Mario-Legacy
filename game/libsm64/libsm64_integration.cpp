@@ -195,9 +195,12 @@ void LibSM64Manager::shutdown() {
 
   // Drop any tracked actor collision objects before terminating libsm64.
   clear_actor_collision();
+  clear_yakow_grab();
   m_type_cache = {};
   m_is_process_drawable_cache.clear();
   m_is_collide_shape_cache.clear();
+  m_yakow_type = 0;
+  m_is_yakow_cache.clear();
 
   if (m_mario_id >= 0) {
     sm64_mario_delete(m_mario_id);
@@ -238,6 +241,10 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
 
 void LibSM64Manager::delete_mario(int32_t mario_id) {
   if (m_mario_id == mario_id && m_mario_id >= 0) {
+    // Release any yakow we're holding before tearing down the Mario instance;
+    // otherwise the stale m_grabbed_yakow_ee would leak and the next Mario
+    // spawn would start "already holding".
+    clear_yakow_grab();
     sm64_mario_delete(m_mario_id);
     m_mario_id = -1;
   }
@@ -245,6 +252,12 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
 
 void LibSM64Manager::tick(const MarioInputState& input) {
   if (!m_initialized || m_mario_id < 0) return;
+
+  // Edge-detect the B (punch/grab) button for update_yakow_grab. Shift the
+  // previous frame into _prev first so (_cur && !_prev) becomes a single-
+  // frame "just pressed" pulse.
+  m_prev_button_b = m_cur_button_b;
+  m_cur_button_b = input.button_b;
 
   SM64MarioInputs sm64_input{};
   sm64_input.camLookX = input.cam_look_x;
@@ -1603,6 +1616,308 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
   };
   do_sweep(ctx);
   return result;
+}
+
+// ============================================================================
+// Yakow grab
+// ============================================================================
+//
+// Lets Mario pick up Jak yakow actors with the punch/grab button (B), carry
+// them around, and throw them with another B press. This mirrors the stock
+// SM64 light-object carry flow: we use the libsm64 fake-held-object API to
+// plant a sentinel into Mario's heldObj/usedObj slots and kick him into
+// ACT_PICKING_UP; from there Mario's action machine runs the normal
+// pickup → hold_idle → hold_walking → throw sequence under player control.
+//
+// While a yakow is "held" we walk the process tree each frame, read Mario's
+// current world pos + face angle, compute a hand position (Mario + forward *
+// yakow_hold_forward + up * yakow_hold_up, all in SM64 units converted to
+// Jak), and overwrite the yakow process-drawable's root.trans in EE memory
+// so the rendered yakow model teleports to Mario's hand. When SM64's action
+// machine transitions heldObj back to NULL (natural throw / damage / fall),
+// we detect it via sm64_mario_is_holding_fake() and release the yakow so
+// its normal AI resumes.
+//
+// Note: we don't modify the yakow's quat or velocity — only trans. The yakow
+// nav code runs every frame and may try to push the yakow back to its waypoint
+// but our trans-write happens AFTER the Jak tick (from OpenGLRenderer) so we
+// always win the race. Jitter from the yakow's physics resolving the glued
+// position against floors/walls is expected v1 behavior.
+
+// Walk the process tree to collect every live yakow actor. Returns a vector of
+// (ee_addr, trans_jak[3]) pairs — trans is read from root+12 (same path as
+// write_mario_pos_to_target). We reuse the existing ac::* helpers for pointer
+// validation and type-chain walking.
+namespace {
+
+struct YakowRecord {
+  u32 ee_addr;                 // process-drawable basic ptr
+  float trans_jak[3];          // world position in Jak units
+};
+
+// Collect every yakow under *active-pool* into `out`. Bail cleanly on any
+// invalid memory / missing type.
+void collect_yakows(u8* ee_mem, u32 mem_size, u32 false_val, u32 active_pool_sym,
+                     u32 yakow_type, std::unordered_map<u32, bool>& is_yakow_cache,
+                     std::vector<YakowRecord>& out) {
+  using namespace ac;
+  out.clear();
+  if (ee_mem == nullptr || mem_size < 1024 || false_val == 0 || yakow_type == 0 ||
+      active_pool_sym == 0) {
+    return;
+  }
+
+  u32 root_process;
+  if (!read_u32(ee_mem, active_pool_sym, mem_size, root_process)) return;
+  if (root_process == 0 || root_process == false_val) return;
+
+  auto deref_ppointer = [&](u32 pp, u32& out_node) -> bool {
+    if (pp == 0 || pp == false_val) return false;
+    if (!valid_ee_addr(pp, 4, mem_size)) return false;
+    u32 actual = 0;
+    if (!read_u32(ee_mem, pp, mem_size, actual)) return false;
+    if (actual == 0 || actual == false_val) return false;
+    if (!valid_basic_ptr(actual, mem_size)) return false;
+    out_node = actual;
+    return true;
+  };
+
+  std::vector<u32> stack;
+  stack.reserve(256);
+  {
+    u32 child_pp;
+    if (read_u32(ee_mem, root_process + PTREE_CHILD_OFF, mem_size, child_pp)) {
+      u32 first_child = 0;
+      if (deref_ppointer(child_pp, first_child)) {
+        stack.push_back(first_child);
+      }
+    }
+  }
+
+  std::unordered_set<u32> visited;
+  visited.reserve(512);
+  int nodes_visited = 0;
+
+  while (!stack.empty() && nodes_visited < MAX_PROCESS_TREE_NODES) {
+    u32 node = stack.back();
+    stack.pop_back();
+    if (node == 0 || node == false_val) continue;
+    if (!visited.insert(node).second) continue;
+    nodes_visited++;
+
+    if (!valid_basic_ptr(node, mem_size)) continue;
+
+    // Enqueue brother + child.
+    u32 brother_pp = 0, child_pp = 0;
+    read_u32(ee_mem, node + PTREE_BROTHER_OFF, mem_size, brother_pp);
+    read_u32(ee_mem, node + PTREE_CHILD_OFF, mem_size, child_pp);
+    u32 brother = 0, child = 0;
+    if (deref_ppointer(brother_pp, brother) && visited.find(brother) == visited.end()) {
+      stack.push_back(brother);
+    }
+    if (deref_ppointer(child_pp, child) && visited.find(child) == visited.end()) {
+      stack.push_back(child);
+    }
+
+    // Is this node a yakow?
+    u32 node_type;
+    if (!read_basic_type(ee_mem, node, mem_size, node_type)) continue;
+    if (node_type == node || !valid_basic_ptr(node_type, mem_size)) continue;
+    if (!type_is_descendant(ee_mem, mem_size, node_type, yakow_type, is_yakow_cache)) {
+      continue;
+    }
+
+    // Read root->trans (same path as write_mario_pos_to_target).
+    u32 root;
+    if (!read_u32(ee_mem, node + PDRAW_ROOT_OFF, mem_size, root)) continue;
+    if (root == 0 || root == false_val) continue;
+    if (!valid_basic_ptr(root, mem_size)) continue;
+
+    float trans[4];
+    if (!read_vec4(ee_mem, root + CSHAPE_TRANS_OFF, mem_size, trans)) continue;
+
+    YakowRecord r;
+    r.ee_addr = node;
+    r.trans_jak[0] = trans[0];
+    r.trans_jak[1] = trans[1];
+    r.trans_jak[2] = trans[2];
+    out.push_back(r);
+  }
+}
+
+// Overwrite the trans field of a yakow process-drawable in EE memory. Keeps
+// the w component at 1.0 (matches the vec4f layout Jak uses for positions).
+bool write_yakow_trans(u8* ee_mem, u32 mem_size, u32 false_val, u32 pd_addr,
+                       float x, float y, float z) {
+  using namespace ac;
+  if (ee_mem == nullptr || pd_addr == 0 || pd_addr == false_val) return false;
+  if (!valid_basic_ptr(pd_addr, mem_size)) return false;
+  u32 root;
+  if (!read_u32(ee_mem, pd_addr + PDRAW_ROOT_OFF, mem_size, root)) return false;
+  if (root == 0 || root == false_val) return false;
+  if (!valid_basic_ptr(root, mem_size)) return false;
+  u32 trans_addr = root + CSHAPE_TRANS_OFF;
+  if (!valid_ee_addr(trans_addr, 16, mem_size)) return false;
+  float trans[4] = {x, y, z, 1.0f};
+  std::memcpy(ee_mem + trans_addr, trans, 16);
+  return true;
+}
+
+}  // namespace
+
+void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) {
+    clear_yakow_grab();
+    return;
+  }
+  if (!yakow_grab) {
+    clear_yakow_grab();
+    return;
+  }
+
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  // Lazy yakow-type resolve. The symbol may not exist yet on the first few
+  // frames (e.g. before the village1 level has loaded its code), so a failed
+  // lookup is silent and retried next frame.
+  if (m_yakow_type == 0) {
+    auto y_sym = jak1::find_symbol_from_c("yakow");
+    if (y_sym.offset == 0) return;
+    u32 y_val = y_sym->value;
+    if (y_val == 0 || y_val == false_val) return;
+    m_yakow_type = y_val;
+    lg::info("[libsm64] Yakow grab type cache ready: yakow=0x{:X}", y_val);
+  }
+
+  // We also need the active-pool symbol. Reuse m_type_cache if the actor
+  // collision walker has already populated it, otherwise look it up ourselves.
+  u32 active_pool_sym = m_type_cache.active_pool_sym;
+  if (active_pool_sym == 0) {
+    auto ap = jak1::find_symbol_from_c("*active-pool*");
+    if (ap.offset == 0) return;
+    active_pool_sym = ap.offset;
+  }
+
+  // Walk the process tree and collect all live yakows.
+  std::vector<YakowRecord> yakows;
+  collect_yakows(ee_mem, EE_MAIN_MEM_SIZE, false_val, active_pool_sym, m_yakow_type,
+                  m_is_yakow_cache, yakows);
+
+  // Current Mario state (Jak-unit position, radians face angle).
+  MarioState state = get_state();
+
+  // ---- Case 1: Mario is currently holding a yakow (via the fake-held API) --
+  if (m_grabbed_yakow_ee != 0) {
+    // Did SM64's action machine release our fake held object on its own
+    // (natural throw / drop / damage)? If so, release the yakow too.
+    int still_holding = 0;
+    {
+      std::scoped_lock lock(m_sm64_lock);
+      still_holding = sm64_mario_is_holding_fake(m_mario_id);
+    }
+    if (!still_holding) {
+      lg::info("[libsm64] yakow grab: SM64 released fake held object — freeing yakow 0x{:X}",
+               m_grabbed_yakow_ee);
+      m_grabbed_yakow_ee = 0;
+      return;
+    }
+
+    // Is the held yakow process still alive (i.e. still in our discovered list)?
+    bool still_alive = false;
+    for (const auto& r : yakows) {
+      if (r.ee_addr == m_grabbed_yakow_ee) {
+        still_alive = true;
+        break;
+      }
+    }
+    if (!still_alive) {
+      lg::info("[libsm64] yakow grab: held yakow 0x{:X} no longer in process tree — releasing",
+               m_grabbed_yakow_ee);
+      {
+        std::scoped_lock lock(m_sm64_lock);
+        sm64_mario_end_fake_hold(m_mario_id);
+      }
+      m_grabbed_yakow_ee = 0;
+      return;
+    }
+
+    // Glue the yakow to Mario's hand. Hold position is mario_pos + forward *
+    // yakow_hold_forward + up * yakow_hold_up, where forward = (sin(yaw), 0,
+    // cos(yaw)) (SM64 yaw-forward convention, matching mario_throw_held_object).
+    const float forward_jak = yakow_hold_forward_sm64 * SM64_TO_JAK_SCALE;
+    const float up_jak = yakow_hold_up_sm64 * SM64_TO_JAK_SCALE;
+    const float yaw = state.face_angle;
+    const float sx = std::sin(yaw);
+    const float sz = std::cos(yaw);
+    const float hold_x = state.position.x() + sx * forward_jak;
+    const float hold_y = state.position.y() + up_jak;
+    const float hold_z = state.position.z() + sz * forward_jak;
+    if (!write_yakow_trans(ee_mem, EE_MAIN_MEM_SIZE, false_val, m_grabbed_yakow_ee,
+                            hold_x, hold_y, hold_z)) {
+      // Write failed (stale ptr, etc) — release.
+      lg::warn("[libsm64] yakow grab: write_yakow_trans failed for 0x{:X} — releasing",
+               m_grabbed_yakow_ee);
+      {
+        std::scoped_lock lock(m_sm64_lock);
+        sm64_mario_end_fake_hold(m_mario_id);
+      }
+      m_grabbed_yakow_ee = 0;
+    }
+    return;
+  }
+
+  // ---- Case 2: Not holding. Maybe start a grab this frame? -----------------
+  // Only on the rising edge of button B. sm64_mario_tick has already consumed
+  // this same press as a punch by now, but calling begin_fake_hold below
+  // overrides the action.
+  const bool b_just_pressed = m_cur_button_b && !m_prev_button_b;
+  if (!b_just_pressed) return;
+
+  // Be permissive about when we'll accept a grab. SM64's native
+  // able_to_grab_object() is restrictive (only ACT_PUNCHING / ACT_DIVE /
+  // etc), but we override the action directly via begin_fake_hold so we
+  // can come out of almost any state. The only things we'd want to avoid
+  // are hold-group actions (already holding) and cutscenes — but
+  // begin_fake_hold's own end_fake_hold path handles the hold-group case,
+  // and cutscenes aren't hit in practice. Reserved for future filtering.
+
+  // Find the closest yakow within yakow_grab_radius_sm64 (SM64 units). We
+  // compare in Jak units by scaling the threshold.
+  const float radius_jak = yakow_grab_radius_sm64 * SM64_TO_JAK_SCALE;
+  const float radius_sq_jak = radius_jak * radius_jak;
+  u32 best_ee = 0;
+  float best_d2 = radius_sq_jak;
+  for (const auto& r : yakows) {
+    float dx = r.trans_jak[0] - state.position.x();
+    float dy = r.trans_jak[1] - state.position.y();
+    float dz = r.trans_jak[2] - state.position.z();
+    float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < best_d2) {
+      best_d2 = d2;
+      best_ee = r.ee_addr;
+    }
+  }
+  if (best_ee == 0) return;
+
+  // Commit the grab.
+  lg::info("[libsm64] yakow grab: grabbing yakow 0x{:X} at dist {:.0f} Jak units",
+           best_ee, std::sqrt(best_d2));
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_mario_begin_fake_hold(m_mario_id);
+  }
+  m_grabbed_yakow_ee = best_ee;
+}
+
+void LibSM64Manager::clear_yakow_grab() {
+  if (m_grabbed_yakow_ee != 0) {
+    if (m_initialized && m_mario_id >= 0) {
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_mario_end_fake_hold(m_mario_id);
+    }
+    m_grabbed_yakow_ee = 0;
+  }
 }
 
 }  // namespace sm64

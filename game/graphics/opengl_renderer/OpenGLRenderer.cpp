@@ -1095,6 +1095,11 @@ void OpenGLRenderer::tick_mario_sm64() {
   if (mgr.dynamic_actor_collision) {
     mgr.update_actor_collision(g_ee_main_mem);
   }
+
+  // Yakow grab: walk the process tree, detect punch-edge + proximity, and
+  // glue a held yakow to Mario's hand position each frame via the libsm64
+  // fake-held-object API. No-op when the toggle is off.
+  mgr.update_yakow_grab(g_ee_main_mem);
 }
 
 void OpenGLRenderer::render_mario_sm64(ScopedProfilerNode& prof) {

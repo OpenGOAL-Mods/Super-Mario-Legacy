@@ -205,6 +205,26 @@ class LibSM64Manager {
   // Tear down all tracked actor surface objects (on level change, disable, etc.)
   void clear_actor_collision();
 
+  // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
+  // and lets Mario pick one up with the grab button (punch) when standing
+  // close to it. While held, the yakow's trans is overwritten each frame to
+  // glue it to Mario's hand position (computed from mario pos + face angle).
+  // On natural release (throw, drop, damage), the yakow's trans is left
+  // wherever Mario put it and its normal AI resumes.
+  //
+  // This uses the libsm64 fake-held-object API (sm64_mario_begin_fake_hold /
+  // sm64_mario_is_holding_fake) so Mario's stock pickup/hold/throw actions
+  // drive the interaction without needing a real SM64 Object to back it.
+  //
+  // Call this from the game-side tick AFTER tick() and after
+  // sync_jak_to_mario, so Mario's position for this frame is current.
+  // Safe to call when disabled — it's a no-op then.
+  void update_yakow_grab(u8* ee_mem);
+
+  // Release any held yakow and reset grab state. Called on level change,
+  // Mario delete, yakow_grab toggle off, or shutdown.
+  void clear_yakow_grab();
+
   // --- Testing hooks ---------------------------------------------------------
   // Run one actor-collision sweep against a custom EE memory buffer (with a
   // custom "false" value and EE memory size). Used by unit tests to validate
@@ -277,6 +297,19 @@ class LibSM64Manager {
   // without risking crashes in libsm64 itself.
   bool dynamic_actor_collision_dry_run = false;
 
+  // Yakow grab feature — default on. When enabled, update_yakow_grab walks
+  // the process tree looking for yakow actors and uses the libsm64 fake-hold
+  // API to let Mario pick them up on B-press when close.
+  bool yakow_grab = true;
+  // Proximity threshold (SM64 units) for initiating a grab when B is pressed.
+  // 160 SM64u ≈ Mario's height. At 43 SM64u/Jak meter that's ~3.7m.
+  float yakow_grab_radius_sm64 = 160.0f;
+  // Forward offset (SM64 units) from Mario's feet toward his face angle,
+  // where the held yakow is glued. Roughly matches the light-object HOLP.
+  float yakow_hold_forward_sm64 = 60.0f;
+  // Up offset (SM64 units) from Mario's feet for the held yakow.
+  float yakow_hold_up_sm64 = 80.0f;
+
  private:
   LibSM64Manager() = default;
   ~LibSM64Manager();
@@ -319,6 +352,24 @@ class LibSM64Manager {
   // Set of mesh pointers that have failed extraction — we blacklist them to
   // avoid re-trying every frame and spamming logs.
   std::unordered_set<u32> m_broken_meshes;
+
+  // ---- Yakow grab state -------------------------------------------------
+  // Cached yakow type ptr (resolved lazily on first tick via find_symbol_from_c).
+  // 0 means "not yet resolved this session".
+  u32 m_yakow_type = 0;
+  // Memoized "is this type a yakow descendant" cache (usually yakow itself,
+  // but we go through type_is_descendant for consistency with the existing
+  // walker helpers so yakow subtypes would also match if they ever exist).
+  std::unordered_map<u32, bool> m_is_yakow_cache;
+  // Process-tree EE address of the currently held yakow, or 0 if not holding.
+  // While non-zero, update_yakow_grab rewrites this process's trans each
+  // frame to glue it to Mario's hand.
+  u32 m_grabbed_yakow_ee = 0;
+  // Edge-detect state for the grab/throw button (button_b, which the input
+  // layer maps to Square). Updated from MarioInputState each tick() so
+  // update_yakow_grab can detect a single-frame press vs a hold.
+  bool m_prev_button_b = false;
+  bool m_cur_button_b = false;
 
   // Throttling and diagnostics. The log budget is intentionally large so that
   // when the feature crashes, the most recent lines in the log file pinpoint

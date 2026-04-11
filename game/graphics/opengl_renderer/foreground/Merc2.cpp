@@ -6,6 +6,7 @@
 
 #include "game/graphics/opengl_renderer/EyeRenderer.h"
 #include "game/graphics/opengl_renderer/background/background_common.h"
+#include "game/libsm64/libsm64_integration.h"
 
 #include "third-party/imgui/imgui.h"
 
@@ -412,6 +413,17 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
   char name[128];
   strcpy(name, (const char*)setup.data);
   input_data += 128;
+
+  // When Mario is active we hide Jak's player model so Mario isn't stuck
+  // inside Jak. Toggle via the libsm64 debug window ("Hide Jak when Mario
+  // is active"). Skips before any bone/effect allocation.
+  {
+    auto& sm64_mgr = sm64::LibSM64Manager::instance();
+    if (sm64_mgr.hide_jak_model && sm64_mgr.has_mario() &&
+        strcmp(name, "eichar-lod0") == 0) {
+      return;
+    }
+  }
 
   // Look up the model by name in the loader.
   // This will return a reference to this model's data, plus a reference to the level's data

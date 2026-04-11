@@ -8,6 +8,7 @@
 #include "common/log/log.h"
 #include "game/graphics/opengl_renderer/loader/Loader.h"
 #include "game/libsm64/libsm64_integration.h"
+#include "game/runtime.h"
 
 #include "third-party/imgui/imgui.h"
 
@@ -59,7 +60,7 @@ static int32_t spawn_mario_with_collision_fallback(LibSM64Manager& mgr,
   return mgr.create_mario(x, y, z);
 }
 
-void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos) {
+void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
   if (!m_visible) return;
 
   auto& mgr = LibSM64Manager::instance();
@@ -95,6 +96,12 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
   }
   if (prev_dynamic_actor_collision && !mgr.dynamic_actor_collision) {
     mgr.clear_actor_collision();
+  }
+  ImGui::Checkbox("Hide Jak when Mario is active", &mgr.hide_jak_model);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Skips rendering Jak's player model (eichar-lod0)\n"
+                     "while a Mario instance exists, so Mario isn't clipped\n"
+                     "inside Jak.");
   }
 
   int volume = mgr.get_audio_volume();
@@ -195,23 +202,37 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
         if (ImGui::Button("Spawn Mario")) {
           mgr.create_mario(m_spawn_pos[0], m_spawn_pos[1], m_spawn_pos[2]);
         }
-        if (camera_pos) {
-          ImGui::SameLine();
-          if (ImGui::Button("Spawn Mario at Camera Position")) {
-            spawn_mario_with_collision_fallback(mgr, loader, camera_pos[0], camera_pos[1],
-                                                 camera_pos[2]);
+        ImGui::SameLine();
+        if (ImGui::Button("Spawn Mario at Target Position")) {
+          math::Vector3f tpos;
+          float tyaw = 0.f;
+          if (mgr.read_target_transform(g_ee_main_mem, &tpos, &tyaw)) {
+            int32_t id = spawn_mario_with_collision_fallback(mgr, loader,
+                                                              tpos.x(), tpos.y(), tpos.z());
+            if (id >= 0) {
+              mgr.set_mario_face_angle(tyaw);
+            }
+          } else {
+            lg::warn("[libsm64] Spawn at target: *target* not found");
           }
         }
       } else {
         if (ImGui::Button("Delete Mario")) {
           mgr.delete_mario(mgr.get_mario_id());
         }
-        if (camera_pos) {
-          ImGui::SameLine();
-          if (ImGui::Button("Respawn at Camera Position")) {
+        ImGui::SameLine();
+        if (ImGui::Button("Respawn at Target Position")) {
+          math::Vector3f tpos;
+          float tyaw = 0.f;
+          if (mgr.read_target_transform(g_ee_main_mem, &tpos, &tyaw)) {
             mgr.delete_mario(mgr.get_mario_id());
-            spawn_mario_with_collision_fallback(mgr, loader, camera_pos[0], camera_pos[1],
-                                                 camera_pos[2]);
+            int32_t id = spawn_mario_with_collision_fallback(mgr, loader,
+                                                              tpos.x(), tpos.y(), tpos.z());
+            if (id >= 0) {
+              mgr.set_mario_face_angle(tyaw);
+            }
+          } else {
+            lg::warn("[libsm64] Respawn at target: *target* not found");
           }
         }
 

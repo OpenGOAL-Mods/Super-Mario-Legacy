@@ -570,6 +570,59 @@ void LibSM64Manager::sync_jak_to_mario(u8* ee_mem, u32 s7_offset) {
   write_mario_pos_to_target(ee_mem, EE_MAIN_MEM_SIZE, false_val, target_ptr, mario_pos);
 }
 
+bool LibSM64Manager::read_target_transform(u8* ee_mem,
+                                           math::Vector3f* out_pos,
+                                           float* out_yaw_rad) {
+  if (!ee_mem) return false;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return false;
+  u32 target_ptr = target_sym->value;
+  if (target_ptr == 0 || target_ptr == false_val) return false;
+
+  // Same offset walk as write_mario_pos_to_target: process-drawable.root is
+  // declared at GOAL :offset 112 → runtime 108, then trsqv.trans at GOAL
+  // :offset 16 → runtime 12, and quat overlays rot.x at GOAL :offset 32 →
+  // runtime 28 (16 bytes, x/y/z/w floats).
+  constexpr u32 ROOT_RUNTIME_OFF = 108;
+  constexpr u32 TRANS_RUNTIME_OFF = 12;
+  constexpr u32 QUAT_RUNTIME_OFF = 28;
+  if (target_ptr + ROOT_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
+
+  u32 root_ptr;
+  std::memcpy(&root_ptr, ee_mem + target_ptr + ROOT_RUNTIME_OFF, 4);
+  if (root_ptr == 0 || root_ptr == false_val) return false;
+  if (root_ptr + QUAT_RUNTIME_OFF + 16 > EE_MAIN_MEM_SIZE) return false;
+
+  float trans[4];
+  std::memcpy(trans, ee_mem + root_ptr + TRANS_RUNTIME_OFF, 16);
+  float quat[4];  // x, y, z, w
+  std::memcpy(quat, ee_mem + root_ptr + QUAT_RUNTIME_OFF, 16);
+
+  if (out_pos) {
+    *out_pos = math::Vector3f(trans[0], trans[1], trans[2]);
+  }
+  if (out_yaw_rad) {
+    // Extract Y-axis yaw from the quaternion. Using the full formula so it
+    // stays well-defined even if the Jak player picks up some roll/pitch.
+    const float x = quat[0];
+    const float y = quat[1];
+    const float z = quat[2];
+    const float w = quat[3];
+    *out_yaw_rad = std::atan2(2.0f * (w * y + x * z),
+                              1.0f - 2.0f * (y * y + x * x));
+  }
+  return true;
+}
+
+void LibSM64Manager::set_mario_face_angle(float yaw_rad) {
+  if (!m_initialized || m_mario_id < 0) return;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_faceangle(m_mario_id, yaw_rad);
+}
+
 MarioGeometry LibSM64Manager::get_geometry() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
   return m_geometry;

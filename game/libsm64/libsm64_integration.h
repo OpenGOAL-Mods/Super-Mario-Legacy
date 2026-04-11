@@ -168,6 +168,15 @@ class LibSM64Manager {
   void resolve_target_symbol();
   void sync_jak_to_mario(u8* ee_mem, u32 s7_offset);
 
+  // Reads Jak's current world position (in Jak units) and Y-axis yaw (in
+  // radians) from the live *target* process in EE memory. Returns false if
+  // *target* isn't resolvable (e.g. no game running). Used by the debug GUI
+  // to spawn Mario where Jak currently stands.
+  bool read_target_transform(u8* ee_mem, math::Vector3f* out_pos, float* out_yaw_rad);
+
+  // Force Mario's yaw (in radians, world Y axis). No-op if no Mario is spawned.
+  void set_mario_face_angle(float yaw_rad);
+
   // Write Mario's position into a target process's root->trans in EE memory.
   // Returns true if the write succeeded. Exposed for testing.
   static bool write_mario_pos_to_target(u8* ee_mem,
@@ -253,6 +262,7 @@ class LibSM64Manager {
   bool follow_mario = true;           // Lock Jak's position to Mario's
   bool auto_sync_collision = true;    // Auto-reload static collision when levels change
   bool dynamic_actor_collision = true; // Walk process tree and mirror collide-meshes
+  bool hide_jak_model = true;         // Skip drawing eichar-lod0 while Mario is active
   // When set, update_actor_collision walks the tree and logs what it finds
   // but never calls into libsm64. Used to validate the walker in isolation
   // without risking crashes in libsm64 itself.

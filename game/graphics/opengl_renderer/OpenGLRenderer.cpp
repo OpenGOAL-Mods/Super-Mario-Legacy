@@ -1270,7 +1270,7 @@ void OpenGLRenderer::render(DmaFollower dma, const RenderOptions& settings) {
   if (settings.draw_sm64_window) {
     g_current_renderer = "sm64-debug";
     m_sm64_debug_gui.set_visible(true);
-    m_sm64_debug_gui.draw(m_render_state.loader, m_render_state.camera_pos.data());
+    m_sm64_debug_gui.draw(m_render_state.loader);
   } else {
     m_sm64_debug_gui.set_visible(false);
   }

@@ -225,6 +225,17 @@ class LibSM64Manager {
   // Mario delete, yakow_grab toggle off, or shutdown.
   void clear_yakow_grab();
 
+  // Safety floor: create-or-move the pseudo-floor quad so it's glued just
+  // below Mario's current XYZ. See `safety_floor` comment for the rationale.
+  // Called from tick() before sm64_mario_tick each frame. No-op if the
+  // toggle is off or Mario isn't spawned. Must be called with m_sm64_lock
+  // held — it calls sm64_surface_object_create/move which touch libsm64
+  // global state.
+  void update_safety_floor(float mario_x_sm64, float mario_y_sm64, float mario_z_sm64);
+  // Delete the safety floor surface object if one exists. Called on Mario
+  // respawn, delete, and shutdown.
+  void clear_safety_floor();
+
   // --- Testing hooks ---------------------------------------------------------
   // Run one actor-collision sweep against a custom EE memory buffer (with a
   // custom "false" value and EE memory size). Used by unit tests to validate
@@ -307,6 +318,13 @@ class LibSM64Manager {
   // the process tree looking for yakow actors and uses the libsm64 fake-hold
   // API to let Mario pick them up on B-press when close.
   bool yakow_grab = true;
+  // Pseudo safety-floor: a small flat quad glued 200 SM64 units below
+  // Mario each tick so libsm64's find_floor query always returns a valid
+  // surface. Just meant to stop the "Mario walks off the edge into a
+  // NULL floor" failure mode.
+  bool safety_floor = true;
+  // How far below Mario (in SM64 units) the safety quad sits.
+  float safety_floor_drop_sm64 = 200.0f;
   // Proximity threshold (SM64 units) for initiating a grab when B is pressed.
   // 160 SM64u ≈ Mario's height. At 43 SM64u/Jak meter that's ~3.7m.
   float yakow_grab_radius_sm64 = 160.0f;
@@ -391,6 +409,16 @@ class LibSM64Manager {
   int m_actor_sync_frame = 0;
   int m_actor_diag_logs_remaining = 500;
 
+  // ---- Safety floor state ----------------------------------------------
+  // The libsm64 surface-object id we allocated for the safety quad, valid
+  // only when `m_safety_floor_created` is true. Created lazily on the first
+  // tick after Mario is spawned; destroyed on delete_mario/shutdown/
+  // respawn so the next spawn starts fresh. The quad's Y is recomputed from
+  // Mario's current Y each frame in update_safety_floor — there is no
+  // cached Y because the whole point is for it to follow him.
+  uint32_t m_safety_floor_id = 0;
+  bool m_safety_floor_created = false;
+
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 
   // Serializes calls into libsm64 global state. sm64_mario_tick() and
@@ -407,6 +435,13 @@ class LibSM64Manager {
   MarioState m_state;
   GroundPoundHitbox m_gp_hitbox;
   uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
+  // Last frame's "is Mario submerged in a lava water-vol" flag. Used by
+  // update_mario_water to detect the dry->lava entry edge, so each time
+  // Mario falls back into the lava plane during an ACT_LAVA_BOOST arc we
+  // can re-fire the bounce even though he's still in a fire action. Without
+  // this edge detection Mario would launch once on first contact, then
+  // pass through the lava surface without any reaction on the second drop.
+  bool m_prev_in_lava = false;
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

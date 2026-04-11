@@ -67,7 +67,7 @@
     (set! (-> v1-2 waveform) ripple-for-villagec-lava))
   (logclear! (-> this flags) (water-flags wt23))
   (logior! (-> this flags) (water-flags wt25))
-  (set! (-> this attack-event) 'lava)
+  ;;(set! (-> this attack-event) 'lava)
   (none))
 
 (deftype gondola (process-drawable)

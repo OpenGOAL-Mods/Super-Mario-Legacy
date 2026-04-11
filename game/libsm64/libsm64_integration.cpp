@@ -196,6 +196,7 @@ void LibSM64Manager::shutdown() {
   // Drop any tracked actor collision objects before terminating libsm64.
   clear_actor_collision();
   clear_yakow_grab();
+  clear_safety_floor();
   m_type_cache = {};
   m_is_process_drawable_cache.clear();
   m_is_collide_shape_cache.clear();
@@ -222,6 +223,16 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
     sm64_mario_delete(m_mario_id);
   }
 
+  // Tear the old safety floor down before the new spawn so the next tick
+  // starts a fresh surface object at the new Mario position. Without this,
+  // a respawn into a completely different area would leave the safety
+  // surface object at stale XYZ for one frame.
+  clear_safety_floor();
+
+  // Reset the lava-entry edge state so a respawn into a dry area doesn't
+  // see a stale "was in lava" from the last Mario's death-in-lava frame.
+  m_prev_in_lava = false;
+
   // Convert Jak coordinates to SM64 coordinates
   // Jak: Y-up, same as SM64, but different scale
   float sm64_x = x * JAK_TO_SM64_SCALE;
@@ -232,6 +243,15 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
   if (m_mario_id < 0) {
     lg::error("[libsm64] Failed to create Mario");
     return -1;
+  }
+
+  // Seed m_state.position with the spawn position so the very first tick's
+  // update_safety_floor call sees the right XYZ. Without this, the first
+  // frame's safety quad would land at (0,0,0) minus drop, which is
+  // useless for any level whose spawn isn't near the origin.
+  {
+    std::lock_guard<std::mutex> lock(m_geo_mutex);
+    m_state.position = math::Vector3f(x, y, z);
   }
 
   lg::info("[libsm64] Mario created at ({}, {}, {}) [SM64: ({}, {}, {})]",
@@ -245,6 +265,8 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
     // otherwise the stale m_grabbed_yakow_ee would leak and the next Mario
     // spawn would start "already holding".
     clear_yakow_grab();
+    // Drop the safety floor too so a later respawn starts clean.
+    clear_safety_floor();
     sm64_mario_delete(m_mario_id);
     m_mario_id = -1;
   }
@@ -279,6 +301,19 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     // Serialize against the audio worker thread — libsm64's global state is
     // not reentrant and sm64_audio_tick() runs on cubeb's callback thread.
     std::scoped_lock lock(m_sm64_lock);
+
+    // Reposition the safety floor under Mario BEFORE the tick so libsm64's
+    // per-frame floor query (inside perform_ground_quarter_step /
+    // perform_air_quarter_step) sees a valid floor beneath him. We use
+    // last frame's position — on the very first tick after spawn m_state
+    // was seeded to the spawn coords in create_mario, so it's already
+    // correct. The quad tracks Mario's XYZ with a fixed Y drop; see
+    // update_safety_floor's comment for why this never makes Mario "land"
+    // on the pseudo floor during normal play.
+    update_safety_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
+                        m_state.position.y() * JAK_TO_SM64_SCALE,
+                        m_state.position.z() * JAK_TO_SM64_SCALE);
+
     sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
   }
 
@@ -368,6 +403,76 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     m_gp_hitbox.hits_this_frame = 0;
   }
 
+  // ---- Fire-action handling (hot coals / lava) ---------------------------
+  // When Mario touches a SURFACE_BURNING triangle (hot coals or lava in our
+  // Jak level-collision filter), libsm64 routes him through two paths:
+  //
+  //   1. Grounded contact → interaction.c::check_lava_boost() which calls
+  //      drop_and_set_mario_action(m, ACT_LAVA_BOOST, 0) and adds 12/18 to
+  //      Mario's hurtCounter.
+  //   2. Airborne wall hit → mario_actions_airborne.c::lava_boost_on_wall()
+  //      which also sets ACT_LAVA_BOOST (with actionArg=1) after returning
+  //      AIR_STEP_HIT_LAVA_WALL from mario_step.c.
+  //
+  // Stock SM64's act_lava_boost at mario_actions_airborne.c:1568-1570 checks
+  // `if (m->health < 0x100) level_trigger_warp(m, WARP_OP_DEATH);` — i.e.,
+  // it tries to warp Mario to the level death spawn when his health drops.
+  // libsm64 stubs warps out (there's no level to reload), so Mario's native
+  // lava death NEVER fires. A 0-wedge Mario would bounce forever on fire.
+  //
+  // Behavior: if Mario is in any fire action AND has 0 wedges, we force him
+  // into ACT_IDLE. He stops burning, stands still on the hot surface, and
+  // the lava boost loop breaks. (Next frame the lava check might re-trigger
+  // since he's still physically on the burning tri, so we keep forcing idle
+  // — which has the visual effect of him standing motionless and smoking.)
+  //
+  // We watch ACT_LAVA_BOOST / ACT_LAVA_BOOST_LAND (the real burning actions
+  // libsm64 uses) AND the three ACT_BURNING_* actions (stock SM64 entries
+  // from fire-piranha enemies that libsm64 doesn't ship — kept for defense
+  // in depth). Health in SM64 is laid out as 0xHHSS where HH's low nibble
+  // is the wedge count, so `wedges` = (health >> 8) & F.
+  constexpr uint32_t kActLavaBoost = 0x010208B7;
+  constexpr uint32_t kActLavaBoostLand = 0x08000239;
+  constexpr uint32_t kActBurningGround = 0x00020449;
+  constexpr uint32_t kActBurningJump = 0x010208B4;
+  constexpr uint32_t kActBurningFall = 0x010208B5;
+  constexpr uint32_t kActIdle = 0x0C400201;
+  auto is_fire_action = [&](uint32_t a) {
+    return a == kActLavaBoost || a == kActLavaBoostLand ||
+           a == kActBurningGround || a == kActBurningJump || a == kActBurningFall;
+  };
+  const bool is_burning = is_fire_action(sm64_state.action);
+  const bool was_burning = is_fire_action(m_prev_action);
+  const uint32_t wedges = (static_cast<uint32_t>(sm64_state.health) >> 8) & 0xF;
+
+  // Diagnostic: log every edge into / out of a fire action so we can see
+  // both (a) whether Mario actually enters a burning action when stepping
+  // on a Jak hot-surface tri, and (b) what his health is at that moment.
+  // This is critical for debugging — if these lines never fire, the
+  // SURFACE_BURNING tagging in load_level_collision isn't reaching Mario.
+  if (is_burning && !was_burning) {
+    lg::info(
+        "[libsm64] Mario entered fire action 0x{:08X} (health=0x{:04X}, {}/8 wedges, "
+        "prev=0x{:08X})",
+        sm64_state.action, sm64_state.health, wedges, m_prev_action);
+  }
+  if (!is_burning && was_burning) {
+    lg::info("[libsm64] Mario left fire action 0x{:08X} -> 0x{:08X} (health=0x{:04X}, {}/8)",
+             m_prev_action, sm64_state.action, sm64_state.health, wedges);
+  }
+
+  if (is_burning && wedges == 0) {
+    {
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_set_mario_action(m_mario_id, kActIdle);
+    }
+    if (!was_burning) {
+      lg::info(
+          "[libsm64] Burning at 0/8 wedges — forcing Mario to ACT_IDLE (was 0x{:08X}, health=0x{:04X})",
+          sm64_state.action, sm64_state.health);
+    }
+  }
+
   m_prev_action = sm64_state.action;
 }
 
@@ -454,6 +559,119 @@ void LibSM64Manager::load_flat_ground(float y_height, float half_extent) {
   lg::info("[libsm64] Loaded flat ground at y={} extent={}", y_height, half_extent);
 }
 
+void LibSM64Manager::update_safety_floor(float mario_x_sm64,
+                                         float mario_y_sm64,
+                                         float mario_z_sm64) {
+  // Lazy-create a 300x300 SM64u quad as a libsm64 surface object, then
+  // move it each tick so it sits exactly `safety_floor_drop_sm64` units
+  // below Mario. Purely there so find_floor never returns NULL.
+  //
+  // The surfaces array is declared in LOCAL space (centered at origin) so
+  // sm64_surface_object_move can translate it without us rebuilding geom.
+  // Winding matches load_flat_ground (cw from above → upward normal in
+  // SM64's left-handed world space, i.e. a floor Mario can stand on).
+  if (!m_initialized || !safety_floor) return;
+  if (m_mario_id < 0) return;
+
+  // Half-extent of the safety quad in SM64 units. 150 → 300x300 SM64u.
+  constexpr int32_t kSafetyHalfExtent = 150;
+
+  // Compute world-space Y for the quad this frame. The quad tracks Mario
+  // with a small fixed drop.
+  const float safety_y_sm64 = mario_y_sm64 - safety_floor_drop_sm64;
+
+  if (!m_safety_floor_created) {
+    SM64Surface surfaces[2];
+    std::memset(surfaces, 0, sizeof(surfaces));
+
+    // CRITICAL: SM64 computes the surface normal as (v2-v1) x (v3-v2) and
+    // find_floor_from_list rejects anything with normal.y <= 0.01. So
+    // triangles need to wind in the order that gives +Y normal. For a
+    // flat XZ quad on y=0, this means picking v2 and v3 such that going
+    // v1→v2→v3 looks CCW when viewed from BELOW (i.e. CW from above in
+    // SM64's left-handed Y-up space). Empirically verified by the ny
+    // formula below:
+    //   ny = (z2-z1)*(x3-x2) - (x2-x1)*(z3-z2) > 0  →  floor
+    //   ny < 0                                       →  ceiling (rejected)
+    //
+    // Triangle 1: v1=(-e,0,-e), v2=(-e,0,e), v3=(e,0,-e)
+    //   ny = (e - (-e))*(e - (-e)) - ((-e) - (-e))*((-e) - e)
+    //      = (2e)(2e) - (0)(-2e) = 4e² > 0 ✓
+    surfaces[0].type = 0x0000;       // SURFACE_DEFAULT
+    surfaces[0].force = 0;
+    surfaces[0].terrain = 0x0001;    // TERRAIN_STONE
+    surfaces[0].vertices[0][0] = -kSafetyHalfExtent;
+    surfaces[0].vertices[0][1] = 0;  // local Y — world Y comes from transform
+    surfaces[0].vertices[0][2] = -kSafetyHalfExtent;
+    surfaces[0].vertices[1][0] = -kSafetyHalfExtent;
+    surfaces[0].vertices[1][1] = 0;
+    surfaces[0].vertices[1][2] = kSafetyHalfExtent;
+    surfaces[0].vertices[2][0] = kSafetyHalfExtent;
+    surfaces[0].vertices[2][1] = 0;
+    surfaces[0].vertices[2][2] = -kSafetyHalfExtent;
+
+    // Triangle 2: v1=(e,0,-e), v2=(-e,0,e), v3=(e,0,e)
+    //   ny = (e - (-e))*(e - (-e)) - ((-e) - e)*(e - e)
+    //      = (2e)(2e) - (-2e)(0) = 4e² > 0 ✓
+    surfaces[1].type = 0x0000;
+    surfaces[1].force = 0;
+    surfaces[1].terrain = 0x0001;
+    surfaces[1].vertices[0][0] = kSafetyHalfExtent;
+    surfaces[1].vertices[0][1] = 0;
+    surfaces[1].vertices[0][2] = -kSafetyHalfExtent;
+    surfaces[1].vertices[1][0] = -kSafetyHalfExtent;
+    surfaces[1].vertices[1][1] = 0;
+    surfaces[1].vertices[1][2] = kSafetyHalfExtent;
+    surfaces[1].vertices[2][0] = kSafetyHalfExtent;
+    surfaces[1].vertices[2][1] = 0;
+    surfaces[1].vertices[2][2] = kSafetyHalfExtent;
+
+    SM64SurfaceObject obj{};
+    obj.transform.position[0] = mario_x_sm64;
+    obj.transform.position[1] = safety_y_sm64;
+    obj.transform.position[2] = mario_z_sm64;
+    obj.transform.eulerRotation[0] = 0.0f;
+    obj.transform.eulerRotation[1] = 0.0f;
+    obj.transform.eulerRotation[2] = 0.0f;
+    obj.surfaceCount = 2;
+    obj.surfaces = surfaces;
+
+    m_safety_floor_id = sm64_surface_object_create(&obj);
+    m_safety_floor_created = true;
+    lg::info(
+        "[libsm64] Safety floor created at Mario XYZ=({:.0f}, {:.0f}, {:.0f}) "
+        "safetyY={:.0f} drop={:.0f} (id={}, extent={} SM64u)",
+        mario_x_sm64, mario_y_sm64, mario_z_sm64, safety_y_sm64,
+        safety_floor_drop_sm64, m_safety_floor_id, kSafetyHalfExtent * 2);
+    return;
+  }
+
+  // Subsequent frames: just translate to Mario's new XYZ (minus the drop).
+  // SM64's surface-object move path also derives a platform velocity from
+  // the delta, which is fine here — the safety quad mirrors Mario's own
+  // velocity, so the "platform pushing Mario" path cancels out any tiny
+  // relative motion even if Mario were briefly standing on it.
+  SM64ObjectTransform xform{};
+  xform.position[0] = mario_x_sm64;
+  xform.position[1] = safety_y_sm64;
+  xform.position[2] = mario_z_sm64;
+  xform.eulerRotation[0] = 0.0f;
+  xform.eulerRotation[1] = 0.0f;
+  xform.eulerRotation[2] = 0.0f;
+  sm64_surface_object_move(m_safety_floor_id, &xform);
+}
+
+void LibSM64Manager::clear_safety_floor() {
+  if (!m_safety_floor_created) return;
+  // sm64_surface_object_delete touches libsm64 global state; callers
+  // (shutdown/delete_mario/create_mario on respawn) must guarantee thread
+  // safety — shutdown serializes against the audio thread higher up, and
+  // create_mario / delete_mario run on the main game thread.
+  sm64_surface_object_delete(m_safety_floor_id);
+  m_safety_floor_id = 0;
+  m_safety_floor_created = false;
+}
+
 void LibSM64Manager::load_surfaces(const std::vector<SM64Surface>& surfaces) {
   if (!m_initialized || surfaces.empty()) return;
   sm64_static_surfaces_load(surfaces.data(), static_cast<uint32_t>(surfaces.size()));
@@ -478,19 +696,36 @@ void LibSM64Manager::load_level_collision(
   // or he'll trip over invisible slabs that the real player can walk through.
   //
   // pat-surface layout (see goal_src/jak1/engine/collide/pat-h.gc):
-  //   bit 0  = noentity      ← skip for player/Mario
-  //   bit 1  = nocamera
-  //   bit 2  = noedge
-  //   bit 12 = nolineofsight
+  //   bit 0     = noentity      ← skip for player/Mario
+  //   bit 1     = nocamera
+  //   bit 2     = noedge
+  //   bits 3-5  = mode
+  //   bits 6-11 = material (6 bits, values from the pat-material enum)
+  //   bit 12    = nolineofsight
+  //
+  // Relevant pat-material values for hot surfaces:
+  //   11 = hotcoals   (fire canyon warm rock, lavatube ledges)
+  //   12 = lava       (actual magma in lavatube / firecanyon / citadel)
   //
   // The per-triangle PAT lives on every CollisionMesh::Vertex (all 3 verts
   // of a tri share the same value) — we check vertex 0 per tri.
   constexpr uint32_t PAT_NOENTITY_BIT = 0x1;
+  constexpr uint32_t PAT_MATERIAL_SHIFT = 6;
+  constexpr uint32_t PAT_MATERIAL_MASK = 0x3F;
+  constexpr uint32_t PAT_MAT_HOTCOALS = 11;
+  constexpr uint32_t PAT_MAT_LAVA = 12;
+
+  // SM64 surface type that triggers the classic "burn your butt" launch —
+  // when Mario touches a floor with this type, his butt catches fire and
+  // SM64 bumps him into ACT_BURNING_JUMP / ACT_BURNING_FALL. See
+  // third-party/libsm64/src/decomp/include/surface_terrains.h:6.
+  constexpr int16_t SURFACE_BURNING_TYPE = 0x0001;
 
   size_t num_tris = vertices.size() / 3;
   std::vector<SM64Surface> surfaces;
   surfaces.reserve(num_tris);
   size_t skipped_noentity = 0;
+  size_t burning_tris = 0;
 
   for (size_t i = 0; i < num_tris; i++) {
     const auto& v0 = vertices[i * 3 + 0];
@@ -501,7 +736,14 @@ void LibSM64Manager::load_level_collision(
     }
 
     SM64Surface surf;
-    surf.type = 0x0000;    // SURFACE_DEFAULT
+    const uint32_t material = (v0.pat >> PAT_MATERIAL_SHIFT) & PAT_MATERIAL_MASK;
+    if (material == PAT_MAT_HOTCOALS || material == PAT_MAT_LAVA) {
+      // Hot surface — SM64 will launch Mario with the butt-on-fire action.
+      surf.type = SURFACE_BURNING_TYPE;
+      burning_tris++;
+    } else {
+      surf.type = 0x0000;    // SURFACE_DEFAULT
+    }
     surf.force = 0;
     surf.terrain = 0x0001;  // TERRAIN_STONE
 
@@ -522,8 +764,9 @@ void LibSM64Manager::load_level_collision(
 
   sm64_static_surfaces_load(surfaces.data(), static_cast<uint32_t>(surfaces.size()));
   m_loaded_surface_count = static_cast<int>(surfaces.size());
-  lg::info("[libsm64] Loaded {} collision surfaces from level geometry ({} noentity tris skipped)",
-           surfaces.size(), skipped_noentity);
+  lg::info(
+      "[libsm64] Loaded {} collision surfaces from level geometry ({} noentity skipped, {} burning)",
+      surfaces.size(), skipped_noentity, burning_tris);
 }
 
 bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,
@@ -723,19 +966,113 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   std::memcpy(&flags, ee_mem + water_ctrl_ptr + WC_FLAGS_OFF, 4);
   // wt09 (bit 9) = "target is inside a water volume"; see water.gc:866.
   const bool in_water = (flags & (1u << 9)) != 0;
+  // wt25 (bit 25) is set by every lava water-vol in Jak 1: villagec-lava
+  // (village3-obs.gc:69), ogre-lava (ogre-obs.gc:1022) and lavatube-lava
+  // (lavatube-obs.gc:1023) all `(logior! flags (water-flags wt25))` inside
+  // water-vol-method-22 right after clearing wt23 (the "swimmable" bit).
+  // water-vol::update! propagates its flags into the target's water-control
+  // via `(logior! (-> s5-0 flags) (-> this flags))` (water.gc:958), so
+  // reading wt25 on the water-control here reliably detects "Mario is
+  // submerged in lava right now".
+  const bool is_lava_volume = (flags & (1u << 25)) != 0;
+  const bool in_lava = in_water && is_lava_volume;
 
   int sm64_water_level;
-  if (in_water) {
+  if (in_water && !is_lava_volume) {
     float water_y_jak;
     std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
     // libsm64 stores waterLevel in SM64 units, same space as Mario's position.
     sm64_water_level = static_cast<int>(water_y_jak * JAK_TO_SM64_SCALE);
   } else {
+    // Dry OR in lava: keep the SM64 water level far below Mario so libsm64
+    // never puts him into ACT_WATER_IDLE / swim state. Lava is not a fluid
+    // Mario swims in — he bounces out. That bounce-out is driven below by
+    // kicking him into ACT_LAVA_BOOST, not by the water level.
     sm64_water_level = -100000;
   }
 
+  // Snapshot current action/health under the geo mutex so we can decide
+  // whether we already kicked Mario into a fire action on a previous frame
+  // (in which case we shouldn't re-kick every tick — that would freeze the
+  // upward launch in place). Values reflect the state libsm64 left after the
+  // last sm64_mario_tick, which is exactly what we want for the edge check.
+  uint32_t current_action = 0;
+  int16_t current_health = 0x880;  // 8 wedges default
+  {
+    std::lock_guard<std::mutex> g(m_geo_mutex);
+    current_action = m_state.action;
+    current_health = m_state.health;
+  }
+
+  // ACT_ constants lifted from libsm64/src/decomp/include/sm64.h.
+  constexpr uint32_t kActLavaBoost = 0x010208B7;
+  constexpr uint32_t kActLavaBoostLand = 0x08000239;
+  constexpr uint32_t kActBurningGround = 0x00020449;
+  constexpr uint32_t kActBurningJump = 0x010208B4;
+  constexpr uint32_t kActBurningFall = 0x010208B5;
+  const bool already_burning =
+      current_action == kActLavaBoost || current_action == kActLavaBoostLand ||
+      current_action == kActBurningGround || current_action == kActBurningJump ||
+      current_action == kActBurningFall;
+
+  // Edge-triggered re-entry: fire a fresh kick if Mario JUST crossed into
+  // the lava volume this frame, even when already_burning is true.
+  //
+  // Why we need this: a single ACT_LAVA_BOOST launches Mario with vel[1]=84
+  // and runs through the air step until he lands. While airborne he's still
+  // "already burning", so the simple !already_burning gate blocks a second
+  // kick. But the arc takes him ABOVE the lava surface (in_lava briefly
+  // false) and then back DOWN through it (in_lava true again). Natively
+  // SM64 handles this re-bounce via `if (m->floor->type == SURFACE_BURNING)`
+  // inside act_lava_boost — but our Jak level tris are all SURFACE_DEFAULT,
+  // so the native loop never fires and Mario just falls through the lava
+  // plane without any reaction.
+  //
+  // The m_prev_in_lava -> in_lava rising edge is the best host-side
+  // approximation of "Mario just touched the lava surface from above": it
+  // fires on every arc re-entry, which gives a visible bounce-on-contact
+  // loop while the player stays over the lava pool. Re-calling
+  // sm64_set_mario_action(m, ACT_LAVA_BOOST) re-initializes vel[1]=84
+  // (see mario.c:858-863), so the second+ bounces get the same upward
+  // launch as the first.
+  const bool lava_entry_edge = in_lava && !m_prev_in_lava;
+  const bool needs_kick = in_lava && (!already_burning || lava_entry_edge);
+
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_water_level(m_mario_id, sm64_water_level);
+
+  if (needs_kick) {
+    // Mirror SM64's native check_lava_boost (interaction.c:901-910): subtract
+    // one wedge of health and drop Mario into ACT_LAVA_BOOST. Stock SM64 adds
+    // 12 (cap) / 18 (no cap) to hurtCounter which burns 3 or ~4.5 wedges over
+    // a few frames via the hurt-counter drain; libsm64 doesn't expose
+    // hurtCounter, so we just knock one wedge off directly per kick. Every
+    // re-entry bounce takes another wedge. If Mario runs out of health while
+    // still bouncing, the 0-wedge fire-action handler in tick() catches him
+    // in ACT_LAVA_BOOST and forces ACT_IDLE so he doesn't loop forever at 0.
+    uint16_t new_health = 0;
+    if (current_health > 0x100) {
+      new_health = static_cast<uint16_t>(current_health) - 0x100;
+    }
+    sm64_set_mario_health(m_mario_id, new_health);
+    sm64_set_mario_action(m_mario_id, kActLavaBoost);
+    if (lava_entry_edge) {
+      lg::info(
+          "[libsm64] Mario re-entered LAVA (edge) — ACT_LAVA_BOOST re-fire, "
+          "prev_action=0x{:08X}, health 0x{:04X} -> 0x{:04X}",
+          current_action, static_cast<uint16_t>(current_health), new_health);
+    } else {
+      lg::info(
+          "[libsm64] Mario entered LAVA volume (wt25) — ACT_LAVA_BOOST, "
+          "health 0x{:04X} -> 0x{:04X}",
+          static_cast<uint16_t>(current_health), new_health);
+    }
+  }
+
+  // Cache the current frame's lava state for next frame's edge detection.
+  // We store this after the kick so the next frame sees the correct
+  // "was I in lava last tick?" value.
+  m_prev_in_lava = in_lava;
 }
 
 MarioGeometry LibSM64Manager::get_geometry() {

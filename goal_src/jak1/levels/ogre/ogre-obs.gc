@@ -1020,7 +1020,7 @@
     (set! (-> v1-2 waveform) ripple-for-ogre-lava))
   (logclear! (-> this flags) (water-flags wt23))
   (logior! (-> this flags) (water-flags wt25))
-  (set! (-> this attack-event) 'lava)
+  ;;(set! (-> this attack-event) 'lava)
   (none))
 
 (deftype shortcut-boulder (process-drawable)

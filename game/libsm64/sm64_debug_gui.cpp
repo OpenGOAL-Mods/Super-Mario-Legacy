@@ -123,6 +123,19 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
   if (prev_yakow_grab && !mgr.yakow_grab) {
     mgr.clear_yakow_grab();
   }
+  bool prev_safety_floor = mgr.safety_floor;
+  ImGui::Checkbox("Safety Floor (pseudo-floor under Mario)", &mgr.safety_floor);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Spawns a huge invisible quad beneath Mario each frame\n"
+                     "so libsm64's floor query always returns something, even\n"
+                     "when Mario is out over the void. Real level floors stay\n"
+                     "the nearest floor below Mario — the safety quad only\n"
+                     "kicks in when he's walked off the edge. Prevents the\n"
+                     "NULL-floor crash mode when jumping off map edges.");
+  }
+  if (prev_safety_floor && !mgr.safety_floor) {
+    mgr.clear_safety_floor();
+  }
 
   int volume = mgr.get_audio_volume();
   if (ImGui::SliderInt("Mario Volume", &volume, 0, 100, "%d%%")) {

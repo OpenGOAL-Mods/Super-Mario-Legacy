@@ -261,7 +261,13 @@ class LibSM64Manager {
                              u32 collide_shape_type,
                              u32 prim_mesh_type,
                              u32 prim_group_type,
-                             bool dry_run = true);
+                             bool dry_run = true,
+                             // Optional camera-type filter pointers. Tests that
+                             // don't care about these can leave them at 0, which
+                             // disables the filter (matches the pre-filter
+                             // behavior, so existing tests pass unchanged).
+                             u32 pov_camera_type = 0,
+                             u32 citadelcam_type = 0);
 
   // Per-actor tracking record. Public so the internal sweep walker (which lives
   // in an anonymous namespace in the .cpp) can refer to it from a context struct.
@@ -334,11 +340,19 @@ class LibSM64Manager {
     u32 collide_shape = 0;     // type ptr (includes collide-shape-moving + control-info)
     u32 prim_mesh = 0;         // type ptr for collide-shape-prim-mesh
     u32 prim_group = 0;        // type ptr for collide-shape-prim-group
+    // Camera-related process-drawable types we never want to feed into Mario's
+    // world collision. `pov-camera` is in ENGINE so it's always available.
+    // `citadelcam` is in the citadel level DGO and stays 0 until that level
+    // is loaded — a 0 here is fine, it just disables that specific filter.
+    u32 pov_camera = 0;        // type ptr for pov-camera (cutscenes)
+    u32 citadelcam = 0;        // type ptr for citadelcam (citadel level)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant
   std::unordered_map<u32, bool> m_is_process_drawable_cache;
   std::unordered_map<u32, bool> m_is_collide_shape_cache;
+  std::unordered_map<u32, bool> m_is_pov_camera_cache;
+  std::unordered_map<u32, bool> m_is_citadelcam_cache;
 
   // Tracked actor collision objects, keyed by ((process-drawable EE addr) << 32 |
   // collide-mesh EE addr). Different actor instances can SHARE the same

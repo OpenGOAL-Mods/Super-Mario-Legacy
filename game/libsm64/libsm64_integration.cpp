@@ -469,11 +469,38 @@ void LibSM64Manager::load_level_collision(
     return;
   }
 
+  // Jak bakes "camera-only" collision (invisible walls that only block the
+  // camera) into the level collision mesh with the PAT `noentity` bit set.
+  // At runtime Jak passes a `pat-ignore-mask` to collide queries — entity
+  // queries use (pat-surface :noentity #x1) to reject those tris, and camera
+  // queries use (pat-surface :nocamera #x1) to reject tris that are entity-
+  // only. Mario acts like an entity, so we need to do the same filter here
+  // or he'll trip over invisible slabs that the real player can walk through.
+  //
+  // pat-surface layout (see goal_src/jak1/engine/collide/pat-h.gc):
+  //   bit 0  = noentity      ← skip for player/Mario
+  //   bit 1  = nocamera
+  //   bit 2  = noedge
+  //   bit 12 = nolineofsight
+  //
+  // The per-triangle PAT lives on every CollisionMesh::Vertex (all 3 verts
+  // of a tri share the same value) — we check vertex 0 per tri.
+  constexpr uint32_t PAT_NOENTITY_BIT = 0x1;
+
   size_t num_tris = vertices.size() / 3;
-  std::vector<SM64Surface> surfaces(num_tris);
+  std::vector<SM64Surface> surfaces;
+  surfaces.reserve(num_tris);
+  size_t skipped_noentity = 0;
 
   for (size_t i = 0; i < num_tris; i++) {
-    auto& surf = surfaces[i];
+    const auto& v0 = vertices[i * 3 + 0];
+    if (v0.pat & PAT_NOENTITY_BIT) {
+      // Camera-only collision — Mario ignores it, same as Jak does.
+      skipped_noentity++;
+      continue;
+    }
+
+    SM64Surface surf;
     surf.type = 0x0000;    // SURFACE_DEFAULT
     surf.force = 0;
     surf.terrain = 0x0001;  // TERRAIN_STONE
@@ -485,11 +512,18 @@ void LibSM64Manager::load_level_collision(
       surf.vertices[v][1] = static_cast<int32_t>(vert.y * JAK_TO_SM64_SCALE);
       surf.vertices[v][2] = static_cast<int32_t>(vert.z * JAK_TO_SM64_SCALE);
     }
+    surfaces.push_back(surf);
+  }
+
+  if (surfaces.empty()) {
+    lg::warn("[libsm64] All {} level triangles were noentity — nothing to load", num_tris);
+    return;
   }
 
   sm64_static_surfaces_load(surfaces.data(), static_cast<uint32_t>(surfaces.size()));
   m_loaded_surface_count = static_cast<int>(surfaces.size());
-  lg::info("[libsm64] Loaded {} collision surfaces from level geometry", surfaces.size());
+  lg::info("[libsm64] Loaded {} collision surfaces from level geometry ({} noentity tris skipped)",
+           surfaces.size(), skipped_noentity);
 }
 
 bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,
@@ -750,6 +784,15 @@ constexpr u32 CSHAPE_TRANS_OFF = 12;
 constexpr u32 CSHAPE_QUAT_OFF = 28;
 constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
 constexpr u32 PRIM_TRANSFORM_INDEX_OFF = 8;     // collide-shape-prim.transform-index (int8)
+// Jak 1 collide-kind is a 64-bit bitfield (uint64). Both the root prim's
+// collide-with (declared @64) and its inline prim-core.collide-as (declared @32)
+// are 8 bytes. Memory offsets are the declared offsets minus 4 — same basic-
+// header adjustment every other constant in this file uses. When a GOAL actor
+// "dies" or otherwise disables its collision, it clears both to (collide-kind)
+// — i.e., all bits zero — and we skip the actor so Mario doesn't trip over
+// an invisible corpse.
+constexpr u32 PRIM_CORE_COLLIDE_AS_OFF = 28;    // declared 32 - 4
+constexpr u32 PRIM_COLLIDE_WITH_OFF = 60;       // declared 64 - 4
 constexpr u32 PRIM_MESH_MESH_OFF = 68;
 constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
 constexpr u32 PRIM_GROUP_PRIM_ARRAY_OFF = 76;
@@ -821,6 +864,14 @@ inline bool valid_basic_ptr(u32 addr, u32 mem_size) {
 inline bool read_u32(u8* mem, u32 addr, u32 mem_size, u32& out) {
   if (!valid_ee_addr(addr, 4, mem_size)) return false;
   std::memcpy(&out, mem + addr, 4);
+  return true;
+}
+
+// A u64 read that bails on out-of-bounds. Used for Jak 1 collide-kind fields
+// which are 64-bit bitfields.
+inline bool read_u64(u8* mem, u32 addr, u32 mem_size, uint64_t& out) {
+  if (!valid_ee_addr(addr, 8, mem_size)) return false;
+  std::memcpy(&out, mem + addr, 8);
   return true;
 }
 
@@ -1159,10 +1210,16 @@ struct WalkCtx {
   u32 collide_shape_type;
   u32 prim_mesh_type;
   u32 prim_group_type;
+  // Camera-related process-drawable types. Either can be 0 to disable that
+  // specific filter (e.g. citadelcam is 0 outside the citadel level).
+  u32 pov_camera_type;
+  u32 citadelcam_type;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
   std::unordered_map<u32, bool>& is_collide_shape_cache;
+  std::unordered_map<u32, bool>& is_pov_camera_cache;
+  std::unordered_map<u32, bool>& is_citadelcam_cache;
   std::unordered_map<uint64_t, LibSM64Manager::TrackedActor>& tracked_actors;
   std::unordered_set<u32>& broken_meshes;
   LibSM64Manager::TestSweepResult& result;
@@ -1266,6 +1323,21 @@ void do_sweep(WalkCtx& c) {
                              c.is_process_drawable_cache)) {
       continue;
     }
+
+    // Reject camera-owned process-drawables. These aren't things Mario should
+    // stand on — they exist just to host cutscene cameras and level-specific
+    // camera overrides. Filters with a 0 target are no-ops (type_is_descendant
+    // returns false when needle==0), so this works fine before citadelcam is
+    // loaded.
+    if (type_is_descendant(c.ee_mem, c.mem_size, node_type, c.pov_camera_type,
+                            c.is_pov_camera_cache)) {
+      continue;
+    }
+    if (type_is_descendant(c.ee_mem, c.mem_size, node_type, c.citadelcam_type,
+                            c.is_citadelcam_cache)) {
+      continue;
+    }
+
     c.result.process_drawables_seen++;
 
     // Read root (collide-shape or subclass) from process-drawable @108.
@@ -1286,6 +1358,20 @@ void do_sweep(WalkCtx& c) {
     u32 root_prim;
     if (!read_u32(c.ee_mem, root + CSHAPE_ROOT_PRIM_OFF, c.mem_size, root_prim)) continue;
     if (root_prim == 0 || root_prim == c.false_val) continue;
+
+    // Dead-actor check: when a GOAL actor is killed (see
+    // `clear-collide-with-as` in collide-shape.gc, and the per-actor death
+    // cleanup in yakow/seagull/target-util/robotboss/etc.), its root prim's
+    // `collide-with` AND `prim-core.collide-as` are both zeroed. The
+    // collide-shape itself stays linked to the process until GC, so naïvely
+    // feeding it to Mario would give him an invisible corpse to walk into.
+    // Mirrors the GOAL pattern: (when (and (zero? collide-with) (zero? collide-as)) skip).
+    {
+      uint64_t cwith = 0, cas = 0;
+      if (!read_u64(c.ee_mem, root_prim + PRIM_COLLIDE_WITH_OFF, c.mem_size, cwith)) continue;
+      if (!read_u64(c.ee_mem, root_prim + PRIM_CORE_COLLIDE_AS_OFF, c.mem_size, cas)) continue;
+      if (cwith == 0 && cas == 0) continue;
+    }
 
     std::vector<CollectedPrim> prims;
     collect_mesh_prims(c.ee_mem, c.mem_size, root_prim, c.false_val, c.prim_mesh_type,
@@ -1499,6 +1585,32 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
              pd_val, cs_val, pm_val, pg_val, ap.offset, false_val);
   }
 
+  // Retry pov-camera / citadelcam lookup every frame until both are bound.
+  // pov-camera lives in ENGINE so it's usually ready on the first successful
+  // tick; citadelcam only shows up once the citadel level is loaded, and a
+  // 0 here is fine — `type_is_descendant` with needle==0 returns false,
+  // which disables that specific filter.
+  if (m_type_cache.pov_camera == 0) {
+    auto pc = jak1::find_symbol_from_c("pov-camera");
+    if (pc.offset != 0) {
+      u32 v = pc->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.pov_camera = v;
+        lg::info("[libsm64] Actor collision: cached pov-camera type @0x{:X}", v);
+      }
+    }
+  }
+  if (m_type_cache.citadelcam == 0) {
+    auto cc = jak1::find_symbol_from_c("citadelcam");
+    if (cc.offset != 0) {
+      u32 v = cc->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.citadelcam = v;
+        lg::info("[libsm64] Actor collision: cached citadelcam type @0x{:X}", v);
+      }
+    }
+  }
+
   TestSweepResult result;
   WalkCtx ctx{
       ee_mem,
@@ -1509,10 +1621,14 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.collide_shape,
       m_type_cache.prim_mesh,
       m_type_cache.prim_group,
+      m_type_cache.pov_camera,
+      m_type_cache.citadelcam,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
       m_is_collide_shape_cache,
+      m_is_pov_camera_cache,
+      m_is_citadelcam_cache,
       m_tracked_actors,
       m_broken_meshes,
       result,
@@ -1590,10 +1706,12 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
                                                            u32 collide_shape_type,
                                                            u32 prim_mesh_type,
                                                            u32 prim_group_type,
-                                                           bool dry_run) {
+                                                           bool dry_run,
+                                                           u32 pov_camera_type,
+                                                           u32 citadelcam_type) {
   TestSweepResult result;
   int dummy_diag_remaining = 0;  // tests shouldn't spam lg::info
-  std::unordered_map<u32, bool> pd_cache, cs_cache;
+  std::unordered_map<u32, bool> pd_cache, cs_cache, pov_cache, citadel_cache;
   std::unordered_map<uint64_t, TrackedActor> tracked;
   std::unordered_set<u32> broken;
 
@@ -1606,10 +1724,14 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       collide_shape_type,
       prim_mesh_type,
       prim_group_type,
+      pov_camera_type,
+      citadelcam_type,
       dry_run,
       dummy_diag_remaining,
       pd_cache,
       cs_cache,
+      pov_cache,
+      citadel_cache,
       tracked,
       broken,
       result,

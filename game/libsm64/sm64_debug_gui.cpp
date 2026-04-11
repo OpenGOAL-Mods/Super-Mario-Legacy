@@ -103,6 +103,12 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
                      "while a Mario instance exists, so Mario isn't clipped\n"
                      "inside Jak.");
   }
+  ImGui::Checkbox("Water Sync (Mario swims where Jak swims)", &mgr.water_sync);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Reads Jak's water-control each frame and forwards\n"
+                     "the water surface Y into libsm64 so Mario enters and\n"
+                     "exits swim state along with Jak.");
+  }
 
   int volume = mgr.get_audio_volume();
   if (ImGui::SliderInt("Mario Volume", &volume, 0, 100, "%d%%")) {

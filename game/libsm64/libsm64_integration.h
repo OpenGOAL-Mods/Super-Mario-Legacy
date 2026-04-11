@@ -177,6 +177,14 @@ class LibSM64Manager {
   // Force Mario's yaw (in radians, world Y axis). No-op if no Mario is spawned.
   void set_mario_face_angle(float yaw_rad);
 
+  // Reads Jak's current water state from EE memory and mirrors it into
+  // libsm64 via sm64_set_mario_water_level. If the Jak player is submerged
+  // (water-control.flags wt09 bit set) the surface Y is pulled from
+  // water-control.height and converted to SM64 units; otherwise we set a
+  // very low water level so Mario stays dry. No-op if Mario isn't spawned
+  // or the water-sync toggle is off.
+  void update_mario_water(u8* ee_mem);
+
   // Write Mario's position into a target process's root->trans in EE memory.
   // Returns true if the write succeeded. Exposed for testing.
   static bool write_mario_pos_to_target(u8* ee_mem,
@@ -263,6 +271,7 @@ class LibSM64Manager {
   bool auto_sync_collision = true;    // Auto-reload static collision when levels change
   bool dynamic_actor_collision = true; // Walk process tree and mirror collide-meshes
   bool hide_jak_model = true;         // Skip drawing eichar-lod0 while Mario is active
+  bool water_sync = true;             // Mirror Jak's water volume into libsm64 each tick
   // When set, update_actor_collision walks the tree and logs what it finds
   // but never calls into libsm64. Used to validate the walker in isolation
   // without risking crashes in libsm64 itself.

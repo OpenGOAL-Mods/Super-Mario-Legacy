@@ -623,6 +623,74 @@ void LibSM64Manager::set_mario_face_angle(float yaw_rad) {
   sm64_set_mario_faceangle(m_mario_id, yaw_rad);
 }
 
+void LibSM64Manager::update_mario_water(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !water_sync || !ee_mem) return;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return;
+  u32 target_ptr = target_sym->value;
+  if (target_ptr == 0 || target_ptr == false_val) return;
+
+  // process-drawable field layout from goal_src/jak1/engine/game/game-h.gc:
+  //   root(112), node-list(116), draw(120), skel(124), nav(128), align(132),
+  //   path(136), vol(140), fact(144), link(148), part(152), water(156).
+  // All 4-byte basic pointers; subtract 4 for runtime offsets.
+  constexpr u32 WATER_FIELD_RUNTIME_OFF = 152;
+  if (target_ptr + WATER_FIELD_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return;
+
+  u32 water_ctrl_ptr;
+  std::memcpy(&water_ctrl_ptr, ee_mem + target_ptr + WATER_FIELD_RUNTIME_OFF, 4);
+  if (water_ctrl_ptr == 0 || water_ctrl_ptr == false_val) {
+    // No water-control allocated — leave the level way below Mario so he's dry.
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_water_level(m_mario_id, -100000);
+    return;
+  }
+
+  // water-control layout (basic, from water-h.gc). Offsets are computed
+  // sequentially from the declared field list, accounting for 8-byte
+  // alignment on the time-frame (int64) members:
+  //   0   flags        (u32)
+  //   4   process      (basic ptr)
+  //   8   joint-index  (i32)
+  //  12   top-y-offset (f32)
+  //  16   ripple-size  (f32)
+  //  20   enter-water-time  (i64)
+  //  28   wade-time         (i64)
+  //  36   on-water-time     (i64)
+  //  44   enter-swim-time   (i64)
+  //  52   swim-time         (i64)
+  //  60   base-height       (f32)
+  //  64   wade-height       (f32)
+  //  68   swim-height       (f32)
+  //  72   surface-height    (f32)
+  //  76   bottom-height     (f32)
+  //  80   height            (f32) <-- this is what water.gc computes each tick
+  constexpr u32 WC_FLAGS_OFF = 0;
+  constexpr u32 WC_HEIGHT_OFF = 80;
+  if (water_ctrl_ptr + WC_HEIGHT_OFF + 4 > EE_MAIN_MEM_SIZE) return;
+
+  uint32_t flags;
+  std::memcpy(&flags, ee_mem + water_ctrl_ptr + WC_FLAGS_OFF, 4);
+  // wt09 (bit 9) = "target is inside a water volume"; see water.gc:866.
+  const bool in_water = (flags & (1u << 9)) != 0;
+
+  int sm64_water_level;
+  if (in_water) {
+    float water_y_jak;
+    std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
+    // libsm64 stores waterLevel in SM64 units, same space as Mario's position.
+    sm64_water_level = static_cast<int>(water_y_jak * JAK_TO_SM64_SCALE);
+  } else {
+    sm64_water_level = -100000;
+  }
+
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_water_level(m_mario_id, sm64_water_level);
+}
+
 MarioGeometry LibSM64Manager::get_geometry() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
   return m_geometry;

@@ -1079,6 +1079,10 @@ void OpenGLRenderer::tick_mario_sm64() {
     }
   }
 
+  // Mirror Jak's water volume into libsm64 before ticking Mario so the
+  // water state is current when sm64_mario_tick evaluates swim vs walk.
+  mgr.update_mario_water(g_ee_main_mem);
+
   mgr.tick(input);
 
   // Sync Jak's position to Mario's if follow mode is enabled

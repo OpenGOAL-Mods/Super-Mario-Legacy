@@ -38,6 +38,10 @@ LibSM64Manager::~LibSM64Manager() {
   shutdown();
 }
 
+// SM64 US ROM is exactly 8 MiB. libsm64 expects the US revision; we use the
+// size as a cheap selector when the user drops any .z64 into the search path.
+static constexpr std::uintmax_t kExpectedSm64RomSize = 8u * 1024u * 1024u;
+
 bool LibSM64Manager::init(const std::string& rom_path) {
   if (m_initialized) {
     lg::warn("[libsm64] Already initialized");
@@ -78,8 +82,73 @@ bool LibSM64Manager::init(const std::string& rom_path) {
   m_tick_uv_buf.resize(6 * GEO_MAX_TRIANGLES);
 
   m_initialized = true;
+  m_last_rom_path = rom_path;
   lg::info("[libsm64] Initialized successfully");
   return true;
+}
+
+bool LibSM64Manager::init_autodetect() {
+  if (m_initialized) {
+    return true;
+  }
+  // Uses the project's ghc::filesystem alias from FileUtil.h.
+
+  // Search order: directory next to gk.exe first (so a user drop-in ROM wins),
+  // then iso_data/mario/ under the project dir. We pick the first .z64 whose
+  // size matches the expected US ROM size.
+  std::vector<fs::path> search_dirs;
+  try {
+    std::string exe_str = file_util::get_current_executable_path();
+    if (!exe_str.empty()) {
+      fs::path exe(exe_str);
+      search_dirs.push_back(exe.parent_path());
+    }
+  } catch (...) {
+    // fall through; we still have iso_data/mario as a fallback
+  }
+  try {
+    fs::path proj = file_util::get_jak_project_dir();
+    if (!proj.empty()) {
+      search_dirs.push_back(proj / "iso_data" / "mario");
+    }
+  } catch (...) {
+  }
+
+  fs::path picked;
+  for (const auto& dir : search_dirs) {
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) continue;
+    fs::directory_iterator it(dir, ec), end;
+    if (ec) continue;
+    for (; it != end; it.increment(ec)) {
+      if (ec) break;
+      const auto& entry = *it;
+      if (!entry.is_regular_file(ec)) continue;
+      const auto& p = entry.path();
+      auto ext = p.extension().string();
+      // Case-insensitive .z64 check.
+      if (ext.size() != 4) continue;
+      if ((ext[0] != '.') || (ext[1] != 'z' && ext[1] != 'Z') ||
+          (ext[2] != '6') || (ext[3] != '4')) continue;
+      auto sz = fs::file_size(p, ec);
+      if (ec) continue;
+      if (sz != kExpectedSm64RomSize) {
+        lg::info("[libsm64] Skipping {} ({} bytes, expected {})", p.string(),
+                 static_cast<size_t>(sz), static_cast<size_t>(kExpectedSm64RomSize));
+        continue;
+      }
+      picked = p;
+      break;
+    }
+    if (!picked.empty()) break;
+  }
+
+  if (picked.empty()) {
+    lg::warn("[libsm64] Auto-detect: no matching .z64 found next to gk or in iso_data/mario");
+    return false;
+  }
+  lg::info("[libsm64] Auto-detected ROM: {}", picked.string());
+  return init(picked.string());
 }
 
 void LibSM64Manager::shutdown() {

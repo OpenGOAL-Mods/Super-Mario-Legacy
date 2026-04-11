@@ -19,7 +19,7 @@ class SM64DebugGui {
 
  private:
   bool m_visible = false;
-  char m_rom_path[512] = "baserom.us.z64";
+  char m_rom_path[512] = "";  // override; leave empty to use the auto-detected ROM
   float m_spawn_pos[3] = {0.0f, 10.0f, 0.0f};
   float m_ground_y = 0.0f;
   float m_ground_extent = 500.0f;

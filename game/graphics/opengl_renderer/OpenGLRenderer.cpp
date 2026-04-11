@@ -167,6 +167,17 @@ OpenGLRenderer::OpenGLRenderer(std::shared_ptr<TexturePool> texture_pool,
     default:
       ASSERT(false);
   }
+
+  // Default-initialize libsm64 on launch. Looks for any .z64 next to gk.exe
+  // or in <project>/iso_data/mario/ whose size matches the SM64 US ROM. If
+  // nothing is found we just log a warning — the user can still point at a
+  // ROM manually from the debug GUI.
+  {
+    auto& mgr = sm64::LibSM64Manager::instance();
+    if (!mgr.is_initialized()) {
+      mgr.init_autodetect();
+    }
+  }
 }
 
 void OpenGLRenderer::init_bucket_renderers_jak3() {
@@ -984,7 +995,37 @@ void OpenGLRenderer::blit_display(ScopedProfilerNode& prof) {
 
 void OpenGLRenderer::tick_mario_sm64() {
   auto& mgr = sm64::LibSM64Manager::instance();
-  if (!mgr.enabled || !mgr.is_initialized() || !mgr.has_mario()) return;
+  if (!mgr.enabled || !mgr.is_initialized()) return;
+
+  // Auto-sync collision whenever the loaded Jak level set changes. This must
+  // run BEFORE the has_mario() gate so that the first "Spawn Mario at Camera"
+  // click in a fresh level finds a floor — otherwise Mario can never spawn
+  // because tick never reaches the auto-sync block without a Mario (chicken
+  // and egg). The spawn-fallback in the debug GUI is still there as a safety
+  // net for the case where the user disables auto-sync.
+  if (mgr.auto_sync_collision && m_render_state.loader) {
+    auto levels = m_render_state.loader->get_in_use_levels();
+    std::set<u64> current_ids;
+    for (auto* lev : levels) {
+      current_ids.insert(lev->load_id);
+    }
+    if (current_ids != m_sm64_last_level_ids) {
+      m_sm64_last_level_ids = current_ids;
+      // Merge collision from all loaded levels
+      std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
+      for (auto* lev : levels) {
+        if (lev->level) {
+          auto& verts = lev->level->collision.vertices;
+          all_verts.insert(all_verts.end(), verts.begin(), verts.end());
+        }
+      }
+      if (!all_verts.empty()) {
+        mgr.load_level_collision(all_verts);
+      }
+    }
+  }
+
+  if (!mgr.has_mario()) return;
 
   // SM64 runs at 30Hz — only tick every other frame at 60fps
   static int tick_counter = 0;
@@ -1049,29 +1090,6 @@ void OpenGLRenderer::tick_mario_sm64() {
   // as libsm64 surface objects so Mario can stand on moving actors.
   if (mgr.dynamic_actor_collision) {
     mgr.update_actor_collision(g_ee_main_mem);
-  }
-
-  // Auto-sync collision when loaded levels change
-  if (mgr.auto_sync_collision && m_render_state.loader) {
-    auto levels = m_render_state.loader->get_in_use_levels();
-    std::set<u64> current_ids;
-    for (auto* lev : levels) {
-      current_ids.insert(lev->load_id);
-    }
-    if (current_ids != m_sm64_last_level_ids) {
-      m_sm64_last_level_ids = current_ids;
-      // Merge collision from all loaded levels
-      std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
-      for (auto* lev : levels) {
-        if (lev->level) {
-          auto& verts = lev->level->collision.vertices;
-          all_verts.insert(all_verts.end(), verts.begin(), verts.end());
-        }
-      }
-      if (!all_verts.empty()) {
-        mgr.load_level_collision(all_verts);
-      }
-    }
   }
 }
 

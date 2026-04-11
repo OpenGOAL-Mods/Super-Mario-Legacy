@@ -5,12 +5,59 @@
 
 #include "sm64_debug_gui.h"
 
+#include "common/log/log.h"
 #include "game/graphics/opengl_renderer/loader/Loader.h"
 #include "game/libsm64/libsm64_integration.h"
 
 #include "third-party/imgui/imgui.h"
 
 namespace sm64 {
+
+// Walks every Jak level currently held by the loader, concatenates their
+// collision vertex buffers, and pushes the result into libsm64 as the level
+// collision. Returns the total triangle count actually sent. Returns 0 if no
+// levels are loaded (so the caller can report "nothing to reload").
+static size_t reload_level_collision_from_loader(LibSM64Manager& mgr,
+                                                  std::shared_ptr<Loader>& loader) {
+  if (!loader) return 0;
+  auto levels = loader->get_in_use_levels();
+  if (levels.empty()) return 0;
+  size_t total_verts = 0;
+  for (auto* lev : levels) {
+    if (lev->level) total_verts += lev->level->collision.vertices.size();
+  }
+  if (total_verts == 0) return 0;
+  std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
+  all_verts.reserve(total_verts);
+  for (auto* lev : levels) {
+    if (lev->level) {
+      auto& verts = lev->level->collision.vertices;
+      all_verts.insert(all_verts.end(), verts.begin(), verts.end());
+    }
+  }
+  mgr.load_level_collision(all_verts);
+  return all_verts.size() / 3;
+}
+
+// Spawn helper: tries to create Mario, and if the spawn fails (libsm64 returns
+// -1 when there's no floor at the spawn position — usually because the level
+// collision hasn't been pushed yet for the current level), automatically
+// refreshes the level collision from whatever Jak has loaded and retries.
+static int32_t spawn_mario_with_collision_fallback(LibSM64Manager& mgr,
+                                                    std::shared_ptr<Loader>& loader,
+                                                    float x, float y, float z) {
+  int32_t id = mgr.create_mario(x, y, z);
+  if (id >= 0) return id;
+  lg::warn("[libsm64] Mario spawn failed at ({:.1f}, {:.1f}, {:.1f}) — reloading level collision and retrying",
+           x, y, z);
+  size_t tris = reload_level_collision_from_loader(mgr, loader);
+  if (tris == 0) {
+    lg::error("[libsm64] No level collision available to reload — spawn will stay failed");
+    return -1;
+  }
+  lg::info("[libsm64] Reloaded {} level collision triangles, retrying spawn", tris);
+  return mgr.create_mario(x, y, z);
+}
 
 void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos) {
   if (!m_visible) return;
@@ -53,10 +100,22 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
 
   // Initialization
   if (ImGui::CollapsingHeader("Initialization", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::InputText("ROM Path", m_rom_path, sizeof(m_rom_path));
+    // Show the auto-detected ROM path (if any) so the user knows what we picked.
+    const auto& detected = mgr.last_rom_path();
+    if (!detected.empty()) {
+      ImGui::TextWrapped("Detected ROM: %s", detected.c_str());
+    } else {
+      ImGui::TextDisabled("No ROM auto-detected — drop an SM64 US .z64 next to\n"
+                          "gk.exe or into iso_data/mario/, or use the override below.");
+    }
+    ImGui::InputText("ROM Path override", m_rom_path, sizeof(m_rom_path));
 
     if (!mgr.is_initialized()) {
-      if (ImGui::Button("Initialize SM64")) {
+      if (ImGui::Button("Auto-detect & Init")) {
+        mgr.init_autodetect();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Init From Override")) {
         mgr.init(m_rom_path);
       }
     } else {
@@ -83,16 +142,7 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
                       (int)levels.size(), total_verts / 3);
 
           if (ImGui::Button("Load Level Collision")) {
-            // Merge collision from all loaded levels
-            std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
-            all_verts.reserve(total_verts);
-            for (auto* lev : levels) {
-              if (lev->level) {
-                auto& verts = lev->level->collision.vertices;
-                all_verts.insert(all_verts.end(), verts.begin(), verts.end());
-              }
-            }
-            mgr.load_level_collision(all_verts);
+            reload_level_collision_from_loader(mgr, loader);
           }
           ImGui::SameLine();
           ImGui::TextDisabled("(?)");
@@ -139,7 +189,8 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
         if (camera_pos) {
           ImGui::SameLine();
           if (ImGui::Button("Spawn Mario at Camera Position")) {
-            mgr.create_mario(camera_pos[0], camera_pos[1], camera_pos[2]);
+            spawn_mario_with_collision_fallback(mgr, loader, camera_pos[0], camera_pos[1],
+                                                 camera_pos[2]);
           }
         }
       } else {
@@ -150,7 +201,8 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader, const float* camera_pos)
           ImGui::SameLine();
           if (ImGui::Button("Respawn at Camera Position")) {
             mgr.delete_mario(mgr.get_mario_id());
-            mgr.create_mario(camera_pos[0], camera_pos[1], camera_pos[2]);
+            spawn_mario_with_collision_fallback(mgr, loader, camera_pos[0], camera_pos[1],
+                                                 camera_pos[2]);
           }
         }
 

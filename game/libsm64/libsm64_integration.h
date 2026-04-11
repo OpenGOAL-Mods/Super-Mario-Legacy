@@ -119,6 +119,15 @@ class LibSM64Manager {
 
   // Lifecycle
   bool init(const std::string& rom_path);
+  // Auto-detects the SM64 US ROM by scanning the executable directory and
+  // <project>/iso_data/mario/ for any .z64 whose size matches the expected
+  // US ROM size (8,388,608 bytes). Returns true on successful init. Use this
+  // for default-on-launch initialization.
+  bool init_autodetect();
+  // Returns the detected ROM path if init_autodetect() or a successful init()
+  // has run, otherwise empty. Exposed so the debug GUI can show what was
+  // picked.
+  const std::string& last_rom_path() const { return m_last_rom_path; }
   void shutdown();
   bool is_initialized() const { return m_initialized; }
 
@@ -233,10 +242,10 @@ class LibSM64Manager {
   };
 
   // Settings
-  bool enabled = false;
-  bool follow_mario = false;          // Lock Jak's position to Mario's
-  bool auto_sync_collision = false;   // Auto-reload static collision when levels change
-  bool dynamic_actor_collision = false; // Walk process tree and mirror collide-meshes
+  bool enabled = true;
+  bool follow_mario = true;           // Lock Jak's position to Mario's
+  bool auto_sync_collision = true;    // Auto-reload static collision when levels change
+  bool dynamic_actor_collision = true; // Walk process tree and mirror collide-meshes
   // When set, update_actor_collision walks the tree and logs what it finds
   // but never calls into libsm64. Used to validate the walker in isolation
   // without risking crashes in libsm64 itself.
@@ -250,6 +259,7 @@ class LibSM64Manager {
   LibSM64Manager& operator=(const LibSM64Manager&) = delete;
 
   bool m_initialized = false;
+  std::string m_last_rom_path;  // path of the ROM passed to the last successful init
   int32_t m_mario_id = -1;
   int m_loaded_surface_count = 0;
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)

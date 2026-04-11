@@ -278,7 +278,13 @@ class LibSM64Manager {
                              // disables the filter (matches the pre-filter
                              // behavior, so existing tests pass unchanged).
                              u32 pov_camera_type = 0,
-                             u32 citadelcam_type = 0);
+                             u32 citadelcam_type = 0,
+                             // Optional prim-sphere type. 0 disables sphere
+                             // handling (tests that don't care about spheres
+                             // leave this at its default, matching the
+                             // pre-sphere behavior — sphere prims are silently
+                             // skipped by the walker).
+                             u32 prim_sphere_type = 0);
 
   // Per-actor tracking record. Public so the internal sweep walker (which lives
   // in an anonymous namespace in the .cpp) can refer to it from a context struct.
@@ -358,6 +364,11 @@ class LibSM64Manager {
     u32 collide_shape = 0;     // type ptr (includes collide-shape-moving + control-info)
     u32 prim_mesh = 0;         // type ptr for collide-shape-prim-mesh
     u32 prim_group = 0;        // type ptr for collide-shape-prim-group
+    // Sphere prims need their own path through the walker. scarecrow-a /
+    // scarecrow-b (and a bunch of other sphere-only actors) use prim-sphere
+    // under a prim-group root, so if we skip them Mario falls through them.
+    // Looked up from the same symbol bundle as prim_mesh/prim_group (ENGINE).
+    u32 prim_sphere = 0;       // type ptr for collide-shape-prim-sphere
     // Camera-related process-drawable types we never want to feed into Mario's
     // world collision. `pov-camera` is in ENGINE so it's always available.
     // `citadelcam` is in the citadel level DGO and stays 0 until that level

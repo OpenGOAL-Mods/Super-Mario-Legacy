@@ -1133,6 +1133,12 @@ constexpr u32 PRIM_COLLIDE_WITH_OFF = 60;       // declared 64 - 4
 constexpr u32 PRIM_MESH_MESH_OFF = 68;
 constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
 constexpr u32 PRIM_GROUP_PRIM_ARRAY_OFF = 76;
+// collide-shape-prim.local-sphere is an inline vec4 (xyz = center, w = radius)
+// right after the 32-byte prim-core. prim-core starts at runtime offset 12
+// (declared 16 - 4), so local-sphere lands at 12 + 32 = 44. Used by the
+// sphere prim tessellator. The sphere class (`collide-shape-prim-sphere`)
+// overlays `radius` at `local-sphere.w`, so both are the same 16-byte slot.
+constexpr u32 PRIM_LOCAL_SPHERE_OFF = 44;
 constexpr u32 MESH_NUM_TRIS_OFF = 4;
 constexpr u32 MESH_NUM_VERTS_OFF = 8;
 constexpr u32 MESH_VERTEX_DATA_OFF = 12;
@@ -1368,24 +1374,175 @@ bool extract_mesh_local(u8* ee_mem, u32 mem_size, u32 mesh_ptr,
   return true;
 }
 
-// Per-prim collection result: identifies the prim, its collide-mesh, and
-// which bone (if any) the prim is attached to via transform-index. We need
-// the prim ptr separately because two prim-meshes in the same group can
-// share the same collide-mesh template — keying tracked actors by mesh_ptr
-// alone collapses them onto each other.
+// Tessellate a sphere-prim into SM64Surface triangles in actor-local space
+// (Jak → SM64 scale applied). We use a SQUARE PRISM (diamond-oriented, 4
+// slices) with NO bottom cap. This geometry is carefully chosen to dodge
+// several libsm64 collision quirks that a more "natural" approximation (UV
+// sphere, octagonal prism, cylinder, closed box) would trigger:
+//
+//   1. (Floor classification) libsm64 classifies normal.y > 0.01 as floor.
+//      A UV sphere's near-equator tris have |normal.y| ~0.3 → picked up as
+//      floors → find_floor_from_list accepts them up to 78 units above
+//      Mario → stationary_ground_step chain-snaps Mario up the side of the
+//      sphere. Any prism built from purely vertical side walls sidesteps
+//      this because the cross product has ny = 0 exactly.
+//
+//   2. (Wall Overlaps bug — surface_collision.c line ~277) When Mario is
+//      within the wall-collision radius (30 for lower, 60 for upper) of
+//      multiple walls simultaneously, each wall applies its full push using
+//      the ORIGINAL offset, rather than the offset after the previous
+//      pushes. An octagon with adjacent walls 45° apart has midpoint wall
+//      separations of apothem * (1 - cos(45°)) ~= 0.293 * apothem, which is
+//      well under 30 for any reasonable scarecrow radius. Three walls end
+//      up pushing simultaneously (~100+ units of overshoot per frame → the
+//      "Mario flies all over the place" symptom). A square (n=4) has
+//      adjacent wall separations of exactly `apothem` at the midpoint —
+//      always > 30 for non-tiny scarecrows — so only ONE wall pushes at
+//      each edge midpoint. At the 4 vertices, two orthogonal walls push
+//      simultaneously, but because their pushes are perpendicular the
+//      overshoot is just sqrt(2)*30 − 30 ~= 12 units. n=4 is the only n
+//      where this calculus is gentle enough for r=77-sized scarecrows.
+//
+//   3. (Exposed Ceilings bug — surface_collision.c line ~69) A tri with
+//      normal.y < -0.01 is classified as a ceiling, and the check
+//      `if (y - (height + 78) > 0) continue;` keeps any ceiling within 78
+//      units BELOW the reference y. `vec3f_find_ceil` passes
+//      floorHeight + 80 as the reference y, so a bottom cap at
+//      center.y - r triggers as a ceiling whenever the scarecrow sphere2's
+//      bottom (at cy − r ≈ 52 local, well within 78 of the floor+80 check y)
+//      appears near ground level. perform_ground_quarter_step then fires
+//      `if (floorHeight + 160 >= ceilHeight) STOP_QSTEPS;` and Mario
+//      lurches. The fix is to simply NOT emit the bottom cap — a prism open
+//      at the bottom is fine because Mario approaches from the side (walls
+//      catch him) and can't teleport into the interior.
+//
+// Triangle budget: 4 slices × 2 tris (walls) + 2 tris (top cap) = 10 tris
+// per sphere prim. Tiny compared to the old 36-tri UV sphere, and the
+// square shape leaks about 31 units of phantom collision into each corner
+// outside the sphere's actual radius — an acceptable tradeoff for Mario
+// not launching across the map.
+//
+// Out AABBs are in Jak units (matches extract_mesh_local for the caller).
+void tessellate_sphere_local(const float center_jak[3], float radius_jak,
+                              std::vector<SM64Surface>& out_surfaces,
+                              float* out_local_aabb_min_jak = nullptr,
+                              float* out_local_aabb_max_jak = nullptr) {
+  // 4 slices = square prism in diamond orientation (vertices on the axes).
+  // Walls bisect at 45°/135°/225°/315°. See the comment above for why n=4
+  // is the only n that survives libsm64's wall overlap quirk.
+  constexpr int SLICES = 4;
+  constexpr float kPi = 3.14159265358979323846f;
+
+  auto to_sm64 = [](float v) { return static_cast<int32_t>(v * JAK_TO_SM64_SCALE); };
+
+  // Two rings of SLICES vertices each — top ring at center.y + r, bottom ring
+  // at center.y - r. Vertices walk CCW around +y in math (x, z) orientation
+  // (increasing theta). This ordering matters for cap winding below.
+  std::array<std::array<int32_t, 3>, SLICES> ring_top{};
+  std::array<std::array<int32_t, 3>, SLICES> ring_bot{};
+  for (int i = 0; i < SLICES; i++) {
+    float theta = 2.0f * kPi * float(i) / float(SLICES);
+    float x_local = center_jak[0] + radius_jak * std::cos(theta);
+    float z_local = center_jak[2] + radius_jak * std::sin(theta);
+    ring_top[i][0] = to_sm64(x_local);
+    ring_top[i][1] = to_sm64(center_jak[1] + radius_jak);
+    ring_top[i][2] = to_sm64(z_local);
+    ring_bot[i][0] = to_sm64(x_local);
+    ring_bot[i][1] = to_sm64(center_jak[1] - radius_jak);
+    ring_bot[i][2] = to_sm64(z_local);
+  }
+
+  auto push_tri = [&out_surfaces](const int32_t a[3], const int32_t b[3],
+                                    const int32_t c[3]) {
+    SM64Surface s{};
+    s.type = 0;      // SURFACE_DEFAULT
+    s.force = 0;
+    s.terrain = 1;   // TERRAIN_STONE
+    s.vertices[0][0] = a[0]; s.vertices[0][1] = a[1]; s.vertices[0][2] = a[2];
+    s.vertices[1][0] = b[0]; s.vertices[1][1] = b[1]; s.vertices[1][2] = b[2];
+    s.vertices[2][0] = c[0]; s.vertices[2][1] = c[1]; s.vertices[2][2] = c[2];
+    out_surfaces.push_back(s);
+  };
+
+  // Side walls: each slice is a vertical quad between ring_bot[i]/ring_top[i]
+  // and ring_bot[ni]/ring_top[ni]. We emit two tris per quad with winding
+  // chosen so the outward-radial normal falls out of (v2-v1) × (v3-v2):
+  //   Tri A: (B_i, T_ni, B_ni) — edges (B→T) vertical, (T→B) vertical
+  //   Tri B: (B_i, T_i, T_ni) — edge (B→T) vertical, (T→T) horizontal
+  // Because both tris contain a purely-vertical edge, the cross-product's
+  // y-component is 0 exactly. libsm64 classifies them as walls, not floors,
+  // so find_floor never picks them up and Mario doesn't snap up the side.
+  // The two coplanar tris are NOT a double-push: find_wall_collisions_from_list
+  // runs the triangle-inside test in (y, x) or (y, -z) projected space, and a
+  // single point can only be inside one of the two coplanar tris per quad.
+  for (int i = 0; i < SLICES; i++) {
+    int ni = (i + 1) % SLICES;
+    push_tri(ring_bot[i].data(), ring_top[ni].data(), ring_bot[ni].data());
+    push_tri(ring_bot[i].data(), ring_top[i].data(), ring_top[ni].data());
+  }
+
+  // Top cap: triangle fan rooted at ring_top[0] using (T_0, T_{i+1}, T_i).
+  // The ring is CCW around +y in math orientation, so reversing the last two
+  // verts in each fan tri gives CW winding. CW in math (x, z) is exactly what
+  // find_floor_from_list's inside-triangle test accepts, and the cross
+  // product gives normal.y > 0 (floor). Mario can land on top of the prism.
+  // For SLICES=4 this fan emits exactly 2 tris covering the full square.
+  for (int i = 1; i < SLICES - 1; i++) {
+    push_tri(ring_top[0].data(), ring_top[i + 1].data(), ring_top[i].data());
+  }
+
+  // Bottom cap intentionally NOT emitted. See the (Exposed Ceilings bug)
+  // section of the block comment above: any ceiling tri within 78 units
+  // below floor+80 is treated as a valid ceiling for Mario at ground level,
+  // and sphere2's bottom cap at cy − r lands inside that window for
+  // scarecrow-sized prims — triggering STOP_QSTEPS as soon as Mario walks
+  // near. Leaving the prism open-bottomed is safe: Mario can't teleport
+  // inside, so he only ever meets the walls and top cap.
+
+  if (out_local_aabb_min_jak) {
+    out_local_aabb_min_jak[0] = center_jak[0] - radius_jak;
+    out_local_aabb_min_jak[1] = center_jak[1] - radius_jak;
+    out_local_aabb_min_jak[2] = center_jak[2] - radius_jak;
+  }
+  if (out_local_aabb_max_jak) {
+    out_local_aabb_max_jak[0] = center_jak[0] + radius_jak;
+    out_local_aabb_max_jak[1] = center_jak[1] + radius_jak;
+    out_local_aabb_max_jak[2] = center_jak[2] + radius_jak;
+  }
+}
+
+// Per-prim collection result: identifies the prim, its collide-mesh (for mesh
+// prims) or local sphere params (for sphere prims), and which bone it's
+// attached to via transform-index. We need the prim ptr separately because two
+// prim-meshes in the same group can share the same collide-mesh template —
+// keying tracked actors by mesh_ptr alone collapses them onto each other.
 struct CollectedPrim {
+  enum class Kind { Mesh, Sphere };
   u32 prim_ptr;
-  u32 mesh_ptr;
+  Kind kind;
+  u32 mesh_ptr;                    // valid when kind == Mesh
+  float sphere_center_jak[3];      // valid when kind == Sphere
+  float sphere_radius_jak;         // valid when kind == Sphere
   int8_t transform_index;
 };
 
-// Recursively collect prim-mesh entries from a collide-shape-prim hierarchy.
+// Recursively collect prim-mesh and prim-sphere entries from a collide-shape-prim
+// hierarchy. When `prim_sphere_type == 0`, sphere prims are silently skipped
+// (back-compat: tests that don't pass a sphere type see the old behavior).
 void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
-                        u32 prim_mesh_type, u32 prim_group_type,
+                        u32 prim_mesh_type, u32 prim_group_type, u32 prim_sphere_type,
                         std::vector<CollectedPrim>& out_prims, int depth = 0) {
   if (prim_ptr == 0 || prim_ptr == false_val || depth > MAX_PRIM_DEPTH) return;
   u32 prim_type;
   if (!read_basic_type(ee_mem, prim_ptr, mem_size, prim_type)) return;
+
+  auto read_xform_idx = [&](u32 pp) -> int8_t {
+    int8_t xi = -2;
+    if (valid_ee_addr(pp + PRIM_TRANSFORM_INDEX_OFF, 1, mem_size)) {
+      xi = static_cast<int8_t>(ee_mem[pp + PRIM_TRANSFORM_INDEX_OFF]);
+    }
+    return xi;
+  };
 
   if (prim_type == prim_mesh_type) {
     u32 mesh_ptr;
@@ -1393,12 +1550,39 @@ void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
     if (mesh_ptr != 0 && mesh_ptr != false_val) {
       // transform-index is an int8 in collide-shape-prim. -2 = no joint
       // attachment, >=0 = bone index into process-drawable.node-list.
-      int8_t xform_idx = -2;
-      if (valid_ee_addr(prim_ptr + PRIM_TRANSFORM_INDEX_OFF, 1, mem_size)) {
-        xform_idx = static_cast<int8_t>(ee_mem[prim_ptr + PRIM_TRANSFORM_INDEX_OFF]);
-      }
-      out_prims.push_back({prim_ptr, mesh_ptr, xform_idx});
+      CollectedPrim cp{};
+      cp.prim_ptr = prim_ptr;
+      cp.kind = CollectedPrim::Kind::Mesh;
+      cp.mesh_ptr = mesh_ptr;
+      cp.transform_index = read_xform_idx(prim_ptr);
+      out_prims.push_back(cp);
     }
+  } else if (prim_sphere_type != 0 && prim_type == prim_sphere_type) {
+    // Sphere prim — pull center/radius from local-sphere (inline vec4 right
+    // after the 32-byte prim-core). collide-shape-prim-sphere overlays its
+    // `radius` field onto local-sphere.w, so both live in the same 16-byte
+    // slot at PRIM_LOCAL_SPHERE_OFF.
+    float local_sphere[4];
+    if (!read_vec4(ee_mem, prim_ptr + PRIM_LOCAL_SPHERE_OFF, mem_size, local_sphere)) return;
+    // Sanity check: finite, positive radius, center within a sane range.
+    // Bogus values here usually mean the collide-shape was never initialized,
+    // in which case we don't want to feed garbage into libsm64.
+    for (int i = 0; i < 4; i++) {
+      if (!std::isfinite(local_sphere[i])) return;
+    }
+    if (local_sphere[3] <= 0.0f || local_sphere[3] > 1.0e7f) return;
+    for (int i = 0; i < 3; i++) {
+      if (std::abs(local_sphere[i]) > 1.0e7f) return;
+    }
+    CollectedPrim cp{};
+    cp.prim_ptr = prim_ptr;
+    cp.kind = CollectedPrim::Kind::Sphere;
+    cp.sphere_center_jak[0] = local_sphere[0];
+    cp.sphere_center_jak[1] = local_sphere[1];
+    cp.sphere_center_jak[2] = local_sphere[2];
+    cp.sphere_radius_jak = local_sphere[3];
+    cp.transform_index = read_xform_idx(prim_ptr);
+    out_prims.push_back(cp);
   } else if (prim_type == prim_group_type) {
     u32 num_prims;
     if (!read_u32(ee_mem, prim_ptr + PRIM_GROUP_NUM_PRIMS_OFF, mem_size, num_prims)) return;
@@ -1408,10 +1592,10 @@ void collect_mesh_prims(u8* ee_mem, u32 mem_size, u32 prim_ptr, u32 false_val,
       if (!read_u32(ee_mem, prim_ptr + PRIM_GROUP_PRIM_ARRAY_OFF + i * 4, mem_size, child)) break;
       if (child == 0 || child == false_val) continue;
       collect_mesh_prims(ee_mem, mem_size, child, false_val, prim_mesh_type, prim_group_type,
-                         out_prims, depth + 1);
+                         prim_sphere_type, out_prims, depth + 1);
     }
   }
-  // spheres and other prim types are ignored.
+  // Other prim types (unknown) are ignored.
 }
 
 // Resolve a prim's per-prim world transform. For prims with transform_index >= 0
@@ -1547,10 +1731,22 @@ struct WalkCtx {
   u32 collide_shape_type;
   u32 prim_mesh_type;
   u32 prim_group_type;
+  // collide-shape-prim-sphere type. 0 disables sphere handling (tests that
+  // don't care about spheres leave it 0 — matches the pre-sphere behavior).
+  u32 prim_sphere_type;
   // Camera-related process-drawable types. Either can be 0 to disable that
   // specific filter (e.g. citadelcam is 0 outside the citadel level).
   u32 pov_camera_type;
   u32 citadelcam_type;
+  // Current *target* (= Jak) process-drawable pointer, or 0 if unknown. We
+  // MUST skip this node in the walker: Jak's own collide-shape has a
+  // prim-group containing sphere prims for his body, and if we mirror them
+  // into libsm64 Mario spawns literally inside Jak's own collision walls
+  // (because "Spawn Mario at Target" places him at Jak's position). The
+  // result is Mario being violently ejected every frame and bouncing back
+  // into the sphere as Jak drifts — a very distinctive "bounces toward
+  // Jak forever" failure mode. 0 disables the filter (unit tests).
+  u32 target_ptr;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
@@ -1630,6 +1826,20 @@ void do_sweep(WalkCtx& c) {
     stack.pop_back();
 
     if (node == 0 || node == c.false_val) continue;
+
+    // Skip *target* (Jak). His collide-shape-prim-group contains sphere
+    // prims for his body (eichar-cs in collide-shape-h.gc). Mirroring those
+    // into libsm64 means Mario's spawn — which is AT Jak's position when
+    // using "Spawn Mario at Target" — lands inside Jak's own collision
+    // walls, and the per-frame wall push ejects Mario violently before he
+    // re-enters the sphere as Jak drifts the next frame. Net effect: Mario
+    // pinballs back toward Jak endlessly (user report: "bounces toward
+    // 0,0,0 and keeps freaking out" — 0,0,0 = wherever Jak happens to be).
+    // Run before the visited-set check so a diagnostic re-queue can't
+    // resurrect Jak. 0 disables the filter (unit tests, or a pre-kernel
+    // tick where *target* isn't bound yet).
+    if (c.target_ptr != 0 && node == c.target_ptr) continue;
+
     if (!visited_set.insert(node).second) continue;   // already walked
     c.result.process_tree_nodes_visited++;
 
@@ -1712,7 +1922,7 @@ void do_sweep(WalkCtx& c) {
 
     std::vector<CollectedPrim> prims;
     collect_mesh_prims(c.ee_mem, c.mem_size, root_prim, c.false_val, c.prim_mesh_type,
-                       c.prim_group_type, prims);
+                       c.prim_group_type, c.prim_sphere_type, prims);
     if (prims.empty()) continue;
 
     // Read the actor's world transform.
@@ -1737,15 +1947,18 @@ void do_sweep(WalkCtx& c) {
 
     for (const CollectedPrim& cp : prims) {
       u32 prim_ptr = cp.prim_ptr;
-      u32 mesh_ptr = cp.mesh_ptr;
+      u32 mesh_ptr = cp.mesh_ptr;  // 0 for sphere prims
 
-      // Skip meshes we've already decided are broken.
-      if (c.broken_meshes.count(mesh_ptr)) continue;
+      // Skip meshes we've already decided are broken. Sphere prims are
+      // procedurally tessellated so they can't "break" in the extraction
+      // sense — skip this check for them.
+      if (cp.kind == CollectedPrim::Kind::Mesh && c.broken_meshes.count(mesh_ptr)) continue;
 
       // Key by (process-drawable, prim) so multiple prims inside one
       // prim-group that share a mesh template each get their own libsm64
       // surface object. Each bone-attached prim shows up as a distinct
-      // entry — effectively `<actor>-1`, `<actor>-2`, etc.
+      // entry — effectively `<actor>-1`, `<actor>-2`, etc. Sphere prims
+      // slot into the same keyspace since prim_ptr is per-sphere.
       uint64_t key = make_actor_key(node, prim_ptr);
       auto& tracked = c.tracked_actors[key];
       tracked.seen_this_frame = true;
@@ -1839,15 +2052,28 @@ void do_sweep(WalkCtx& c) {
       std::vector<SM64Surface> surfaces;
       float local_aabb_min[3];
       float local_aabb_max[3];
-      if (!extract_mesh_local(c.ee_mem, c.mem_size, mesh_ptr, surfaces, local_aabb_min,
-                              local_aabb_max)) {
-        c.broken_meshes.insert(mesh_ptr);
-        c.result.errors++;
-        continue;
-      }
-      if (surfaces.empty()) {
-        c.broken_meshes.insert(mesh_ptr);
-        continue;
+      if (cp.kind == CollectedPrim::Kind::Mesh) {
+        if (!extract_mesh_local(c.ee_mem, c.mem_size, mesh_ptr, surfaces, local_aabb_min,
+                                local_aabb_max)) {
+          c.broken_meshes.insert(mesh_ptr);
+          c.result.errors++;
+          continue;
+        }
+        if (surfaces.empty()) {
+          c.broken_meshes.insert(mesh_ptr);
+          continue;
+        }
+      } else {
+        // Sphere prim: tessellate into SM64Surfaces using the prim's
+        // local-sphere center + radius. The bone/root transform computed
+        // above is applied by libsm64 via sm64_surface_object_move, so we
+        // only need the local-space geometry here.
+        tessellate_sphere_local(cp.sphere_center_jak, cp.sphere_radius_jak, surfaces,
+                                  local_aabb_min, local_aabb_max);
+        if (surfaces.empty()) {
+          // Should never happen at non-zero radius, but guard anyway.
+          continue;
+        }
       }
 
       c.result.meshes_found++;
@@ -1899,27 +2125,31 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
     auto cs = jak1::find_symbol_from_c("collide-shape");
     auto pm = jak1::find_symbol_from_c("collide-shape-prim-mesh");
     auto pg = jak1::find_symbol_from_c("collide-shape-prim-group");
+    auto ps = jak1::find_symbol_from_c("collide-shape-prim-sphere");
     auto ap = jak1::find_symbol_from_c("*active-pool*");
     if (pd.offset == 0 || cs.offset == 0 || pm.offset == 0 || pg.offset == 0 ||
-        ap.offset == 0) {
+        ps.offset == 0 || ap.offset == 0) {
       return;  // symbol table doesn't have one of our keys yet; retry next frame
     }
     u32 pd_val = pd->value;
     u32 cs_val = cs->value;
     u32 pm_val = pm->value;
     u32 pg_val = pg->value;
+    u32 ps_val = ps->value;
     if (pd_val == 0 || pd_val == false_val || cs_val == 0 || cs_val == false_val ||
-        pm_val == 0 || pm_val == false_val || pg_val == 0 || pg_val == false_val) {
+        pm_val == 0 || pm_val == false_val || pg_val == 0 || pg_val == false_val ||
+        ps_val == 0 || ps_val == false_val) {
       return;  // types symbols exist but haven't been bound to Type structs yet
     }
     m_type_cache.process_drawable = pd_val;
     m_type_cache.collide_shape = cs_val;
     m_type_cache.prim_mesh = pm_val;
     m_type_cache.prim_group = pg_val;
+    m_type_cache.prim_sphere = ps_val;
     m_type_cache.active_pool_sym = ap.offset;
     m_type_cache.ready = true;
-    lg::info("[libsm64] Actor collision type cache ready: pd=0x{:X} cs=0x{:X} pm=0x{:X} pg=0x{:X} ap_sym=0x{:X} false=0x{:X}",
-             pd_val, cs_val, pm_val, pg_val, ap.offset, false_val);
+    lg::info("[libsm64] Actor collision type cache ready: pd=0x{:X} cs=0x{:X} pm=0x{:X} pg=0x{:X} ps=0x{:X} ap_sym=0x{:X} false=0x{:X}",
+             pd_val, cs_val, pm_val, pg_val, ps_val, ap.offset, false_val);
   }
 
   // Retry pov-camera / citadelcam lookup every frame until both are bound.
@@ -1948,6 +2178,23 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
     }
   }
 
+  // Resolve *target* every frame. Jak's process-drawable pointer changes
+  // any time the player is re-spawned (e.g. death), and there's no upside
+  // to caching it across frames — the symbol lookup is cheap. A 0 here
+  // means *target* isn't bound yet, which disables the filter (the walker
+  // will treat Jak as any other actor for one or two frames while the
+  // kernel finishes wiring him up).
+  u32 target_ptr_now = 0;
+  {
+    auto target_sym = jak1::find_symbol_from_c("*target*");
+    if (target_sym.offset != 0) {
+      u32 v = target_sym->value;
+      if (v != 0 && v != false_val) {
+        target_ptr_now = v;
+      }
+    }
+  }
+
   TestSweepResult result;
   WalkCtx ctx{
       ee_mem,
@@ -1958,8 +2205,10 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.collide_shape,
       m_type_cache.prim_mesh,
       m_type_cache.prim_group,
+      m_type_cache.prim_sphere,
       m_type_cache.pov_camera,
       m_type_cache.citadelcam,
+      target_ptr_now,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
@@ -2045,7 +2294,8 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
                                                            u32 prim_group_type,
                                                            bool dry_run,
                                                            u32 pov_camera_type,
-                                                           u32 citadelcam_type) {
+                                                           u32 citadelcam_type,
+                                                           u32 prim_sphere_type) {
   TestSweepResult result;
   int dummy_diag_remaining = 0;  // tests shouldn't spam lg::info
   std::unordered_map<u32, bool> pd_cache, cs_cache, pov_cache, citadel_cache;
@@ -2061,8 +2311,10 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       collide_shape_type,
       prim_mesh_type,
       prim_group_type,
+      prim_sphere_type,
       pov_camera_type,
       citadelcam_type,
+      0,  // target_ptr: disabled in tests (synthetic buffers have no *target*)
       dry_run,
       dummy_diag_remaining,
       pd_cache,

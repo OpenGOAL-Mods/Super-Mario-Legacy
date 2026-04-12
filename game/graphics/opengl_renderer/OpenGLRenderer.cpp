@@ -1069,12 +1069,18 @@ void OpenGLRenderer::tick_mario_sm64() {
         if (std::abs(input.stick_y) < DEADZONE) input.stick_y = 0.0f;
 
         // Button mapping:
-        // Cross (X) -> A (jump)
-        // Square -> B (punch)
-        // L2 -> Z (crouch/ground pound)
+        // Cross (X)          -> A (jump)
+        // Square OR Circle   -> B (punch / grab / throw)
+        // L2 OR L1           -> Z (crouch / ground pound)
+        // The punch and crouch actions accept either of two face/shoulder
+        // buttons so the player can use whichever grip is comfortable —
+        // Square keeps parity with the Jak control scheme while Circle is
+        // the more natural punch button for players coming from SM64, and
+        // similarly L2 is the original crouch trigger but L1 is closer at
+        // hand for most shoulder-button-heavy combos.
         input.button_a = pad.cross().first;
-        input.button_b = pad.square().first;
-        input.button_z = pad.l2().first;
+        input.button_b = pad.square().first || pad.circle().first;
+        input.button_z = pad.l2().first || pad.l1().first;
       }
     }
   }
@@ -1100,6 +1106,12 @@ void OpenGLRenderer::tick_mario_sm64() {
   // glue a held yakow to Mario's hand position each frame via the libsm64
   // fake-held-object API. No-op when the toggle is off.
   mgr.update_yakow_grab(g_ee_main_mem);
+
+  // Zoomer → shell: read Jak's target-racing state each tick and force
+  // Mario into ACT_RIDING_SHELL_GROUND while he's on the zoomer, so he
+  // gets the shell-riding visual and picks up the native ACT_FLAG_RIDING_SHELL
+  // lava immunity used by check_lava_boost / update_mario_water.
+  mgr.update_zoomer_shell(g_ee_main_mem);
 }
 
 void OpenGLRenderer::render_mario_sm64(ScopedProfilerNode& prof) {

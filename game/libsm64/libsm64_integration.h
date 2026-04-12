@@ -64,6 +64,28 @@ struct MarioState {
   int16_t anim_frame = 0;
 };
 
+// Koopa shell mesh extracted at runtime from the SM64 ROM's MIO0-compressed
+// actor segment.  Vertex positions are in SM64 model-space units (before
+// GEO_SCALE and SM64_TO_JAK_SCALE conversion).  Produced once during
+// LibSM64Manager::init() by extract_shell_from_rom(); consumed by
+// MarioRenderer::build_shell_local_mesh().
+struct ShellMeshData {
+  struct Vertex {
+    float px, py, pz;   // position (SM64 model units)
+    float nx, ny, nz;   // normal (unit-length)
+    float u, v;          // texture coords (0..1 for dome, <0 = vertex-color-only)
+    float cr, cg, cb;   // per-region vertex colour (from SM64 per-DL lighting)
+  };
+  std::vector<Vertex> vertices;  // 3 per triangle, flat-expanded
+  int tri_count = 0;
+
+  std::vector<uint8_t> texture_rgba;  // decoded RGBA8888 texture image
+  int tex_width = 0;
+  int tex_height = 0;
+
+  bool valid = false;
+};
+
 // Mirror of SM64's mario ground-pound attack hitbox, projected into Jak units.
 // Modeled after libsm64's `act_ground_pound`/`act_ground_pound_land` and the
 // hitbox in object_stuff.c (radius 37, height 160 SM64u, no down-offset). The
@@ -163,6 +185,9 @@ class LibSM64Manager {
   int get_texture_width() const { return TEXTURE_WIDTH; }
   int get_texture_height() const { return TEXTURE_HEIGHT; }
 
+  // Koopa shell mesh extracted from the SM64 ROM (only valid after init).
+  const ShellMeshData& get_shell_mesh() const { return m_shell_mesh; }
+
   // Teleport Jak to Mario's position (makes camera follow Mario).
   // Call resolve_target_symbol() once from the game thread before using sync_jak_to_mario().
   void resolve_target_symbol();
@@ -225,6 +250,34 @@ class LibSM64Manager {
   // Mario delete, yakow_grab toggle off, or shutdown.
   void clear_yakow_grab();
 
+  // Zoomer→shell: each tick, maintain the GOAL-side handshake that keeps Jak
+  // out of the target-racing-* states and puts Mario into ACT_RIDING_SHELL_GROUND
+  // when the player tries to hop on a zoomer.
+  //
+  // Two GOAL symbols drive this (defined in target-handler.gc):
+  //   *sm64-skip-zoomer*      — C++ sets this to #t while Mario exists and
+  //                             zoomer_shell is enabled. When #t, target's
+  //                             'racing change-mode event handler swallows
+  //                             the event instead of going into the racer
+  //                             (avoiding the racer's bad camera and loud
+  //                             engine SFX). When #f, Jak races normally.
+  //   *sm64-zoomer-requested* — GOAL sets this to #t whenever a 'racing event
+  //                             was swallowed (i.e. the player is hitting
+  //                             attack near a zoomer). C++ polls it each
+  //                             tick; on #t it puts Mario into the ground
+  //                             shell action and clears it back to #f.
+  //
+  // Since Mario inherits the riding-shell action flag while he's in the shell
+  // action, the native check_lava_boost no-ops for lava floors
+  // (interaction.c:902) — we also skip the host-side lava kick in
+  // update_mario_water for the same reason, so lava rocks in Fire Canyon and
+  // Lava Tube don't hurt Mario while he's on the shell.
+  //
+  // No-op if libsm64 isn't initialized or the feature toggle is off. Safe to
+  // call unconditionally each tick — gracefully no-ops if the GOAL symbols
+  // aren't present yet (e.g. kernel loaded but target-handler not linked).
+  void update_zoomer_shell(u8* ee_mem);
+
   // Safety floor: create-or-move the pseudo-floor quad so it's glued just
   // below Mario's current XYZ. See `safety_floor` comment for the rationale.
   // Called from tick() before sm64_mario_tick each frame. No-op if the
@@ -235,6 +288,7 @@ class LibSM64Manager {
   // Delete the safety floor surface object if one exists. Called on Mario
   // respawn, delete, and shutdown.
   void clear_safety_floor();
+
 
   // --- Testing hooks ---------------------------------------------------------
   // Run one actor-collision sweep against a custom EE memory buffer (with a
@@ -324,6 +378,12 @@ class LibSM64Manager {
   // the process tree looking for yakow actors and uses the libsm64 fake-hold
   // API to let Mario pick them up on B-press when close.
   bool yakow_grab = true;
+  // Zoomer→shell feature — default on. When enabled, update_zoomer_shell
+  // watches Jak's state each tick and forces Mario into ACT_RIDING_SHELL_GROUND
+  // while Jak is in any target-racing-* state (i.e. while he's on the zoomer).
+  // Also gives Mario lava immunity in that state so the lava rocks in
+  // Fire Canyon / Lava Tube don't burn him while the zoomer is in use.
+  bool zoomer_shell = true;
   // Pseudo safety-floor: a small flat quad glued 200 SM64 units below
   // Mario each tick so libsm64's find_floor query always returns a valid
   // surface. Just meant to stop the "Mario walks off the edge into a
@@ -343,6 +403,10 @@ class LibSM64Manager {
  private:
   LibSM64Manager() = default;
   ~LibSM64Manager();
+
+  // Parse the koopa shell model + texture from the ROM bytes stored in
+  // m_rom_data.  Called once during init(); frees m_rom_data when done.
+  bool extract_shell_from_rom();
 
   LibSM64Manager(const LibSM64Manager&) = delete;
   LibSM64Manager& operator=(const LibSM64Manager&) = delete;
@@ -414,6 +478,14 @@ class LibSM64Manager {
   bool m_prev_button_b = false;
   bool m_cur_button_b = false;
 
+  // ---- Zoomer→shell state ----------------------------------------------
+  // No persistent state — update_zoomer_shell does fresh find_symbol_from_c
+  // lookups each tick on *sm64-skip-zoomer* / *sm64-zoomer-requested*. The
+  // lookups are hash-table reads and consistent with how sync_jak_to_mario
+  // resolves *target* every frame. Also no local "in shell" latch — we
+  // simply set the shell action whenever the GOAL-side flag fires and let
+  // Mario run his own physics from there.
+
   // Throttling and diagnostics. The log budget is intentionally large so that
   // when the feature crashes, the most recent lines in the log file pinpoint
   // which mesh / which step died. Reset on shutdown().
@@ -430,7 +502,19 @@ class LibSM64Manager {
   uint32_t m_safety_floor_id = 0;
   bool m_safety_floor_created = false;
 
+  // ---- Shell-over-water state --------------------------------------------
+  // Set each frame by update_mario_water (runs before tick). When true, the
+  // post-tick correction in tick() keeps Mario at the water surface while
+  // shell-riding, preventing any brief SHELL_FALL bounce.
+  bool m_in_water_volume = false;
+  float m_water_level_sm64 = 0.0f;
+
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
+
+  // ROM bytes — kept briefly during init() for shell extraction, then freed.
+  std::vector<uint8_t> m_rom_data;
+  // Shell mesh + texture extracted from the ROM (persists for renderer use).
+  ShellMeshData m_shell_mesh;
 
   // Serializes calls into libsm64 global state. sm64_mario_tick() and
   // sm64_audio_tick() both touch shared internal state, so the audio worker

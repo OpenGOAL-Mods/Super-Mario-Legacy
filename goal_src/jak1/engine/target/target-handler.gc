@@ -4,6 +4,18 @@
 (require "engine/target/logic-target.gc")
 (define-extern target-powerup-effect (function symbol none :behavior target))
 
+;; libsm64 bridge symbols (set/read from the C++ side in LibSM64Manager::update_zoomer_shell).
+;; *sm64-skip-zoomer* — when #t, target's 'racing change-mode event is swallowed instead of
+;;                      transitioning Jak into the target-racing-* states. This keeps Jak out
+;;                      of the racer (whose camera and engine SFX are undesirable when Mario
+;;                      is the one riding the zoomer).
+;; *sm64-zoomer-requested* — set to #t whenever a 'racing event was swallowed. C++ polls this
+;;                      each frame; when #t, it puts Mario into ACT_RIDING_SHELL_GROUND and
+;;                      clears the flag. This is the handshake that tells libsm64 "the player
+;;                      just tried to hop on a zoomer".
+(define *sm64-skip-zoomer* #f)
+(define *sm64-zoomer-requested* #f)
+
 ;; DECOMP BEGINS
 
 (defbehavior target-generic-event-handler target ((arg0 process) (arg1 int) (arg2 symbol) (arg3 event-message-block))
@@ -507,7 +519,17 @@
        (('look-around) (go target-look-around))
        (('billy) (go target-billy-game))
        (('falling) (go target-falling #f))
-       (('racing) (go target-racing-start (process->handle (the-as process (-> arg3 param 1)))))
+       (('racing)
+        ;; libsm64: when Mario is the one riding the zoomer, the C++ side raises
+        ;; *sm64-skip-zoomer*. Swallow the event (don't enter the racer at all —
+        ;; the racer has a bad camera and loud engine SFX) and set
+        ;; *sm64-zoomer-requested* so the C++ update tick sees the request next
+        ;; frame and puts Mario into the shell action.
+        (cond
+          (*sm64-skip-zoomer*
+           (set! *sm64-zoomer-requested* #t))
+          (else
+           (go target-racing-start (process->handle (the-as process (-> arg3 param 1)))))))
        (('flut) (go target-flut-start (process->handle (the-as process (-> arg3 param 1)))))
        (('snowball) (go target-snowball-start (process->handle (the-as process (-> arg3 param 1)))))
        (('tube)

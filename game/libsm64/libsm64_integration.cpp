@@ -15,6 +15,7 @@
 
 #include "common/goal_constants.h"
 #include "common/log/log.h"
+#include "common/symbols.h"
 #include "common/util/FileUtil.h"
 #include "game/kernel/common/Ptr.h"
 #include "game/kernel/common/Symbol4.h"
@@ -23,6 +24,7 @@
 
 extern "C" {
 #include "libsm64.h"
+#include "decomp/tools/libmio0.h"
 }
 
 namespace sm64 {
@@ -99,6 +101,13 @@ bool LibSM64Manager::init(const std::string& rom_path) {
   m_tick_normal_buf.resize(9 * GEO_MAX_TRIANGLES);
   m_tick_color_buf.resize(9 * GEO_MAX_TRIANGLES);
   m_tick_uv_buf.resize(6 * GEO_MAX_TRIANGLES);
+
+  // Keep the ROM bytes long enough to extract the koopa-shell model + texture
+  // from the compressed actor segment, then free them.
+  m_rom_data = std::move(rom_data);
+  if (!extract_shell_from_rom()) {
+    lg::warn("[libsm64] Shell model extraction failed — shell won't render");
+  }
 
   m_initialized = true;
   m_last_rom_path = rom_path;
@@ -181,6 +190,705 @@ void LibSM64Manager::set_audio_volume(int volume) {
 
 int LibSM64Manager::get_audio_volume() const {
   return m_audio_volume;
+}
+
+// ---------------------------------------------------------------------------
+// Koopa-shell model extraction from the SM64 ROM
+// ---------------------------------------------------------------------------
+// The koopa_shell model lives inside an MIO0-compressed actor-group segment
+// in the SM64 US ROM.  We scan every MIO0 block, decompress it, and search
+// the decompressed data for the known koopa-shell vertex pattern (first
+// three dome vertex positions).  Once found we use the relative layout from
+// the SM64 matching decomp to locate the three F3D display lists (dome /
+// belly / ring) and the 32×32 RGBA16 texture.
+//
+// If the data is not found in any MIO0 block we also search the raw
+// (uncompressed) ROM as a fallback.
+// ---------------------------------------------------------------------------
+
+// Helpers — big-endian reads for N64 binary data.
+static uint32_t rom_be32(const uint8_t* p) {
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+         (uint32_t(p[2]) << 8) | p[3];
+}
+static int16_t rom_be_s16(const uint8_t* p) {
+  return static_cast<int16_t>((p[0] << 8) | p[1]);
+}
+
+// (Vertex pattern search removed — we now locate the koopa-shell display lists
+//  by searching the ROM for the GEO_SCALE(16384) geo layout pattern instead.)
+
+bool LibSM64Manager::extract_shell_from_rom() {
+  if (m_rom_data.size() < 0x100000) {
+    lg::warn("[libsm64] ROM too small for shell extraction");
+    return false;
+  }
+
+  static constexpr uint32_t MIO0_MAGIC = 0x4D494F30;  // "MIO0"
+  static constexpr int      TEX_W      = 32;
+  static constexpr int      TEX_H      = 32;
+  static constexpr int      TEX_BYTES  = TEX_W * TEX_H * 2;
+
+  // (No hardcoded relative offsets needed — DL addresses are read from the
+  //  geo layout found in the ROM, making this ROM-version-independent.)
+
+  // Per-region vertex colours — baked from SM64's Lights1 definitions
+  // (ambient + 0.5 × diffuse, approximating a 45° light angle).
+  static const float region_col[3][3] = {
+      {0.20f, 0.60f, 0.07f},  // dome  — green
+      {0.39f, 0.56f, 0.67f},  // belly — blue-grey
+      {0.55f, 0.56f, 0.55f},  // ring  — light grey
+  };
+
+  // ---- Locate the koopa-shell display lists in the ROM --------------------
+  //
+  // Strategy: search the raw ROM for the koopa-shell GEO LAYOUT, which
+  // contains GEO_SCALE(0, 16384) followed by three GEO_DISPLAY_LIST commands.
+  // Those commands embed the actual segmented addresses of the dome / belly /
+  // ring display lists inside segment 8.  We then decompress the segment-8
+  // MIO0 block (at a known ROM offset) and parse the DLs directly.
+  //
+  // This approach works regardless of ROM region (US, JP, EU) or ROM hacks
+  // because it reads the DL addresses from the geo layout data itself.
+
+  std::vector<uint8_t> seg_data;       // decompressed segment-8 data
+  uint32_t dome_dl_off  = UINT32_MAX;  // buffer offsets of the 3 shell DLs
+  uint32_t belly_dl_off = UINT32_MAX;
+  uint32_t ring_dl_off  = UINT32_MAX;
+
+  // 1. Decompress the segment-8 MIO0 block (actor model data).
+  //    Known ROM offset: 0x114750 (SM64 US/JP/EU all have MIO0 here).
+  constexpr uint32_t SEG8_ROM = 0x114750;
+  if (SEG8_ROM + MIO0_HEADER_LENGTH < m_rom_data.size() &&
+      rom_be32(m_rom_data.data() + SEG8_ROM) == MIO0_MAGIC) {
+    mio0_header_t hdr;
+    if (mio0_decode_header(m_rom_data.data() + SEG8_ROM, &hdr) &&
+        hdr.dest_size > 0x10000) {
+      seg_data.resize(hdr.dest_size);
+      if (mio0_decode(m_rom_data.data() + SEG8_ROM, seg_data.data(), nullptr) < 0) {
+        seg_data.clear();
+      } else {
+        lg::info("[libsm64] Segment 8 decompressed: {} bytes from MIO0 @ROM 0x{:06X}",
+                 hdr.dest_size, SEG8_ROM);
+      }
+    }
+  }
+
+  if (seg_data.empty()) {
+    lg::warn("[libsm64] Failed to decompress segment-8 MIO0 block");
+    m_rom_data.clear();
+    m_rom_data.shrink_to_fit();
+    return false;
+  }
+
+  // 2. Search for the koopa-shell geo layout.
+  //    Binary pattern of GEO_SCALE(0, 16384) + GEO_OPEN_NODE:
+  //      1C 00 00 00  00 00 40 00  04 00 00 00
+  //    Followed by three GEO_DISPLAY_LIST (opcode 0x15) commands,
+  //    each 8 bytes: 15 LL 00 00  08 XX XX XX
+  //
+  //    We search the raw ROM first (geo data is usually uncompressed),
+  //    then every decompressed MIO0 block as fallback.
+  // Flexible geo pattern: GEO_SCALE(any_params, any_scale) + GEO_OPEN_NODE.
+  // We only fix: byte[0]=0x1C, bytes[8..11]=04000000, then check for 3× 0x15.
+  // This works even if the ROM hack changed the scale value.
+  auto match_geo_scale_open = [](const uint8_t* p) -> bool {
+    return p[0] == 0x1C &&                             // GEO_SCALE opcode
+           p[8] == 0x04 && p[9] == 0x00 &&             // GEO_OPEN_NODE
+           p[10] == 0x00 && p[11] == 0x00;
+  };
+  constexpr size_t GP_SIZE = 12;  // GEO_SCALE (8 bytes) + GEO_OPEN_NODE (4 bytes)
+
+  // Helper: check if a buffer at a given offset contains the geo layout pattern
+  // followed by three valid GEO_DISPLAY_LIST commands pointing into seg_data.
+  auto try_geo_match = [&](const uint8_t* buf, size_t buf_size,
+                           size_t off) -> bool {
+    uint32_t cmd_base = static_cast<uint32_t>(off) + 12;
+    uint32_t dl_seg_tmp[3];
+    for (int i = 0; i < 3; ++i) {
+      uint32_t co = cmd_base + i * 8;
+      if (co + 8 > buf_size) return false;
+      if (buf[co] != 0x15) return false;
+      uint32_t addr = rom_be32(buf + co + 4);
+      if ((addr >> 24) != 0x08) return false;
+      uint32_t seg_off = addr & 0x00FFFFFF;
+      if (seg_off >= seg_data.size()) return false;
+      dl_seg_tmp[i] = seg_off;
+    }
+    // Validate the first DL has real F3D/F3DEX2 commands.
+    bool has_gvtx_or_tri = false;
+    int valid_ops = 0;
+    for (int ci = 0; ci < 15; ++ci) {
+      uint32_t co = dl_seg_tmp[0] + ci * 8;
+      if (co + 8 > seg_data.size()) break;
+      uint8_t op = seg_data[co];
+      if (op == 0xB8 || op == 0xDF) break;
+      if (op == 0x04 || op == 0x01 || op == 0xBF || op == 0x05)
+        has_gvtx_or_tri = true;
+      if ((op >= 0xB0 && op <= 0xBF) || op >= 0xE0 || op == 0x04 || op == 0x01)
+        ++valid_ops;
+    }
+    if (!has_gvtx_or_tri || valid_ops < 3) return false;
+
+    dome_dl_off  = dl_seg_tmp[0];
+    belly_dl_off = dl_seg_tmp[1];
+    ring_dl_off  = dl_seg_tmp[2];
+    return true;
+  };
+
+  // 2a. Search raw ROM (geo data is typically uncompressed)
+  for (size_t off = 0; off + GP_SIZE + 28 < m_rom_data.size(); ++off) {
+    if (!match_geo_scale_open(m_rom_data.data() + off))
+      continue;
+    if (try_geo_match(m_rom_data.data(), m_rom_data.size(), off)) {
+      lg::info("[libsm64] Found koopa-shell geo layout in raw ROM at 0x{:06X}", off);
+      lg::info("[libsm64] DL seg offsets: dome=0x{:06X} belly=0x{:06X} ring=0x{:06X}",
+               dome_dl_off, belly_dl_off, ring_dl_off);
+      break;
+    }
+  }
+
+  // 2b. Fallback: search ALL decompressed MIO0 blocks for the geo layout.
+  if (dome_dl_off == UINT32_MAX) {
+    lg::info("[libsm64] Geo layout not in raw ROM — searching MIO0 blocks...");
+    for (size_t moff = 0; moff + MIO0_HEADER_LENGTH < m_rom_data.size(); moff += 4) {
+      if (rom_be32(m_rom_data.data() + moff) != MIO0_MAGIC) continue;
+      mio0_header_t hdr;
+      if (!mio0_decode_header(m_rom_data.data() + moff, &hdr)) continue;
+      if (hdr.dest_size < GP_SIZE + 28) continue;
+      std::vector<uint8_t> tmp(hdr.dest_size);
+      if (mio0_decode(m_rom_data.data() + moff, tmp.data(), nullptr) < 0) continue;
+      for (size_t off = 0; off + GP_SIZE + 28 < hdr.dest_size; ++off) {
+        if (!match_geo_scale_open(tmp.data() + off)) continue;
+        if (try_geo_match(tmp.data(), hdr.dest_size, off)) {
+          lg::info("[libsm64] Found koopa-shell geo layout in MIO0 @ROM 0x{:06X} at offset 0x{:X}",
+                   moff, off);
+          lg::info("[libsm64] DL seg offsets: dome=0x{:06X} belly=0x{:06X} ring=0x{:06X}",
+                   dome_dl_off, belly_dl_off, ring_dl_off);
+          break;
+        }
+      }
+      if (dome_dl_off != UINT32_MAX) break;
+    }
+  }
+
+  // 2c. Fallback: brute-force F3D display-list scan of decompressed segment 8.
+  //     Instead of relying on a geo layout pattern (which ROM hacks may alter),
+  //     scan for valid F3D command sequences ending with G_ENDDL directly.
+  if (dome_dl_off == UINT32_MAX) {
+    lg::info("[libsm64] Geo layout not found — scanning seg8 for F3D display lists...");
+
+    // Count G_ENDDL markers to reliably detect GBI encoding.
+    // F3D: G_ENDDL = B8000000 00000000.  F3DEX2: DF000000 00000000.
+    int enddl_f3d = 0, enddl_f3dex2 = 0;
+    for (size_t off = 0; off + 8 <= seg_data.size(); off += 8) {
+      uint32_t w0 = rom_be32(seg_data.data() + off);
+      uint32_t w1 = rom_be32(seg_data.data() + off + 4);
+      if (w0 == 0xB8000000 && w1 == 0) enddl_f3d++;
+      if (w0 == 0xDF000000 && w1 == 0) enddl_f3dex2++;
+    }
+    lg::info("[libsm64] G_ENDDL counts: F3D(0xB8)={}, F3DEX2(0xDF)={}", enddl_f3d, enddl_f3dex2);
+
+
+    // Use whichever GBI has more G_ENDDL markers.
+    // If both are 0, try F3DEX2 first (common in ROM hacks).
+    bool scan_f3dex2 = (enddl_f3dex2 >= enddl_f3d);
+    if (enddl_f3d == 0 && enddl_f3dex2 == 0) scan_f3dex2 = true;
+    lg::info("[libsm64] DL scan using GBI: {}", scan_f3dex2 ? "F3DEX2" : "F3D");
+
+    struct FoundDL {
+      uint32_t offset;
+      int tri_count;
+      int vtx_cmds;
+      bool has_tex;         // any G_SETTIMG command
+      uint32_t tex_seg_addr;
+    };
+    std::vector<FoundDL> found_dls;
+
+    // Try DL scan — if the chosen GBI yields 0 results, flip and try the other.
+    for (int gbi_try = 0; gbi_try < 2 && found_dls.empty(); ++gbi_try) {
+      if (gbi_try == 1) {
+        scan_f3dex2 = !scan_f3dex2;
+        lg::info("[libsm64] Retrying with GBI: {}", scan_f3dex2 ? "F3DEX2" : "F3D");
+      }
+
+      const uint8_t S_VTX  = scan_f3dex2 ? 0x01 : 0x04;
+      const uint8_t S_TRI1 = scan_f3dex2 ? 0x05 : 0xBF;
+      const uint8_t S_TRI2 = 0x06;
+      const uint8_t S_END  = scan_f3dex2 ? 0xDF : 0xB8;
+
+      for (size_t off = 0; off + 8 <= seg_data.size(); off += 8) {
+        uint8_t first = seg_data[off];
+        if (first == 0x00 || (first >= 0x07 && first < 0xB0)) continue;
+
+        int tris = 0, vtxc = 0, total = 0;
+        bool has_tex = false;
+        uint32_t tex_addr = 0;
+        bool ended = false;
+
+        for (int ci = 0; ci < 500; ++ci) {
+          size_t co = off + static_cast<size_t>(ci) * 8;
+          if (co + 8 > seg_data.size()) break;
+          uint8_t  op = seg_data[co];
+          uint32_t w0 = rom_be32(seg_data.data() + co);
+          uint32_t w1 = rom_be32(seg_data.data() + co + 4);
+
+          if (op == S_END) {
+            if (w1 == 0 && (w0 >> 24) == S_END) { total = ci + 1; ended = true; }
+            break;
+          }
+
+          if (op == S_VTX) {
+            uint8_t seg_byte = static_cast<uint8_t>(w1 >> 24);
+            uint32_t v_off = w1 & 0x00FFFFFF;
+            if (seg_byte >= 0x04 && seg_byte <= 0x0F && v_off + 16 <= seg_data.size()) {
+              vtxc++;
+            } else {
+              break;
+            }
+            continue;
+          }
+          if (op == S_TRI1) {
+            if (!scan_f3dex2 && (w0 & 0x00FFFFFF) != 0) break;
+            tris++;
+            continue;
+          }
+          if (scan_f3dex2 && op == S_TRI2) { tris += 2; continue; }
+          if (op == 0xFD) {  // G_SETTIMG — any format, any segment
+            has_tex = true;
+            tex_addr = w1;
+            continue;
+          }
+          if (op == 0x00 || (op >= 0x07 && op < 0xB0)) break;
+        }
+
+        if (ended && vtxc >= 1 && tris >= 2) {
+          found_dls.push_back({static_cast<uint32_t>(off), tris, vtxc, has_tex, tex_addr});
+          off += static_cast<size_t>(total - 1) * 8;
+        }
+      }
+    }
+
+    lg::info("[libsm64] DL scan: {} display lists found in segment 8", found_dls.size());
+
+    // Find the best 3-DL cluster matching the koopa shell (76 triangles).
+    int best_idx = -1;
+    int best_tris = 0;
+    int best_score = -1;
+    for (size_t i = 0; i + 2 < found_dls.size(); ++i) {
+      uint32_t span = found_dls[i + 2].offset - found_dls[i].offset;
+      if (span > 0x3000) continue;
+      int tc = 0, tot = 0;
+      for (int j = 0; j < 3; ++j) {
+        tot += found_dls[i + j].tri_count;
+        if (found_dls[i + j].has_tex) tc++;
+      }
+
+      // Score: textured cluster (exactly 1 tex) gets +100, then prefer totals
+      // close to 76 (the US decomp shell triangle count).
+      int score = 0;
+      if (tc == 1) score += 100;  // strong signal: 1 textured + 2 plain
+      score -= std::abs(tot - 76);  // penalty for deviating from expected total
+      if (tot < 15 || tot > 250) continue;
+
+      // Use >= to prefer LATER clusters with equal score.  SM64's koopa shell
+      // has TWO sets of DLs in segment 8: inside (opaque, normals inward) then
+      // outside (transparent, normals outward).  Both have 76 triangles and
+      // score identically, but we want the outside shell since its normals face
+      // the camera for correct lighting.
+      if (score >= best_score) {
+        best_idx = static_cast<int>(i);
+        best_tris = tot;
+        best_score = score;
+      }
+    }
+
+    if (best_idx >= 0) {
+      // Identify dome = the textured DL (if any), otherwise the largest.
+      int dome_j = -1;
+      for (int j = 0; j < 3; ++j)
+        if (found_dls[best_idx + j].has_tex) dome_j = j;
+      if (dome_j < 0) {
+        // No textured DL — pick the one with the most triangles as the dome.
+        int max_t = 0;
+        for (int j = 0; j < 3; ++j) {
+          if (found_dls[best_idx + j].tri_count > max_t) {
+            max_t = found_dls[best_idx + j].tri_count;
+            dome_j = j;
+          }
+        }
+      }
+      dome_dl_off = found_dls[best_idx + dome_j].offset;
+      int nt = 0;
+      for (int j = 0; j < 3; ++j) {
+        if (j == dome_j) continue;
+        if (nt == 0) belly_dl_off = found_dls[best_idx + j].offset;
+        else          ring_dl_off  = found_dls[best_idx + j].offset;
+        ++nt;
+      }
+      lg::info("[libsm64] Shell identified: dome=0x{:06X} belly=0x{:06X} ring=0x{:06X} ({} tris, score={})",
+               dome_dl_off, belly_dl_off, ring_dl_off, best_tris, best_score);
+    }
+  }
+
+  if (dome_dl_off == UINT32_MAX) {
+    lg::warn("[libsm64] Koopa-shell display lists not found in segment 8");
+    m_rom_data.clear();
+    m_rom_data.shrink_to_fit();
+    return false;
+  }
+
+  // ---- Vertex data buffer ---------------------------------------------------
+  // In SM64 ROM hacks, segment 4 (common actor data) and segment 8 (actor DLs)
+  // often map to the same decompressed MIO0 block. The G_VTX address byte may
+  // say 0x04 but the data lives in our segment 8 buffer. We always read vertices
+  // from seg_data using the 24-bit offset, ignoring the segment byte.
+  const uint8_t* vtx_buf = seg_data.data();
+  const size_t vtx_buf_size = seg_data.size();
+
+  // Log the vertex segment reference for diagnostics.
+  for (int ci = 0; ci < 30; ++ci) {
+    uint32_t co = dome_dl_off + ci * 8;
+    if (co + 8 > seg_data.size()) break;
+    uint8_t op = seg_data[co];
+    if (op == 0xB8 || op == 0xDF) break;
+    if (op == 0x04 || op == 0x01) {
+      uint32_t w1 = rom_be32(seg_data.data() + co + 4);
+      uint32_t vtx_off = w1 & 0x00FFFFFF;
+      lg::info("[libsm64] Vertex ref: seg=0x{:02X} offset=0x{:06X} (using seg8 buffer)",
+               static_cast<uint8_t>(w1 >> 24), vtx_off);
+      // Dump the first 3 vertices at this offset for validation.
+      for (int vi = 0; vi < 3 && vtx_off + (vi + 1) * 16 <= seg_data.size(); ++vi) {
+        const uint8_t* vp = seg_data.data() + vtx_off + vi * 16;
+        lg::info("[libsm64]   vtx[{}] pos=[{},{},{}] tc=[{},{}] n=[{},{},{}]",
+                 vi, rom_be_s16(vp), rom_be_s16(vp + 2), rom_be_s16(vp + 4),
+                 rom_be_s16(vp + 8), rom_be_s16(vp + 10),
+                 static_cast<int8_t>(vp[12]), static_cast<int8_t>(vp[13]),
+                 static_cast<int8_t>(vp[14]));
+      }
+      break;
+    }
+  }
+
+  // ---- Parse an N64 Vtx from the buffer -----------------------------------
+  struct N64Vtx {
+    int16_t x, y, z;
+    int16_t tc_s, tc_t;
+    int8_t nx, ny, nz;
+  };
+
+  auto read_vtx = [&](uint32_t voff) -> N64Vtx {
+    const uint8_t* p = vtx_buf + voff;
+    N64Vtx v{};
+    v.x    = rom_be_s16(p + 0);
+    v.y    = rom_be_s16(p + 2);
+    v.z    = rom_be_s16(p + 4);
+    v.tc_s = rom_be_s16(p + 8);
+    v.tc_t = rom_be_s16(p + 10);
+    v.nx   = static_cast<int8_t>(p[12]);
+    v.ny   = static_cast<int8_t>(p[13]);
+    v.nz   = static_cast<int8_t>(p[14]);
+    return v;
+  };
+
+  // Detect GBI encoding by looking for G_VTX opcodes in the dome DL.
+  // F3D uses 0x04 for G_VTX; F3DEX2 uses 0x01.
+  bool use_f3dex2 = false;
+  for (int ci = 0; ci < 30; ++ci) {
+    uint32_t co = dome_dl_off + ci * 8;
+    if (co + 8 > seg_data.size()) break;
+    uint8_t op = seg_data[co];
+    if (op == 0x04) { use_f3dex2 = false; break; }
+    if (op == 0x01) { use_f3dex2 = true; break; }
+    if (op == 0xB8 || op == 0xDF) break;  // hit end-DL before finding G_VTX
+  }
+
+  const uint8_t OP_VTX   = use_f3dex2 ? 0x01 : 0x04;
+  const uint8_t OP_TRI1  = use_f3dex2 ? 0x05 : 0xBF;
+  const uint8_t OP_TRI2  = 0x06;  // F3DEX2 only
+  const uint8_t OP_ENDDL = use_f3dex2 ? 0xDF : 0xB8;
+  const int IDX_DIV = use_f3dex2 ? 2 : 10;
+
+  lg::info("[libsm64] GBI encoding: {}", use_f3dex2 ? "F3DEX2" : "F3D");
+
+  lg::info("[libsm64] DL offsets: dome=0x{:X} belly=0x{:X} ring=0x{:X}",
+           dome_dl_off, belly_dl_off, ring_dl_off);
+
+  // ---- Walk one display list, emitting triangles --------------------------
+  auto parse_dl = [&](uint32_t dl_off, int region_idx,
+                      std::vector<ShellMeshData::Vertex>& out) {
+    N64Vtx vbuf[32] = {};   // F3DEX2 can have 32 slots
+    bool   vvalid[32] = {};
+
+    const uint8_t* dl = seg_data.data() + dl_off;
+    for (int ci = 0; ci < 300; ++ci, dl += 8) {
+      if (dl + 8 > seg_data.data() + seg_data.size()) break;
+      const uint8_t op = dl[0];
+      const uint32_t w0 = rom_be32(dl);
+      const uint32_t w1 = rom_be32(dl + 4);
+
+      if (op == OP_ENDDL) break;
+
+      if (op == OP_VTX) {
+        // Translate segmented address to buffer offset within vtx_buf.
+        // vtx_buf points to the correct decompressed segment (seg 4 or seg 8).
+        uint32_t vaddr = w1 & 0x00FFFFFF;
+        int n, v0;
+        if (use_f3dex2) {
+          n  = ((w0 >> 12) & 0xFF) / 2;
+          v0 = ((w0 >>  1) & 0x7F) / 2 - n;
+        } else {
+          // Derive n from the size field (bits 0-15) rather than the 4-bit
+          // n field (bits 20-23).  Some ROM hacks encode actual_n - 1 in the
+          // 4-bit field to fit n=16 into 4 bits; the size field is always
+          // sizeof(Vtx) * (v0 + n) or sizeof(Vtx) * (v0 + n) - 1.
+          // Using the size field is more reliable.
+          int total_slots = ((w0 & 0xFFFF) + 1) / 16;
+          n  = total_slots;
+          v0 = 0;
+        }
+        if (v0 < 0) v0 = 0;
+        if (n > 32) n = 32;
+        for (int i = 0; i < n && (v0 + i) < 32; ++i) {
+          uint32_t vpos = vaddr + i * 16;
+          if (vpos + 16 <= vtx_buf_size) {
+            vbuf[v0 + i]   = read_vtx(vpos);
+            vvalid[v0 + i] = true;
+          }
+        }
+        continue;
+      }
+
+      // Triangle commands (F3D: 0xBF; F3DEX2: 0x05 for TRI1, 0x06 for TRI2)
+      auto emit_tri = [&](int i0, int i1, int i2) {
+        if (i0 >= 32 || i1 >= 32 || i2 >= 32) return;
+        if (!vvalid[i0] || !vvalid[i1] || !vvalid[i2]) return;
+        for (int vi : {i0, i1, i2}) {
+          ShellMeshData::Vertex sv{};
+          sv.px = static_cast<float>(vbuf[vi].x);
+          sv.py = static_cast<float>(vbuf[vi].y);
+          sv.pz = static_cast<float>(vbuf[vi].z);
+          sv.nx = vbuf[vi].nx / 127.0f;
+          sv.ny = vbuf[vi].ny / 127.0f;
+          sv.nz = vbuf[vi].nz / 127.0f;
+          if (region_idx == 0 && (vbuf[vi].tc_s != 0 || vbuf[vi].tc_t != 0)) {
+            // Dome vertex with real texture coords — sample the texture.
+            sv.u = vbuf[vi].tc_s / (32.0f * TEX_W);
+            sv.v = vbuf[vi].tc_t / (32.0f * TEX_H);
+          } else {
+            // Belly, ring, or dome vertex with tc=0 — use vertex colour.
+            sv.u = -1.0f;
+            sv.v = -1.0f;
+          }
+          sv.cr = region_col[region_idx][0];
+          sv.cg = region_col[region_idx][1];
+          sv.cb = region_col[region_idx][2];
+          out.push_back(sv);
+        }
+      };
+
+      if (op == OP_TRI1) {
+        if (use_f3dex2) {
+          // F3DEX2 TRI1: w0 bytes 1,2,3 are indices * 2
+          emit_tri(((w0 >> 16) & 0xFF) / IDX_DIV,
+                   ((w0 >>  8) & 0xFF) / IDX_DIV,
+                   ( w0        & 0xFF) / IDX_DIV);
+        } else {
+          // F3D TRI1: w1 bytes 1,2,3 are indices * 10
+          emit_tri(((w1 >> 16) & 0xFF) / IDX_DIV,
+                   ((w1 >>  8) & 0xFF) / IDX_DIV,
+                   ( w1        & 0xFF) / IDX_DIV);
+        }
+      }
+
+      if (use_f3dex2 && op == OP_TRI2) {
+        // Two triangles packed in one command
+        emit_tri(((w0 >> 16) & 0xFF) / IDX_DIV,
+                 ((w0 >>  8) & 0xFF) / IDX_DIV,
+                 ( w0        & 0xFF) / IDX_DIV);
+        emit_tri(((w1 >> 16) & 0xFF) / IDX_DIV,
+                 ((w1 >>  8) & 0xFF) / IDX_DIV,
+                 ( w1        & 0xFF) / IDX_DIV);
+      }
+    }
+  };
+
+  // ---- Parse the three shell display lists --------------------------------
+  m_shell_mesh.vertices.clear();
+  const uint32_t dl_offsets[3] = {dome_dl_off, belly_dl_off, ring_dl_off};
+  const char* dl_names[3] = {"dome", "belly", "ring"};
+  for (int di = 0; di < 3; ++di) {
+    size_t before = m_shell_mesh.vertices.size();
+    parse_dl(dl_offsets[di], di, m_shell_mesh.vertices);
+    int tris_here = static_cast<int>((m_shell_mesh.vertices.size() - before) / 3);
+    lg::info("[libsm64] {} DL at 0x{:X}: {} triangles", dl_names[di], dl_offsets[di], tris_here);
+  }
+  m_shell_mesh.tri_count = static_cast<int>(m_shell_mesh.vertices.size()) / 3;
+
+  if (m_shell_mesh.tri_count == 0) {
+    lg::warn("[libsm64] No triangles parsed from any koopa-shell display list");
+    m_rom_data.clear();
+    m_rom_data.shrink_to_fit();
+    return false;
+  }
+
+  lg::info("[libsm64] Shell total: {} triangles, {} vertices",
+           m_shell_mesh.tri_count, (int)m_shell_mesh.vertices.size());
+
+  // Log vertex bounding box to validate geometry.
+  {
+    float mn[3] = { 1e9f,  1e9f,  1e9f};
+    float mx[3] = {-1e9f, -1e9f, -1e9f};
+    for (const auto& v : m_shell_mesh.vertices) {
+      mn[0] = std::min(mn[0], v.px); mx[0] = std::max(mx[0], v.px);
+      mn[1] = std::min(mn[1], v.py); mx[1] = std::max(mx[1], v.py);
+      mn[2] = std::min(mn[2], v.pz); mx[2] = std::max(mx[2], v.pz);
+    }
+    lg::info("[libsm64] Shell vertex bbox: [{:.0f},{:.0f},{:.0f}] to [{:.0f},{:.0f},{:.0f}]",
+             mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+    lg::info("[libsm64] Shell size: {:.0f} x {:.0f} x {:.0f}",
+             mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
+  }
+
+  // ---- Extract texture (RGBA16 32×32) -------------------------------------
+  // Search for a gsDPSetTextureImage (0xFD) command in AND around the dome DL.
+  // In some ROM hacks the texture setup is in a separate DL nearby, so we scan
+  // a window of ±0x800 bytes around the dome DL offset.
+  uint32_t tex_off = UINT32_MAX;
+  {
+    // 1) Search inside the dome DL first.
+    const uint8_t* dl = seg_data.data() + dome_dl_off;
+    for (int ci = 0; ci < 100; ++ci, dl += 8) {
+      if (dl + 8 > seg_data.data() + seg_data.size()) break;
+      if (dl[0] == OP_ENDDL) break;
+      if (dl[0] == 0xFD) {
+        uint32_t seg_addr = rom_be32(dl + 4) & 0x00FFFFFF;
+        if (seg_addr + TEX_BYTES <= seg_data.size()) {
+          tex_off = seg_addr;
+          lg::info("[libsm64] Shell texture in dome DL: seg 0x{:06X}", tex_off);
+          break;
+        }
+      }
+    }
+    // 2) Search ±0x800 bytes around the dome DL for G_SETTIMG referencing
+    //    segment 8 (our decompressed buffer) with RGBA16 format.
+    if (tex_off == UINT32_MAX) {
+      uint32_t lo = (dome_dl_off > 0x800) ? dome_dl_off - 0x800 : 0;
+      uint32_t hi = std::min(static_cast<uint32_t>(seg_data.size()),
+                             dome_dl_off + 0x800);
+      for (uint32_t off = lo; off + 8 <= hi; off += 8) {
+        if (seg_data[off] != 0xFD) continue;
+        uint32_t w0 = rom_be32(seg_data.data() + off);
+        uint32_t w1 = rom_be32(seg_data.data() + off + 4);
+        if ((w0 & 0xFF180000) != 0xFD100000) continue;
+        uint8_t seg_byte = static_cast<uint8_t>(w1 >> 24);
+        if (seg_byte != 0x08) continue;  // only accept segment 8 refs
+        uint32_t seg_addr = w1 & 0x00FFFFFF;
+        if (seg_addr + TEX_BYTES <= seg_data.size()) {
+          tex_off = seg_addr;
+          lg::info("[libsm64] Shell texture near dome DL @0x{:X}: seg8 0x{:06X}",
+                   off, tex_off);
+          break;
+        }
+      }
+    }
+    // 3) The DL may reference a texture in segment 4 (common group data).
+    //    Search for the MIO0 block that holds segment 4 and extract from there.
+    if (tex_off == UINT32_MAX) {
+      // Find the G_SETTIMG near the dome DL (any segment).
+      uint32_t tex_seg_addr = UINT32_MAX;
+      uint32_t lo = (dome_dl_off > 0x800) ? dome_dl_off - 0x800 : 0;
+      uint32_t hi = std::min(static_cast<uint32_t>(seg_data.size()),
+                             dome_dl_off + 0x800);
+      for (uint32_t off = lo; off + 8 <= hi; off += 8) {
+        if (seg_data[off] != 0xFD) continue;
+        uint32_t w0 = rom_be32(seg_data.data() + off);
+        uint32_t w1 = rom_be32(seg_data.data() + off + 4);
+        if ((w0 & 0xFF180000) != 0xFD100000) continue;
+        tex_seg_addr = w1;
+        break;
+      }
+      if (tex_seg_addr != UINT32_MAX) {
+        uint32_t tex_seg_off = tex_seg_addr & 0x00FFFFFF;
+        lg::info("[libsm64] Shell texture refs seg 0x{:02X} offset 0x{:06X}",
+                 (tex_seg_addr >> 24), tex_seg_off);
+        // Try each MIO0 block — decompress and check if it has enough data.
+        for (size_t moff = 0; moff + MIO0_HEADER_LENGTH < m_rom_data.size(); moff += 4) {
+          if (rom_be32(m_rom_data.data() + moff) != MIO0_MAGIC) continue;
+          mio0_header_t hdr;
+          if (!mio0_decode_header(m_rom_data.data() + moff, &hdr)) continue;
+          if (hdr.dest_size < tex_seg_off + TEX_BYTES) continue;
+          std::vector<uint8_t> tmp(hdr.dest_size);
+          if (mio0_decode(m_rom_data.data() + moff, tmp.data(), nullptr) < 0) continue;
+          // Validate: check that data at tex_seg_off looks like RGBA16 pixels.
+          const uint8_t* t = tmp.data() + tex_seg_off;
+          int nz = 0, a1 = 0;
+          for (int i = 0; i < TEX_W * TEX_H; ++i) {
+            uint16_t px = (t[i * 2] << 8) | t[i * 2 + 1];
+            if (px) nz++;
+            if (px & 1) a1++;
+          }
+          if (nz < TEX_W * TEX_H / 4) continue;  // mostly zeros — not a texture
+          // Found a plausible texture!
+          tex_off = 0;  // placeholder — copy directly below
+          lg::info("[libsm64] Shell texture found in MIO0 @ROM 0x{:06X} (nz={}, a1={})",
+                   moff, nz, a1);
+          // Copy the texture bytes into a temporary location within seg_data
+          // (not ideal, but avoids managing another buffer).  Instead, just
+          // decode the texture directly here.
+          m_shell_mesh.texture_rgba.resize(TEX_W * TEX_H * 4);
+          m_shell_mesh.tex_width  = TEX_W;
+          m_shell_mesh.tex_height = TEX_H;
+          for (int i = 0; i < TEX_W * TEX_H; ++i) {
+            uint16_t px = (t[i * 2] << 8) | t[i * 2 + 1];
+            m_shell_mesh.texture_rgba[i * 4 + 0] = static_cast<uint8_t>(((px >> 11) & 0x1F) << 3);
+            m_shell_mesh.texture_rgba[i * 4 + 1] = static_cast<uint8_t>(((px >>  6) & 0x1F) << 3);
+            m_shell_mesh.texture_rgba[i * 4 + 2] = static_cast<uint8_t>(((px >>  1) & 0x1F) << 3);
+            m_shell_mesh.texture_rgba[i * 4 + 3] = (px & 1) ? 0xFF : 0x00;
+          }
+          tex_off = UINT32_MAX - 1;  // signal: texture already decoded
+          break;
+        }
+      }
+    }
+  }
+  // Fallback: try known US decomp texture offset (0x025778)
+  if (tex_off == UINT32_MAX) {
+    tex_off = 0x025778;
+    lg::info("[libsm64] Using fallback texture offset: 0x{:X}", tex_off);
+  }
+
+  if (tex_off == UINT32_MAX - 1) {
+    // Texture was already decoded directly from a different MIO0 block above.
+    lg::info("[libsm64] Shell texture decoded: {}×{} RGBA16 → RGBA8888",
+             m_shell_mesh.tex_width, m_shell_mesh.tex_height);
+  } else if (tex_off + TEX_BYTES <= seg_data.size()) {
+    m_shell_mesh.texture_rgba.resize(TEX_W * TEX_H * 4);
+    m_shell_mesh.tex_width  = TEX_W;
+    m_shell_mesh.tex_height = TEX_H;
+    const uint8_t* tex = seg_data.data() + tex_off;
+    for (int i = 0; i < TEX_W * TEX_H; ++i) {
+      uint16_t px = (tex[i * 2] << 8) | tex[i * 2 + 1];
+      m_shell_mesh.texture_rgba[i * 4 + 0] = static_cast<uint8_t>(((px >> 11) & 0x1F) << 3);
+      m_shell_mesh.texture_rgba[i * 4 + 1] = static_cast<uint8_t>(((px >>  6) & 0x1F) << 3);
+      m_shell_mesh.texture_rgba[i * 4 + 2] = static_cast<uint8_t>(((px >>  1) & 0x1F) << 3);
+      m_shell_mesh.texture_rgba[i * 4 + 3] = (px & 1) ? 0xFF : 0x00;
+    }
+    lg::info("[libsm64] Shell texture extracted: {}×{} RGBA16 → RGBA8888", TEX_W, TEX_H);
+  } else {
+    lg::warn("[libsm64] Shell texture offset out of bounds — dome will use vertex colour");
+    for (auto& v : m_shell_mesh.vertices) {
+      v.u = -1.0f;
+      v.v = -1.0f;
+    }
+  }
+
+  m_shell_mesh.valid = true;
+
+  // ROM bytes are no longer needed.
+  m_rom_data.clear();
+  m_rom_data.shrink_to_fit();
+  return true;
 }
 
 void LibSM64Manager::shutdown() {
@@ -315,6 +1023,51 @@ void LibSM64Manager::tick(const MarioInputState& input) {
                         m_state.position.z() * JAK_TO_SM64_SCALE);
 
     sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
+
+    // Post-tick shell-over-water correction.
+    // In native SM64 the koopa shell object floats on the water surface and
+    // Mario rides it at a stable Y. We don't have that object, so terrain
+    // near the waterline can cause Mario's Y to oscillate between the real
+    // floor and the water pseudo-floor each frame, producing a visible
+    // bounce, unwanted audio, and briefly blocking jumps.
+    //
+    // Fix: when shell-riding on the ground over water, pin Mario to the
+    // water surface. SHELL_JUMP is left alone so the player can still jump.
+    // SHELL_FALL over water is caught and reverted to SHELL_GROUND.
+    constexpr uint32_t kActRidingShellGround_tick = 0x20810446;
+    constexpr uint32_t kActRidingShellFall_tick   = 0x0081089B;
+    constexpr uint32_t kActFlagRidingShell_tick   = 0x00010000;
+
+    if (m_in_water_volume && (sm64_state.action & kActFlagRidingShell_tick)) {
+      if (sm64_state.action == kActRidingShellGround_tick) {
+        // Pin to the water surface every frame while riding on ground.
+        sm64_set_mario_position(m_mario_id,
+                                sm64_state.position[0],
+                                m_water_level_sm64,
+                                sm64_state.position[2]);
+        sm64_state.position[1] = m_water_level_sm64;
+      } else if (sm64_state.action == kActRidingShellFall_tick) {
+        // Fell off the pseudo-floor — snap back to the water surface and
+        // return to the ground action so the player can jump again.
+        sm64_set_mario_position(m_mario_id,
+                                sm64_state.position[0],
+                                m_water_level_sm64,
+                                sm64_state.position[2]);
+        sm64_state.position[1] = m_water_level_sm64;
+
+        if (sm64_state.velocity[1] < 0.0f) {
+          sm64_set_mario_velocity(m_mario_id,
+                                  sm64_state.velocity[0],
+                                  0.0f,
+                                  sm64_state.velocity[2]);
+          sm64_state.velocity[1] = 0.0f;
+        }
+
+        sm64_set_mario_action_arg(m_mario_id, kActRidingShellGround_tick, 1);
+        sm64_state.action = kActRidingShellGround_tick;
+      }
+      // SHELL_JUMP: don't touch — let the player jump freely.
+    }
   }
 
   // Copy results into our managed buffers (threadsafe)
@@ -977,20 +1730,6 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   const bool is_lava_volume = (flags & (1u << 25)) != 0;
   const bool in_lava = in_water && is_lava_volume;
 
-  int sm64_water_level;
-  if (in_water && !is_lava_volume) {
-    float water_y_jak;
-    std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
-    // libsm64 stores waterLevel in SM64 units, same space as Mario's position.
-    sm64_water_level = static_cast<int>(water_y_jak * JAK_TO_SM64_SCALE);
-  } else {
-    // Dry OR in lava: keep the SM64 water level far below Mario so libsm64
-    // never puts him into ACT_WATER_IDLE / swim state. Lava is not a fluid
-    // Mario swims in — he bounces out. That bounce-out is driven below by
-    // kicking him into ACT_LAVA_BOOST, not by the water level.
-    sm64_water_level = -100000;
-  }
-
   // Snapshot current action/health under the geo mutex so we can decide
   // whether we already kicked Mario into a fire action on a previous frame
   // (in which case we shouldn't re-kick every tick — that would freeze the
@@ -1015,6 +1754,36 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
       current_action == kActBurningGround || current_action == kActBurningJump ||
       current_action == kActBurningFall;
 
+  // Shell-riding immunity to match native libsm64: check_lava_boost in
+  // interaction.c:902 no-ops when `m->action & ACT_FLAG_RIDING_SHELL`, so
+  // Mario on a Koopa shell can cruise through lava unharmed. We mirror
+  // that here so the lava rocks in Fire Canyon / Lava Tube don't kick
+  // Mario into ACT_LAVA_BOOST while Jak is on the zoomer (which forces
+  // Mario into ACT_RIDING_SHELL_GROUND via update_zoomer_shell).
+  //
+  // ACT_FLAG_RIDING_SHELL = 0x00010000 — set in the action-ID bitfield of
+  // all three shell actions (ground, jump, fall). Testing the bit covers
+  // every shell variant without an explicit action enumeration.
+  constexpr uint32_t kActFlagRidingShell = 0x00010000;
+  const bool riding_shell = (current_action & kActFlagRidingShell) != 0;
+
+  // Decide the SM64 water level to feed libsm64 this tick.
+  int sm64_water_level;
+  if (in_water && !is_lava_volume) {
+    float water_y_jak;
+    std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
+    // libsm64 stores waterLevel in SM64 units, same space as Mario's position.
+    sm64_water_level = static_cast<int>(water_y_jak * JAK_TO_SM64_SCALE);
+    // Publish for the post-tick shell-over-water correction in tick().
+    m_in_water_volume = true;
+    m_water_level_sm64 = water_y_jak * JAK_TO_SM64_SCALE;
+  } else {
+    // Dry or lava: keep the SM64 water level far below Mario so libsm64
+    // never puts him into ACT_WATER_IDLE / swim state.
+    sm64_water_level = -100000;
+    m_in_water_volume = false;
+  }
+
   // Edge-triggered re-entry: fire a fresh kick if Mario JUST crossed into
   // the lava volume this frame, even when already_burning is true.
   //
@@ -1036,7 +1805,10 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   // (see mario.c:858-863), so the second+ bounces get the same upward
   // launch as the first.
   const bool lava_entry_edge = in_lava && !m_prev_in_lava;
-  const bool needs_kick = in_lava && (!already_burning || lava_entry_edge);
+  // Shell-riding suppresses the lava kick entirely — Mario is supposed to
+  // be invulnerable to fire floors in this state (see comment above).
+  const bool needs_kick =
+      in_lava && !riding_shell && (!already_burning || lava_entry_edge);
 
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_water_level(m_mario_id, sm64_water_level);
@@ -2629,6 +3401,103 @@ void LibSM64Manager::clear_yakow_grab() {
     }
     m_grabbed_yakow_ee = 0;
   }
+}
+
+// --------------------------------------------------------------------------
+// Zoomer → shell state
+// --------------------------------------------------------------------------
+//
+// Goal: when the player tries to hop on a zoomer (the hover-bike in Fire
+// Canyon / Lava Tube / Misty Island / Rolling Hills / Ogre), we want Mario
+// to enter ACT_RIDING_SHELL_GROUND so he surfs along on a Koopa shell, and
+// we want Jak to NOT enter the target-racing-* states at all — the racer
+// has a bad camera and loud engine SFX that we don't want fighting with
+// the libsm64 experience.
+//
+// We do this with a two-symbol handshake defined in target-handler.gc:
+//
+//   *sm64-skip-zoomer*      — C++ raises this whenever libsm64 is live and
+//                             zoomer_shell is on. target's 'racing
+//                             change-mode event handler checks it and, if
+//                             true, swallows the event (no `go
+//                             target-racing-start`) — Jak stays in his
+//                             current state with the normal camera.
+//   *sm64-zoomer-requested* — target-handler sets this to #t whenever the
+//                             swallowed event fired. C++ polls it each
+//                             tick and, when set, puts Mario into the
+//                             ground shell action and clears it back to
+//                             #f for the next request.
+//
+// Benefits of this design:
+//
+//   1) Jak never enters the racer, so the bad camera and engine sounds
+//      never play.
+//   2) We don't need to poll or walk Jak's state.next-state field —
+//      GOAL tells us directly when a zoomer was requested.
+//   3) Mario inherits the riding-shell action flag, which gives him
+//      native lava immunity via check_lava_boost (interaction.c:902).
+//      We also skip our host-side lava kick in update_mario_water for
+//      the same reason, so lava rocks in Fire Canyon / Lava Tube can't
+//      burn Mario while he's on the shell.
+//
+// Graceful degradation: if neither symbol resolves (e.g. on an older GOAL
+// build without the bridge defines), this function is a silent no-op.
+// Rebuilding goal_src picks up the bridge.
+
+void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
+
+  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 false_val = s7.offset + jak1_symbols::FIX_SYM_FALSE;
+  if (s7.offset == 0) return;
+
+  // Keep *sm64-skip-zoomer* in sync with our toggle every frame — GOAL
+  // reads it synchronously from the 'racing event handler, so writing it
+  // each tick is the simplest way to ensure it's current. If the symbol
+  // doesn't exist yet (target-handler not linked), do nothing.
+  auto skip_sym = jak1::find_symbol_from_c("*sm64-skip-zoomer*");
+  if (skip_sym.offset != 0) {
+    const u32 desired = (zoomer_shell && has_mario()) ? true_val : false_val;
+    if (skip_sym->value != desired) {
+      skip_sym->value = desired;
+    }
+  }
+
+  if (!zoomer_shell) return;
+
+  // Check whether GOAL just swallowed a 'racing event — that's our cue
+  // that the player tried to hop on a zoomer. Clear the flag and put
+  // Mario into shell mode.
+  auto req_sym = jak1::find_symbol_from_c("*sm64-zoomer-requested*");
+  if (req_sym.offset == 0) return;                  // GOAL bridge not linked
+  if (req_sym->value != true_val) return;           // no pending request
+
+  // Clear first so subsequent requests (e.g. tapping attack again after
+  // exiting shell) retrigger cleanly, even if we bail out below.
+  req_sym->value = false_val;
+
+  // Snapshot Mario's current action under the geo mutex. If he's already
+  // in any shell sub-action (ground / jump / fall), don't re-issue the
+  // set — re-applying ACT_RIDING_SHELL_GROUND every request would stomp
+  // the natural jump/fall transitions inside act_riding_shell_ground
+  // and pin him flat to the ground.
+  uint32_t current_action = 0;
+  {
+    std::lock_guard<std::mutex> g(m_geo_mutex);
+    current_action = m_state.action;
+  }
+
+  // ACT constants from libsm64/src/decomp/include/sm64.h
+  constexpr uint32_t kActRidingShellGround = 0x20810446;
+  constexpr uint32_t kActFlagRidingShell = 0x00010000;
+
+  const bool mario_in_shell = (current_action & kActFlagRidingShell) != 0;
+  if (mario_in_shell) return;
+
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_action(m_mario_id, kActRidingShellGround);
+  lg::info("[libsm64] zoomer-shell: player tried to ride zoomer, "
+           "Mario → ACT_RIDING_SHELL_GROUND (Jak stays out of racer)");
 }
 
 }  // namespace sm64

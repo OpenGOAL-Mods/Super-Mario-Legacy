@@ -136,6 +136,15 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
   if (prev_safety_floor && !mgr.safety_floor) {
     mgr.clear_safety_floor();
   }
+  ImGui::Checkbox("Zoomer Shell (Mario rides shell on zoomer)", &mgr.zoomer_shell);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Watches Jak's state each frame. When Jak is on the\n"
+                     "zoomer (target-racing-* states in Fire Canyon /\n"
+                     "Lava Tube / Misty / Rolling / Ogre), forces Mario\n"
+                     "into ACT_RIDING_SHELL_GROUND so he surfs alongside.\n"
+                     "Native shell-riding immunity also blocks lava-rock\n"
+                     "damage in Fire Canyon / Lava Tube.");
+  }
 
   int volume = mgr.get_audio_volume();
   if (ImGui::SliderInt("Mario Volume", &volume, 0, 100, "%d%%")) {

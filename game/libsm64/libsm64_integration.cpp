@@ -905,6 +905,8 @@ void LibSM64Manager::shutdown() {
   clear_actor_collision();
   clear_yakow_grab();
   clear_safety_floor();
+  m_in_launcher = false;
+  m_post_glue_settle_frames = 0;
   m_type_cache = {};
   m_is_process_drawable_cache.clear();
   m_is_collide_shape_cache.clear();
@@ -941,6 +943,7 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
   // see a stale "was in lava" from the last Mario's death-in-lava frame.
   m_prev_in_lava = false;
   m_in_launcher = false;
+  m_post_glue_settle_frames = 0;
 
   // Convert Jak coordinates to SM64 coordinates
   // Jak: Y-up, same as SM64, but different scale
@@ -1072,7 +1075,9 @@ void LibSM64Manager::tick(const MarioInputState& input) {
 
     // --- Launcher glue: override Mario's position with Jak's launch pos ---
     // m_in_launcher is set by update_launcher_glue (runs before tick).
-    if (m_in_launcher) {
+    // m_post_glue_settle_frames > 0 means the glue state just ended but we're
+    // still pinning Mario to Jak while collision reloads after a level change.
+    if (m_in_launcher || m_post_glue_settle_frames > 0) {
       float lx = m_launcher_target_jak.x() * JAK_TO_SM64_SCALE;
       float ly = m_launcher_target_jak.y() * JAK_TO_SM64_SCALE;
       float lz = m_launcher_target_jak.z() * JAK_TO_SM64_SCALE;
@@ -3527,26 +3532,36 @@ void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
 }
 
 // --------------------------------------------------------------------------
-// Launcher glue
+// GOAL-state glue (launchers, warp gates, continue points)
 // --------------------------------------------------------------------------
 //
-// Jak 1 launchers (spring pads) send a 'launch event that puts Jak into the
-// target-launch → target-duck-high-jump → target-duck-high-jump-jump state
-// chain.  During this time GOAL controls Jak's trajectory entirely.  If we
-// let the normal Mario→Jak position sync run, it would overwrite Jak's
-// launch position with Mario's (still on the ground), breaking the arc.
+// Several Jak states involve GOAL controlling Jak's position entirely:
 //
-// We detect the launch by reading the target process's current state name
-// from EE memory and comparing against the known launcher state chain,
-// then glue Mario to Jak's position until the state exits.
+//   Launchers (spring pads):
+//     target-launch → target-duck-high-jump → target-duck-high-jump-jump
+//     target-high-jump (also used by normal high jumps — acceptable false positive)
+//
+//   Warp gates:
+//     target-warp-in  — arriving at a warp gate destination
+//     target-warp-out — departing via a warp gate
+//
+//   Continue points:
+//     target-continue — respawning at a checkpoint after death
+//
+// During these states the normal Mario→Jak sync would overwrite GOAL's
+// position with Mario's, breaking the trajectory / teleport.  We detect
+// the state by reading process.state.name from EE memory and glue Mario
+// to Jak's position until the state exits.
 
 bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   if (!m_initialized || m_mario_id < 0 || !ee_mem) {
     m_in_launcher = false;
+    m_post_glue_settle_frames = 0;
     return false;
   }
   if (!follow_mario) {
     m_in_launcher = false;
+    m_post_glue_settle_frames = 0;
     return false;
   }
 
@@ -3574,39 +3589,74 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   u32 state_name;
   std::memcpy(&state_name, ee_mem + state_ptr, 4);
 
-  // Resolve the launcher state symbols. find_symbol_from_c is read-only
-  // (won't create new symbols), safer than intern_from_c during state
-  // transitions.
-  auto sym_launch    = jak1::find_symbol_from_c("target-launch");
-  auto sym_high_jump = jak1::find_symbol_from_c("target-high-jump");
-  auto sym_duck_hj   = jak1::find_symbol_from_c("target-duck-high-jump");
-  auto sym_duck_hj_j = jak1::find_symbol_from_c("target-duck-high-jump-jump");
+  // Resolve state symbols. find_symbol_from_c is read-only (won't create
+  // new symbols), safer than intern_from_c during state transitions.
+  // A 0 offset means the symbol isn't linked yet — it just won't match.
+  auto sym_of = [](const char* name) -> u32 {
+    auto s = jak1::find_symbol_from_c(name);
+    return s.offset;
+  };
 
-  // If any symbol isn't linked yet, bail gracefully.
-  if (sym_launch.offset == 0 || sym_high_jump.offset == 0 ||
-      sym_duck_hj.offset == 0 || sym_duck_hj_j.offset == 0) {
-    return false;
-  }
+  // Launcher states
+  const u32 sym_launch    = sym_of("target-launch");
+  const u32 sym_high_jump = sym_of("target-high-jump");
+  const u32 sym_duck_hj   = sym_of("target-duck-high-jump");
+  const u32 sym_duck_hj_j = sym_of("target-duck-high-jump-jump");
 
-  const bool jak_in_launcher =
-      (state_name == sym_launch.offset) ||
-      (state_name == sym_high_jump.offset) ||
-      (state_name == sym_duck_hj.offset) ||
-      (state_name == sym_duck_hj_j.offset);
+  // Warp gate states
+  const u32 sym_warp_in   = sym_of("target-warp-in");
+  const u32 sym_warp_out  = sym_of("target-warp-out");
 
-  if (!jak_in_launcher) {
+  // Continue point state
+  const u32 sym_continue  = sym_of("target-continue");
+
+  const bool jak_in_glue_state =
+      (sym_launch    && state_name == sym_launch)    ||
+      (sym_high_jump && state_name == sym_high_jump) ||
+      (sym_duck_hj   && state_name == sym_duck_hj)   ||
+      (sym_duck_hj_j && state_name == sym_duck_hj_j) ||
+      (sym_warp_in   && state_name == sym_warp_in)   ||
+      (sym_warp_out  && state_name == sym_warp_out)  ||
+      (sym_continue  && state_name == sym_continue);
+
+  if (!jak_in_glue_state) {
     if (m_in_launcher) {
-      lg::info("[libsm64] Launcher ended — resuming normal sync");
+      // The GOAL glue state just ended. Start the post-glue settle period
+      // so Mario stays pinned to Jak while auto_sync_collision catches up
+      // with any level change that happened during the glue (e.g. continue
+      // points, warp gates).
+      lg::info("[libsm64] Glue state ended — starting {} frame settle",
+               POST_GLUE_SETTLE_DURATION);
+      m_in_launcher = false;
+      m_post_glue_settle_frames = POST_GLUE_SETTLE_DURATION;
     }
-    m_in_launcher = false;
+
+    // During post-glue settle: keep reading Jak's position so the
+    // position override in tick() can pin Mario there. m_in_launcher
+    // stays false — tick() checks m_post_glue_settle_frames separately.
+    if (m_post_glue_settle_frames > 0) {
+      m_post_glue_settle_frames--;
+      math::Vector3f jak_pos;
+      if (read_target_transform(ee_mem, &jak_pos, nullptr)) {
+        m_launcher_target_jak = jak_pos;
+      }
+      if (m_post_glue_settle_frames == 0) {
+        lg::info("[libsm64] Post-glue settle complete — resuming normal sync");
+      }
+      return true;  // caller should skip sync_jak_to_mario during settle
+    }
+
     return false;
   }
 
-  // Jak is in a launcher state — read Jak's position and store it.
+  // Still in a GOAL glue state — reset any running settle timer.
+  m_post_glue_settle_frames = 0;
+
+  // Jak is in a glue state — read Jak's position and store it.
   // The actual Mario position override happens inside tick() after
   // sm64_mario_tick, within the existing sm64_lock scope.
   if (!m_in_launcher) {
-    lg::info("[libsm64] Launcher detected — gluing Mario to Jak");
+    lg::info("[libsm64] Glue state detected — syncing Mario to Jak");
   }
   m_in_launcher = true;
 

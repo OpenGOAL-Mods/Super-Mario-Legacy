@@ -528,6 +528,14 @@ class LibSM64Manager {
   // within the existing sm64_lock scope, avoiding external sm64 API calls.
   bool m_in_launcher = false;
   math::Vector3f m_launcher_target_jak{0, 0, 0};  // Jak-unit position to glue to
+  // Post-glue settle: when a glue state (launcher, warp, continue) ends, keep
+  // Mario pinned to Jak's position for a few extra frames so that
+  // auto_sync_collision has time to detect the new level and reload collision
+  // surfaces. Without this, Mario falls through the ground on level changes
+  // triggered by continue points / warp gates because the collision reload
+  // hasn't happened yet when the glue releases.
+  int m_post_glue_settle_frames = 0;
+  static constexpr int POST_GLUE_SETTLE_DURATION = 30;  // ~1 second at 30Hz tick rate
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

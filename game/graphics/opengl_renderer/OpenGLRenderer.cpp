@@ -1089,10 +1089,15 @@ void OpenGLRenderer::tick_mario_sm64() {
   // water state is current when sm64_mario_tick evaluates swim vs walk.
   mgr.update_mario_water(g_ee_main_mem);
 
+  // Launcher glue detection: reads Jak's GOAL state before tick() so that
+  // tick() can apply the position override inside its sm64_lock scope.
+  const bool launcher_active = mgr.update_launcher_glue(g_ee_main_mem);
+
   mgr.tick(input);
 
-  // Sync Jak's position to Mario's if follow mode is enabled
-  if (mgr.follow_mario) {
+  // Sync Jak's position to Mario's if follow mode is enabled — but skip
+  // during a launcher arc so GOAL's trajectory isn't overwritten.
+  if (mgr.follow_mario && !launcher_active) {
     mgr.sync_jak_to_mario(g_ee_main_mem, 0);
   }
 

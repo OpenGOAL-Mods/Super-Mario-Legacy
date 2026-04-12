@@ -278,6 +278,13 @@ class LibSM64Manager {
   // aren't present yet (e.g. kernel loaded but target-handler not linked).
   void update_zoomer_shell(u8* ee_mem);
 
+  // Launcher glue: detects when Jak is launched by a spring pad (rapid
+  // upward Y velocity) and glues Mario to Jak's trajectory instead of
+  // the normal Mario→Jak sync. Called after tick() but before
+  // sync_jak_to_mario. Returns true if Mario is currently glued to a
+  // launcher trajectory (caller should skip sync_jak_to_mario).
+  bool update_launcher_glue(u8* ee_mem);
+
   // Safety floor: create-or-move the pseudo-floor quad so it's glued just
   // below Mario's current XYZ. See `safety_floor` comment for the rationale.
   // Called from tick() before sm64_mario_tick each frame. No-op if the
@@ -508,6 +515,19 @@ class LibSM64Manager {
   // shell-riding, preventing any brief SHELL_FALL bounce.
   bool m_in_water_volume = false;
   float m_water_level_sm64 = 0.0f;
+
+  // ---- Launcher glue state ------------------------------------------------
+  // When Jak uses a launcher (spring pad), GOAL controls Jak's trajectory.
+  // We detect this by reading Jak's GOAL state name and comparing against
+  // the launcher states (target-launch, target-high-jump, etc.). While
+  // active, we skip the normal Mario→Jak sync and glue Mario to Jak's
+  // position until the launch state ends.
+  //
+  // Detection happens in update_launcher_glue (runs before tick).
+  // Actual position override happens inside tick() after sm64_mario_tick,
+  // within the existing sm64_lock scope, avoiding external sm64 API calls.
+  bool m_in_launcher = false;
+  math::Vector3f m_launcher_target_jak{0, 0, 0};  // Jak-unit position to glue to
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

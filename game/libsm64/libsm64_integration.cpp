@@ -940,6 +940,7 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
   // Reset the lava-entry edge state so a respawn into a dry area doesn't
   // see a stale "was in lava" from the last Mario's death-in-lava frame.
   m_prev_in_lava = false;
+  m_in_launcher = false;
 
   // Convert Jak coordinates to SM64 coordinates
   // Jak: Y-up, same as SM64, but different scale
@@ -1067,6 +1068,19 @@ void LibSM64Manager::tick(const MarioInputState& input) {
         sm64_state.action = kActRidingShellGround_tick;
       }
       // SHELL_JUMP: don't touch — let the player jump freely.
+    }
+
+    // --- Launcher glue: override Mario's position with Jak's launch pos ---
+    // m_in_launcher is set by update_launcher_glue (runs before tick).
+    if (m_in_launcher) {
+      float lx = m_launcher_target_jak.x() * JAK_TO_SM64_SCALE;
+      float ly = m_launcher_target_jak.y() * JAK_TO_SM64_SCALE;
+      float lz = m_launcher_target_jak.z() * JAK_TO_SM64_SCALE;
+
+      sm64_set_mario_position(m_mario_id, lx, ly, lz);
+      sm64_state.position[0] = lx;
+      sm64_state.position[1] = ly;
+      sm64_state.position[2] = lz;
     }
   }
 
@@ -1901,6 +1915,7 @@ constexpr u32 PRIM_TRANSFORM_INDEX_OFF = 8;     // collide-shape-prim.transform-
 // — i.e., all bits zero — and we skip the actor so Mario doesn't trip over
 // an invisible corpse.
 constexpr u32 PRIM_CORE_COLLIDE_AS_OFF = 28;    // declared 32 - 4
+constexpr u32 PRIM_CORE_ACTION_OFF = 36;        // declared 40 - 4 (prim-core @16 + action @24)
 constexpr u32 PRIM_COLLIDE_WITH_OFF = 60;       // declared 64 - 4
 constexpr u32 PRIM_MESH_MESH_OFF = 68;
 constexpr u32 PRIM_GROUP_NUM_PRIMS_OFF = 68;
@@ -2690,6 +2705,17 @@ void do_sweep(WalkCtx& c) {
       if (!read_u64(c.ee_mem, root_prim + PRIM_COLLIDE_WITH_OFF, c.mem_size, cwith)) continue;
       if (!read_u64(c.ee_mem, root_prim + PRIM_CORE_COLLIDE_AS_OFF, c.mem_size, cas)) continue;
       if (cwith == 0 && cas == 0) continue;
+    }
+
+    // Skip actors whose root prim doesn't have the "solid" collide-action bit.
+    // Non-solid actors (launchers, event triggers, etc.) are interaction-only in
+    // GOAL — they fire events on contact but aren't physical geometry. Feeding
+    // them to libsm64 gives Mario invisible walls around spring pads, etc.
+    {
+      constexpr uint32_t kCollideActionSolid = 1u << 0;  // collide-action bit 0
+      u32 action = 0;
+      if (!read_u32(c.ee_mem, root_prim + PRIM_CORE_ACTION_OFF, c.mem_size, action)) continue;
+      if (!(action & kCollideActionSolid)) continue;
     }
 
     std::vector<CollectedPrim> prims;
@@ -3498,6 +3524,98 @@ void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
   sm64_set_mario_action(m_mario_id, kActRidingShellGround);
   lg::info("[libsm64] zoomer-shell: player tried to ride zoomer, "
            "Mario → ACT_RIDING_SHELL_GROUND (Jak stays out of racer)");
+}
+
+// --------------------------------------------------------------------------
+// Launcher glue
+// --------------------------------------------------------------------------
+//
+// Jak 1 launchers (spring pads) send a 'launch event that puts Jak into the
+// target-launch → target-duck-high-jump → target-duck-high-jump-jump state
+// chain.  During this time GOAL controls Jak's trajectory entirely.  If we
+// let the normal Mario→Jak position sync run, it would overwrite Jak's
+// launch position with Mario's (still on the ground), breaking the arc.
+//
+// We detect the launch by reading the target process's current state name
+// from EE memory and comparing against the known launcher state chain,
+// then glue Mario to Jak's position until the state exits.
+
+bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) {
+    m_in_launcher = false;
+    return false;
+  }
+  if (!follow_mario) {
+    m_in_launcher = false;
+    return false;
+  }
+
+  const u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return false;
+  u32 target_ptr = target_sym->value;
+  if (target_ptr == 0 || target_ptr == false_val) return false;
+
+  // process.state is at GOAL offset 56 → runtime offset 52.
+  constexpr u32 STATE_RUNTIME_OFF = 52;
+  if (target_ptr + STATE_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
+
+  u32 state_ptr;
+  std::memcpy(&state_ptr, ee_mem + target_ptr + STATE_RUNTIME_OFF, 4);
+  if (state_ptr == 0 || state_ptr == false_val) return false;
+
+  // Validate state_ptr is within EE memory before reading from it.
+  if (state_ptr >= EE_MAIN_MEM_SIZE) return false;
+
+  // stack-frame.name is a symbol at GOAL offset 4 → runtime offset 0.
+  if (state_ptr + 4 > EE_MAIN_MEM_SIZE) return false;
+  u32 state_name;
+  std::memcpy(&state_name, ee_mem + state_ptr, 4);
+
+  // Resolve the launcher state symbols. find_symbol_from_c is read-only
+  // (won't create new symbols), safer than intern_from_c during state
+  // transitions.
+  auto sym_launch    = jak1::find_symbol_from_c("target-launch");
+  auto sym_high_jump = jak1::find_symbol_from_c("target-high-jump");
+  auto sym_duck_hj   = jak1::find_symbol_from_c("target-duck-high-jump");
+  auto sym_duck_hj_j = jak1::find_symbol_from_c("target-duck-high-jump-jump");
+
+  // If any symbol isn't linked yet, bail gracefully.
+  if (sym_launch.offset == 0 || sym_high_jump.offset == 0 ||
+      sym_duck_hj.offset == 0 || sym_duck_hj_j.offset == 0) {
+    return false;
+  }
+
+  const bool jak_in_launcher =
+      (state_name == sym_launch.offset) ||
+      (state_name == sym_high_jump.offset) ||
+      (state_name == sym_duck_hj.offset) ||
+      (state_name == sym_duck_hj_j.offset);
+
+  if (!jak_in_launcher) {
+    if (m_in_launcher) {
+      lg::info("[libsm64] Launcher ended — resuming normal sync");
+    }
+    m_in_launcher = false;
+    return false;
+  }
+
+  // Jak is in a launcher state — read Jak's position and store it.
+  // The actual Mario position override happens inside tick() after
+  // sm64_mario_tick, within the existing sm64_lock scope.
+  if (!m_in_launcher) {
+    lg::info("[libsm64] Launcher detected — gluing Mario to Jak");
+  }
+  m_in_launcher = true;
+
+  math::Vector3f jak_pos;
+  if (read_target_transform(ee_mem, &jak_pos, nullptr)) {
+    m_launcher_target_jak = jak_pos;
+  }
+
+  return true;  // caller should skip sync_jak_to_mario
 }
 
 }  // namespace sm64

@@ -1,0 +1,91 @@
+name: Build libsm64
+
+on: [push, pull_request]
+
+jobs:
+  Build:
+    name: Build libsm64 for ${{ matrix.identifier }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - identifier: linux
+            os: ubuntu-latest
+          - identifier: windows
+            os: ubuntu-latest
+          - identifier: macos
+            os: macos-latest
+          - identifier: web
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: (Windows) Set up MinGW
+        if: ${{ startsWith(matrix.identifier, 'windows') }}
+        uses: egor-tensin/setup-mingw@v2
+
+      - name: (Windows) Prepare cross compilation
+        if: ${{ startsWith(matrix.identifier, 'windows') }}
+        shell: sh
+        run: |
+          echo "OS=Windows_NT" >> $GITHUB_ENV
+
+      - name: (Linux) Install dependencies
+        if: ${{ startsWith(matrix.identifier, 'linux') }}
+        run: |
+          sudo add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu `lsb_release -sc` main universe restricted multiverse"
+          sudo apt-get update -y -qq
+          sudo apt-get install libsdl2-dev libglew-dev
+
+      - name: (Web) Set up Emscripten
+        if: ${{ startsWith(matrix.identifier, 'web') }}
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build shared library
+        run: |
+          if [[ "${{ matrix.identifier }}" == "web" ]]; then
+              emmake make lib -j $(nproc) CC=emcc
+          else
+              make lib -j $(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          fi
+
+      - name: (Linux) Build test executable
+        if: ${{ startsWith(matrix.identifier, 'linux') }}
+        run: |
+          make test -j`nproc`
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: libsm64_${{ matrix.identifier }}
+          path: |
+            ./README.md
+            ./dist
+            ./run-test
+
+  #Release:
+  #  name: "Snapshot Release"
+  #  runs-on: "ubuntu-latest"
+  #  needs: Build
+
+  #  steps:
+  #    - name: Download artifacts
+  #      uses: actions/download-artifact@v3
+
+  #    - name: Create a Release
+  #      uses: "marvinpinto/action-automatic-releases@latest"
+  #      with:
+  #        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+  #        automatic_release_tag: "latest"
+  #        prerelease: true
+  #        title: "Snapshot Build"
+  #        files: |
+  #         ./README.md
+  #         ./dist

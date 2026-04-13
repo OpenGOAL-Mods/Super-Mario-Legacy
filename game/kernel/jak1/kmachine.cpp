@@ -555,6 +555,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-delete-mario", (void*)sm64::pc_sm64_delete_mario);
   make_function_symbol_from_c("pc-sm64-heal-mario", (void*)sm64::pc_sm64_heal_mario);
   make_function_symbol_from_c("pc-sm64-full-heal-mario", (void*)sm64::pc_sm64_full_heal_mario);
+  make_function_symbol_from_c("pc-sm64-star-dance-mario", (void*)sm64::pc_sm64_star_dance_mario);
 
   // setup string constants
   // TODO - these may be able to be moved into `init_common_pc_port_functions` but it's trickier

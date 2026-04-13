@@ -16,6 +16,7 @@
 (define-extern pc-sm64-delete-mario (function none))
 (define-extern pc-sm64-heal-mario (function none))
 (define-extern pc-sm64-full-heal-mario (function none))
+(define-extern pc-sm64-star-dance-mario (function none))
 
 ;; ---------------------------------------------------------------------------
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.

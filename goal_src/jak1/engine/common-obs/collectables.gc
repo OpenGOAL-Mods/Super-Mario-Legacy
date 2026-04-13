@@ -8,6 +8,7 @@
 (require "engine/common-obs/collectables-part.gc")
 (require "engine/entity/entity.gc")
 (declare-type vent process-drawable)
+(define-extern pc-sm64-star-dance-mario (function none))
 
 (declare-type eco eco-collectable)
 
@@ -968,6 +969,7 @@
     (behavior ((arg0 object) (arg1 handle))
       (local-vars (sv-96 res-tag))
       (sound-play "pu-powercell")
+      (pc-sm64-star-dance-mario)
       (clear-collide-with-as (-> self root))
       (logclear! (-> self mask) (process-mask actor-pause))
       (logclear! (-> self draw status) (draw-status hidden))

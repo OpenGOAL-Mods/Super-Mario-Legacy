@@ -1142,6 +1142,18 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   m_state.anim_id = sm64_state.animID;
   m_state.anim_frame = sm64_state.animFrame;
 
+  // ---- Star dance timeout --------------------------------------------------
+  // general_star_dance_handler is commented out in libsm64, so Mario never
+  // transitions back to idle on his own.  We count 80 ticks (~2.6s at 30Hz,
+  // matching the original handler's frame-80 exit) then force ACT_IDLE.
+  if (m_star_dance_timer >= 0) {
+    ++m_star_dance_timer;
+    if (m_star_dance_timer >= 80) {
+      sm64_set_mario_action(m_mario_id, 0x0C400201);  // ACT_IDLE
+      m_star_dance_timer = -1;
+    }
+  }
+
   // ---- Ground-pound hitbox simulation -------------------------------------
   // Replicates SM64's INT_GROUND_POUND_OR_TWIRL classification from
   // libsm64/src/decomp/game/interaction.c::determine_interaction. We don't
@@ -1858,6 +1870,30 @@ u64 pc_sm64_delete_mario() {
     lg::info("[libsm64] Mario deleted from GOAL (death chain)");
     mgr.delete_mario(mgr.get_mario_id());
   }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// GOAL-callable star dance: registered as "pc-sm64-star-dance-mario".
+// ---------------------------------------------------------------------------
+void LibSM64Manager::star_dance_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    // ACT_STAR_DANCE_NO_EXIT — plays the celebration animation without exiting the level.
+    sm64_set_mario_action(m_mario_id, 0x00001307);
+    // SOUND_MENU_STAR_SOUND — the iconic star jingle.
+    // SOUND_ARG_LOAD(7, 0, 0x1E, 0xFF, 8) = 0x701EFF81
+    sm64_play_sound_global(0x701EFF81);
+    // SOUND_MARIO_HERE_WE_GO — Mario's voice line.
+    // SOUND_ARG_LOAD(2, 4, 0x0C, 0x80, 8) = 0x240C8081
+    sm64_play_sound_global(0x240C8081);
+  }
+  m_star_dance_timer = 0;
+}
+
+u64 pc_sm64_star_dance_mario() {
+  LibSM64Manager::instance().star_dance_mario_from_goal();
   return 0;
 }
 

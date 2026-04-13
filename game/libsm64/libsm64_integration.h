@@ -143,6 +143,7 @@ u64 pc_sm64_damage_mario();
 u64 pc_sm64_delete_mario();
 u64 pc_sm64_heal_mario();
 u64 pc_sm64_full_heal_mario();
+u64 pc_sm64_star_dance_mario();
 
 class LibSM64Manager {
  public:
@@ -246,6 +247,7 @@ class LibSM64Manager {
   void damage_mario_from_goal();
   void heal_mario_from_goal();
   void full_heal_mario_from_goal();
+  void star_dance_mario_from_goal();
 
   // Teleport Mario to Jak's current position/rotation (used during cutscenes).
   void teleport_mario_to_jak(u8* ee_mem);
@@ -629,6 +631,7 @@ class LibSM64Manager {
   // this edge detection Mario would launch once on first contact, then
   // pass through the lava surface without any reaction on the second drop.
   bool m_prev_in_lava = false;
+  int m_star_dance_timer = -1;  // -1 = inactive, >= 0 = frames since star dance started
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

@@ -1064,6 +1064,9 @@ void OpenGLRenderer::tick_mario_sm64() {
   tick_counter++;
   if (tick_counter % 2 != 0) return;
 
+  // 1b. Read target state flags (grabbed / periscope)
+  mgr.read_target_flags(g_ee_main_mem);
+
   // 2. Input gathering
   auto t2 = Clock::now();
   sm64::MarioInputState input{};
@@ -1096,6 +1099,10 @@ void OpenGLRenderer::tick_mario_sm64() {
       }
     }
   }
+  // Freeze Mario input during cutscenes / periscope / goggle
+  if (mgr.target_grabbed || mgr.target_periscope) {
+    input = sm64::MarioInputState{};
+  }
   auto t3 = Clock::now();
 
   // 3. Water sync
@@ -1113,9 +1120,12 @@ void OpenGLRenderer::tick_mario_sm64() {
   mgr.tick(input);
   auto t9 = Clock::now();
 
-  // 6. Jak position sync (skip when Mario is dead so Jak can respawn normally)
+  // 6. Jak position sync (skip when Mario is dead or in cutscene/periscope)
   auto t10 = Clock::now();
-  if (mgr.follow_mario && !launcher_active) {
+  if (mgr.target_grabbed && !mgr.target_periscope) {
+    // Cutscene (not periscope): teleport Mario to Jak each frame
+    mgr.teleport_mario_to_jak(g_ee_main_mem);
+  } else if (mgr.follow_mario && !launcher_active && !mgr.target_grabbed) {
     auto cur_state = mgr.get_state();
     uint32_t wedges = (static_cast<uint16_t>(cur_state.health) >> 8) & 0xF;
     if (wedges > 0) {
@@ -1243,7 +1253,9 @@ void OpenGLRenderer::render(DmaFollower dma, const RenderOptions& settings) {
     g_current_renderer = "mario-sm64";
     auto prof = m_profiler.root()->make_scoped_child("mario-sm64");
     tick_mario_sm64();
-    render_mario_sm64(prof);
+    if (!sm64::LibSM64Manager::instance().target_periscope) {
+      render_mario_sm64(prof);
+    }
   }
 
   // blit framebuffer so that it can be used as a texture by the game later

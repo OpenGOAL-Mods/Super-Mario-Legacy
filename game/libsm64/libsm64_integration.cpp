@@ -1908,6 +1908,40 @@ bool LibSM64Manager::read_target_transform(u8* ee_mem,
   return true;
 }
 
+void LibSM64Manager::read_target_flags(u8* ee_mem) {
+  target_grabbed = false;
+  target_periscope = false;
+  if (!ee_mem) return;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  auto sym = jak1::intern_from_c("*sm64-target-flags*");
+  if (sym.offset == 0) return;
+  u32 ptr = sym->value;
+  if (ptr == 0 || ptr == false_val || ptr + 16 > EE_MAIN_MEM_SIZE) return;
+
+  float data[4];
+  std::memcpy(data, ee_mem + ptr, 16);
+  target_grabbed = data[0] > 0.5f;
+  target_periscope = data[1] > 0.5f;
+}
+
+void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
+  math::Vector3f jak_pos;
+  float jak_yaw;
+  if (!read_target_transform(ee_mem, &jak_pos, &jak_yaw)) return;
+
+  float sm64_x = jak_pos.x() * JAK_TO_SM64_SCALE;
+  float sm64_y = jak_pos.y() * JAK_TO_SM64_SCALE;
+  float sm64_z = jak_pos.z() * JAK_TO_SM64_SCALE;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
+    sm64_set_mario_faceangle(m_mario_id, jak_yaw);
+  }
+}
+
 void LibSM64Manager::set_mario_face_angle(float yaw_rad) {
   if (!m_initialized || m_mario_id < 0) return;
   std::scoped_lock lock(m_sm64_lock);

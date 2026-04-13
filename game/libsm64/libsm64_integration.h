@@ -247,6 +247,15 @@ class LibSM64Manager {
   void heal_mario_from_goal();
   void full_heal_mario_from_goal();
 
+  // Teleport Mario to Jak's current position/rotation (used during cutscenes).
+  void teleport_mario_to_jak(u8* ee_mem);
+  // Read *sm64-target-flags* bridge vector and update public flags below.
+  void read_target_flags(u8* ee_mem);
+
+  // Flags set by read_target_flags(), used by OpenGLRenderer for render/input control.
+  bool target_grabbed = false;   // cutscene or periscope
+  bool target_periscope = false; // periscope specifically
+
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing
   // close to it. While held, the yakow's trans is overwritten each frame to

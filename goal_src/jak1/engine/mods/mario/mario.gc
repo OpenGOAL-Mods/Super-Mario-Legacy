@@ -31,6 +31,9 @@
 ;; C++ writes: x = health wedges (0.0–8.0).
 (define *sm64-mario-health* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; GOAL writes: x = 1.0 if target grabbed (cutscene/periscope), y = 1.0 if periscope.
+(define *sm64-target-flags* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
 (define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
@@ -123,6 +126,18 @@
           (format #t "[sm64] Jak respawned — deleting Mario for fresh spawn.~%")
           (pc-sm64-delete-mario)
           (set! (-> self death-timer) 0)))
+
+      ;; ---- Write target state flags for C++ ----
+      (let ((grabbed #f)
+            (periscope #f))
+        (when *target*
+          (let ((st (-> *target* state)))
+            (when st
+              (set! grabbed (logtest? (-> *target* state-flags) (state-flags grabbed)))
+              (set! periscope (or (= (-> st name) 'target-periscope)
+                                  (logtest? (-> *target* state-flags) (state-flags first-person-mode)))))))
+        (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
+        (set! (-> *sm64-target-flags* y) (if periscope 1.0 0.0)))
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))

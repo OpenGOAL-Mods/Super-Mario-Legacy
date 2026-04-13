@@ -1249,14 +1249,13 @@ void OpenGLRenderer::render(DmaFollower dma, const RenderOptions& settings) {
     }
   }
 
-  // tick + render Mario from libsm64 after game buckets (needs camera data) but before blit
+  // tick Mario AFTER buckets (needs camera_pos from the bucket pass for input).
+  // render_mario_sm64 is called inside dispatch_buckets_jak1 at GENERIC_PRIS,
+  // so it uses the previous tick's state — one frame of latency, not visible.
   {
-    g_current_renderer = "mario-sm64";
-    auto prof = m_profiler.root()->make_scoped_child("mario-sm64");
+    g_current_renderer = "mario-sm64-tick";
+    auto prof = m_profiler.root()->make_scoped_child("mario-sm64-tick");
     tick_mario_sm64();
-    if (!sm64::LibSM64Manager::instance().target_periscope) {
-      render_mario_sm64(prof);
-    }
   }
 
   // blit framebuffer so that it can be used as a texture by the game later
@@ -1594,6 +1593,15 @@ void OpenGLRenderer::dispatch_buckets_jak1(DmaFollower dma,
     if (bucket_id == 31 - 1 && Gfx::g_global_settings.collision_enable) {
       auto p = prof.make_scoped_child("collision-draw");
       m_collide_renderer.render(&m_render_state, p);
+    }
+
+    // draw Mario in the same bucket pass as Eichar (after GENERIC_PRIS) so he
+    // renders behind water, menus, and HUD — matching Jak's depth layer.
+    if (bucket_id == (int)jak1::BucketId::GENERIC_PRIS) {
+      if (!sm64::LibSM64Manager::instance().target_periscope) {
+        auto p = prof.make_scoped_child("mario-sm64");
+        render_mario_sm64(p);
+      }
     }
   }
 

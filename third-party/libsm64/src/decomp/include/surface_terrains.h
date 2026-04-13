@@ -148,6 +148,7 @@
 #define SURFACE_PAINTING_WARP_FB             0x00FB // Painting warp (THI Tiny - Middle)
 #define SURFACE_PAINTING_WARP_FC             0x00FC // Painting warp (THI Tiny - Right)
 #define SURFACE_WOBBLING_WARP                0x00FD // Pool warp (HMC & DDD)
+#define SURFACE_BOUNCY                       0x00FE // Jak integration: bouncy trampoline floor (springbox, spiderwebs)
 #define SURFACE_TRAPDOOR                     0x00FF // Bowser Left trapdoor, has no action defined
 
 #define SURFACE_IS_QUICKSAND(cmd)     (cmd >= 0x21 && cmd < 0x28)   // Doesn't include SURFACE_INSTANT_MOVING_QUICKSAND

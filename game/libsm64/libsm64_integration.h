@@ -458,6 +458,10 @@ class LibSM64Manager {
     // is loaded — a 0 here is fine, it just disables that specific filter.
     u32 pov_camera = 0;        // type ptr for pov-camera (cutscenes)
     u32 citadelcam = 0;        // type ptr for citadelcam (citadel level)
+    // Bouncy trampoline types — level-specific, resolved lazily. 0 means the
+    // level with that type isn't loaded (fine, disables the filter).
+    u32 springbox = 0;         // type ptr for springbox (jungle bouncer)
+    u32 spiderwebs = 0;        // type ptr for spiderwebs (maincave bouncer)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant

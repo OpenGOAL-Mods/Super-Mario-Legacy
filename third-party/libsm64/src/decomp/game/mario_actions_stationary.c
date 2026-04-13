@@ -1088,6 +1088,16 @@ s32 act_first_person(struct MarioState *m) {
 }
 
 s32 check_common_stationary_cancels(struct MarioState *m) {
+    // Jak integration: bouncy trampoline floor — launch Mario upward with a
+    // triple-jump when he's standing on a SURFACE_BOUNCY floor. Only floor
+    // surfaces (normal.y > 0.01) get classified as floors by libsm64, so
+    // side/wall triangles of the same actor never trigger this.
+    if (m->floor != NULL && m->floor->type == SURFACE_BOUNCY) {
+        m->vel[1] = 70.0f;
+        m->forwardVel *= 0.5f;
+        return set_mario_action(m, ACT_TRIPLE_JUMP, 0);
+    }
+
     if (m->pos[1] < m->waterLevel - 100) {
         if (m->action == ACT_SPAWN_SPIN_LANDING) {
             load_level_init_text(0);

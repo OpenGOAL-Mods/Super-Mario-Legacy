@@ -1959,6 +1959,16 @@ s32 act_hold_quicksand_jump_land(struct MarioState *m) {
 }
 
 s32 check_common_moving_cancels(struct MarioState *m) {
+    // Jak integration: bouncy trampoline floor — launch Mario upward with a
+    // triple-jump when he walks/runs onto a SURFACE_BOUNCY floor. Only
+    // upward-facing surfaces (normal.y > 0.01) are classified as floors, so
+    // side/wall triangles never trigger this.
+    if (m->floor != NULL && m->floor->type == SURFACE_BOUNCY) {
+        m->vel[1] = 70.0f;
+        m->forwardVel *= 0.5f;
+        return set_mario_action(m, ACT_TRIPLE_JUMP, 0);
+    }
+
     // In native SM64 the koopa shell object physically floats on water,
     // keeping Mario above the waterLevel-100 threshold.  In our Jak
     // integration there is no shell object — the zoomer/host manages

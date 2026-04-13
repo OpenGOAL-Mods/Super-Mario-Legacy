@@ -638,8 +638,9 @@
 
 (defbehavior can-hands? target ((arg0 symbol))
   (cond
-    ;; sm64 mod: Mario handles all melee — disable Jak punch/uppercut
-    (#t #f)
+    ;; sm64 mod: disable Jak punch/uppercut UNLESS yellow eco is active
+    ((not (and (= (-> self fact eco-type) (pickup-type eco-yellow)) (>= (-> self fact eco-level) 1.0)))
+     #f)
     ((or (not (cpad-pressed? (-> self control unknown-cpad-info00 number) square))
          (or (and (logtest? (-> self state-flags) (state-flags prevent-attack))
                   (or (not (logtest? (-> self state-flags) (state-flags remove-prevents)))

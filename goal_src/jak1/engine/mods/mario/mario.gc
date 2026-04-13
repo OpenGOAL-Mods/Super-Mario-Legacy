@@ -22,7 +22,7 @@
 ;; C++ writes: x,y,z = Mario world position (Jak units), w = face angle (GOAL degrees).
 (define *sm64-mario-pos* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
-;; C++ writes: x = punching/kicking, y = ground-pound impact, z = ground-pound falling.
+;; C++ writes: x = punching/kicking (not dive/gp), y = ground-pound impact, z = ground-pound falling, w = diving.
 (define *sm64-mario-info* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
@@ -39,6 +39,10 @@
 ;; Ground pound: rising edge of *sm64-mario-info*.y → touch-tracker at
 ;;               Mario's feet, radius 3m, 10 frames, sends 'attack 'flop.
 ;;
+;; Dive:         rising edge of *sm64-mario-info*.w → touch-tracker at
+;;               Mario's body, radius 2m, 30 frames, sends 'attack 'punch.
+;;               Tracks Mario's body as he slides forward.
+;;
 ;; Enemy damage: handled in target-handler.gc (when Jak takes a hit,
 ;;               target-attacked also calls pc-sm64-damage-mario).
 ;;
@@ -48,7 +52,8 @@
 
 (deftype sm64-mario-col (process-drawable)
   ((prev-attacking    symbol)
-   (prev-ground-pound symbol))
+   (prev-ground-pound symbol)
+   (prev-diving       symbol))
   (:state-methods
     idle))
 
@@ -80,6 +85,7 @@
   :code (behavior ()
     (set! (-> self prev-attacking) #f)
     (set! (-> self prev-ground-pound) #f)
+    (set! (-> self prev-diving) #f)
     (loop
       ;; ---- Track Mario's position ----
       (set! (-> self root trans x) (-> *sm64-mario-pos* x))
@@ -122,8 +128,34 @@
               (-> *sm64-mario-pos* y)
               (-> *sm64-mario-pos* z)
               1.0)
-            (sm64-spawn-attack-tracker self feet-pos (meters 3.0) 10 'flop)))
+            (sm64-spawn-attack-tracker self feet-pos (meters 2.5) 10 'flop)))
         (set! (-> self prev-ground-pound) gp-impact))
+
+      ;; ---- Dive touch-tracker on rising edge ----
+      (let ((diving (> (-> *sm64-mario-info* w) 0.5)))
+        (when (and diving (not (-> self prev-diving)))
+          (let ((body-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w)))
+            (set-vector! body-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+              (+ (-> *sm64-mario-pos* y) (meters 0.3))
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (meters 2.0) 30 'punch)))
+              (when tracker
+                ;; Track just ahead of Mario as he slides forward.
+                (send-event (ppointer->process tracker) 'function
+                  (lambda :behavior touch-tracker ()
+                    (let ((yaw (-> *sm64-mario-pos* w)))
+                      (set! (-> self root trans x)
+                            (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5))))
+                      (set! (-> self root trans y)
+                            (+ (-> *sm64-mario-pos* y) (meters 0.3)))
+                      (set! (-> self root trans z)
+                            (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))))
+                    (update-transforms! (-> self root))
+                    (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
+        (set! (-> self prev-diving) diving))
 
       ;; ---- Debug draw ----
       ;; keep this
@@ -167,6 +199,7 @@
   (set! (-> self root trans quad) (-> *sm64-mario-pos* quad))
   (set! (-> self prev-attacking) #f)
   (set! (-> self prev-ground-pound) #f)
+  (set! (-> self prev-diving) #f)
   (go-virtual idle))
 
 (defun sm64-mario-col-start ()

@@ -1753,15 +1753,19 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     if (info_ptr != 0 && info_ptr != false_val && info_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       // ACT_FLAG_ATTACKING = (1 << 23) is set on all punch/kick/dive/ground-pound actions.
       constexpr uint32_t ACT_FLAG_ATTACKING = 0x00800000;
+      constexpr uint32_t ACT_FLAG_DIVING = 0x00080000;
       constexpr uint32_t ACT_GROUND_POUND_LAND = 0x0080023C;
       constexpr uint32_t ACT_GROUND_POUND = 0x008008A9;
-      bool is_attacking = (state.action & ACT_FLAG_ATTACKING) != 0;
+      bool is_diving = (state.action & ACT_FLAG_DIVING) != 0;
+      bool is_gp = (state.action == ACT_GROUND_POUND) || (state.action == ACT_GROUND_POUND_LAND);
+      bool is_attacking = (state.action & ACT_FLAG_ATTACKING) != 0 && !is_diving && !is_gp;
       bool gp_impact = (state.action == ACT_GROUND_POUND_LAND);
       bool gp_falling = (state.action == ACT_GROUND_POUND);
-      // x = punching/kicking, y = ground pound impact, z = ground pound falling
+      // x = punching/kicking (not dive/gp), y = ground pound impact, z = ground pound falling, w = diving
       float info_data[4] = {is_attacking ? 1.0f : 0.0f,
                             gp_impact ? 1.0f : 0.0f,
-                            gp_falling ? 1.0f : 0.0f, 0.0f};
+                            gp_falling ? 1.0f : 0.0f,
+                            is_diving ? 1.0f : 0.0f};
       std::memcpy(ee_mem + info_ptr, info_data, 16);
     }
   }

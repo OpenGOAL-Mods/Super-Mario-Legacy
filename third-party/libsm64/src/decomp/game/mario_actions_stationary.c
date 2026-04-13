@@ -1098,6 +1098,33 @@ s32 check_common_stationary_cancels(struct MarioState *m) {
         return set_mario_action(m, ACT_TRIPLE_JUMP, 0);
     }
 
+    // Jak integration: teetertotter / seesaw — bounce when the platform is
+    // rotating AND Mario's floor point is moving upward. The pivot barely
+    // moves (aVelY ≈ 0), so we compute the effective Y velocity at Mario's
+    // XZ position from the angular velocity and his displacement from the
+    // pivot. Positive effective Y = Mario's end is going up.
+    if (m->floor != NULL && m->floor->type == SURFACE_TEETERTOTTER
+        && m->floor->transform != NULL) {
+        struct SM64SurfaceObjectTransform *t = m->floor->transform;
+        // Any significant angular velocity means the seesaw is actively tilting.
+        s16 totalAngVel = (s16)(abs(t->aAngleVelPitch) + abs(t->aAngleVelRoll));
+        if (totalAngVel > 30) {
+            // Compute effective Y velocity at Mario's feet: cross(omega, r).y
+            // where r = Mario pos - pivot pos. For small angles,
+            // vy ≈ angVelPitch * dz - angVelRoll * dx (in angle-unit * dist).
+            f32 dx = m->pos[0] - t->aPosX;
+            f32 dz = m->pos[2] - t->aPosZ;
+            // aAngleVel is in s16 angle units per frame. Positive pitch rotates
+            // nose-down (negative Z side goes up), positive roll tilts right.
+            f32 effVelY = -(f32)t->aAngleVelPitch * dz + (f32)t->aAngleVelRoll * dx;
+            if (effVelY > 0.0f) {
+                m->vel[1] = 80.0f;
+                m->forwardVel *= 0.3f;
+                return set_mario_action(m, ACT_TRIPLE_JUMP, 0);
+            }
+        }
+    }
+
     if (m->pos[1] < m->waterLevel - 100) {
         if (m->action == ACT_SPAWN_SPIN_LANDING) {
             load_level_init_text(0);

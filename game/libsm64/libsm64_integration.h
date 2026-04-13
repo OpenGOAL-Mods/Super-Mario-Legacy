@@ -462,6 +462,7 @@ class LibSM64Manager {
     // level with that type isn't loaded (fine, disables the filter).
     u32 springbox = 0;         // type ptr for springbox (jungle bouncer)
     u32 spiderwebs = 0;        // type ptr for spiderwebs (maincave bouncer)
+    u32 teetertotter = 0;      // type ptr for teetertotter (misty seesaw)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant

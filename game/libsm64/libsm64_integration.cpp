@@ -2637,6 +2637,7 @@ struct WalkCtx {
   // Bouncy trampoline types. 0 means level not loaded — disables the check.
   u32 springbox_type;
   u32 spiderwebs_type;
+  u32 teetertotter_type;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
@@ -2776,13 +2777,14 @@ void do_sweep(WalkCtx& c) {
       continue;
     }
 
-    // Check if this actor is a bouncy trampoline type (springbox, spiderwebs).
-    // If so, floor-facing surfaces will be tagged SURFACE_BOUNCY later.
-    // Direct pointer comparison — these are concrete types with no subtypes,
-    // so we don't need type_is_descendant / cache walks.
+    // Check if this actor is a bouncy trampoline type (springbox, spiderwebs)
+    // or a teetertotter (seesaw). Direct pointer comparison — these are
+    // concrete types with no subtypes.
     bool is_bouncy_actor =
         (c.springbox_type != 0 && node_type == c.springbox_type) ||
         (c.spiderwebs_type != 0 && node_type == c.spiderwebs_type);
+    bool is_teetertotter_actor =
+        (c.teetertotter_type != 0 && node_type == c.teetertotter_type);
 
     c.result.process_drawables_seen++;
 
@@ -2989,11 +2991,13 @@ void do_sweep(WalkCtx& c) {
       c.result.meshes_found++;
       c.result.triangles_extracted += (int)surfaces.size();
 
-      // Tag upward-facing (floor) surfaces as SURFACE_BOUNCY for trampoline
-      // actors. libsm64 classifies surfaces with normal.y > 0.01 as floors,
-      // so we match that threshold. Side/wall triangles keep SURFACE_DEFAULT.
-      if (is_bouncy_actor) {
+      // Tag upward-facing (floor) surfaces for special actor types.
+      // libsm64 classifies surfaces with normal.y > 0.01 as floors, so we
+      // match that threshold. Side/wall triangles keep SURFACE_DEFAULT.
+      if (is_bouncy_actor || is_teetertotter_actor) {
         constexpr int16_t SURFACE_BOUNCY_TYPE = 0x00FE;
+        constexpr int16_t SURFACE_TEETERTOTTER_TYPE = 0x00FD;
+        int16_t tag = is_bouncy_actor ? SURFACE_BOUNCY_TYPE : SURFACE_TEETERTOTTER_TYPE;
         for (auto& s : surfaces) {
           // Compute the triangle normal Y component to determine if it's a floor.
           // Cross product of (v1-v0) x (v2-v0), we only need the Y component:
@@ -3005,7 +3009,7 @@ void do_sweep(WalkCtx& c) {
           float e2z = (float)(s.vertices[2][2] - s.vertices[0][2]);
           float ny = e1z * e2x - e1x * e2z;
           if (ny > 0.0f) {
-            s.type = SURFACE_BOUNCY_TYPE;
+            s.type = tag;
           }
         }
       }
@@ -3129,6 +3133,16 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       }
     }
   }
+  if (m_type_cache.teetertotter == 0) {
+    auto tt = jak1::find_symbol_from_c("teetertotter");
+    if (tt.offset != 0) {
+      u32 v = tt->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.teetertotter = v;
+        lg::info("[libsm64] Actor collision: cached teetertotter type @0x{:X}", v);
+      }
+    }
+  }
 
   // Resolve *target* every frame. Jak's process-drawable pointer changes
   // any time the player is re-spawned (e.g. death), and there's no upside
@@ -3164,6 +3178,7 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_grabbed_yakow_ee,
       m_type_cache.springbox,
       m_type_cache.spiderwebs,
+      m_type_cache.teetertotter,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
@@ -3273,6 +3288,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       0,  // grabbed_actor_ptr: no grab state in tests
       0,  // springbox_type: not needed in tests
       0,  // spiderwebs_type: not needed in tests
+      0,  // teetertotter_type: not needed in tests
       dry_run,
       dummy_diag_remaining,
       pd_cache,

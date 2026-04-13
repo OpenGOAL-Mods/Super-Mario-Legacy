@@ -415,7 +415,9 @@
      (when (and (not (logtest? (-> self control root-prim prim-core action) (collide-action racer flut)))
                 (not (and (= (-> self game mode) 'play) (>= 0.0 (-> self fact health)))))
        (if (and (cpad-pressed? (-> self control unknown-cpad-info00 number) circle) (can-feet?)) (go target-attack-air #f))
-       (if (and (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
+       ;; sm64 mod: Jak flop disabled — Mario handles ground-pound
+       (if (and #f ;; sm64 mod
+                (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
                 (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 26624.0)
                 (and (< -61440.0 (vector-dot (-> self control dynam gravity-normal) (-> self control transv)))
                      (time-elapsed? (-> self control unknown-dword36) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))

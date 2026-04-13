@@ -609,7 +609,8 @@
        (and (< (-> self control unknown-float61) 0.7) (not (logtest? (-> self state-flags) (state-flags prevent-duck))))))
 
 (defbehavior can-duck? target ()
-  (and (logtest? (-> self control status) (cshape-moving-flags onsurf))
+  (and #f ;; sm64 mod: disable Jak crouch
+       (logtest? (-> self control status) (cshape-moving-flags onsurf))
        (>= (-> self control unknown-float60) 0.7)
        (not (logtest? (-> self water flags) (water-flags wt11 wt12)))
        (not (logtest? (-> self state-flags) (state-flags prevent-duck)))
@@ -637,6 +638,8 @@
 
 (defbehavior can-hands? target ((arg0 symbol))
   (cond
+    ;; sm64 mod: Mario handles all melee — disable Jak punch/uppercut
+    (#t #f)
     ((or (not (cpad-pressed? (-> self control unknown-cpad-info00 number) square))
          (or (and (logtest? (-> self state-flags) (state-flags prevent-attack))
                   (or (not (logtest? (-> self state-flags) (state-flags remove-prevents)))
@@ -655,6 +658,8 @@
 
 (defbehavior can-feet? target ()
   (cond
+    ;; sm64 mod: Mario handles all melee — disable Jak spin/air-spin
+    (#t #f)
     ((or (logtest? (-> self state-flags) (state-flags prevent-attack))
          (logtest? (-> self control unknown-surface01 flags) (surface-flags prevent-attacks-during-launch-jump surf09)))
      #f)

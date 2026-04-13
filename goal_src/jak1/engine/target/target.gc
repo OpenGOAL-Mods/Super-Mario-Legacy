@@ -873,7 +873,9 @@
                     (not (logtest? (-> self water flags) (water-flags wt09)))
                     (not (logtest? (-> self state-flags) (state-flags prevent-jump)))))
         (go target-double-jump (-> *TARGET-bank* double-jump-height-min) (-> *TARGET-bank* double-jump-height-max)))
-      (if (and (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
+      ;; sm64 mod: Jak flop disabled — Mario handles ground-pound
+      (if (and #f ;; sm64 mod
+               (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
                (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 26624.0)
                (and (< -61440.0 (vector-dot (-> self control dynam gravity-normal) (-> self control transv)))
                     (time-elapsed? (-> self control unknown-dword36) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))
@@ -955,7 +957,9 @@
   :trans
     (behavior ()
       (target-falling-trans #f (the-as time-frame (if (ja-group? eichar-jump-loop-ja) 15 -1)))
-      (if (and (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
+      ;; sm64 mod: Jak flop disabled — Mario handles ground-pound
+      (if (and #f ;; sm64 mod
+               (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
                (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 22118.4)
                (and (< -61440.0 (vector-dot (-> self control dynam gravity-normal) (-> self control transv)))
                     (time-elapsed? (-> self control unknown-dword36) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))
@@ -1012,7 +1016,9 @@
     (behavior ()
       (target-falling-trans #f (the-as time-frame (if (ja-group? eichar-jump-loop-ja) 15 -1)))
       ;; og:preserve-this - High FPS Fix
-      (if (and (recently-pressed? square)
+      ;; sm64 mod: Jak flop disabled — Mario handles ground-pound
+      (if (and #f ;; sm64 mod
+               (recently-pressed? square)
                (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 73728.0)
                (and (< -61440.0 (vector-dot (-> self control dynam gravity-normal) (-> self control transv)))
                     (time-elapsed? (-> self control unknown-dword36) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))
@@ -1533,7 +1539,9 @@
   :trans
     (behavior ()
       (if (logtest? (-> self control status) (cshape-moving-flags onsurf)) (go target-hit-ground #f))
-      (when (and (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
+      ;; sm64 mod: Jak flop disabled — Mario handles ground-pound
+      (when (and #f ;; sm64 mod
+                 (cpad-pressed? (-> self control unknown-cpad-info00 number) square)
                  (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 22118.4)
                  (and (< -61440.0 (vector-dot (-> self control dynam gravity-normal) (-> self control transv)))
                       (time-elapsed? (-> self control unknown-dword36) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))

@@ -255,8 +255,9 @@ class LibSM64Manager {
   void read_target_flags(u8* ee_mem);
 
   // Flags set by read_target_flags(), used by OpenGLRenderer for render/input control.
-  bool target_grabbed = false;   // cutscene or periscope
-  bool target_periscope = false; // periscope specifically
+  bool target_grabbed = false;    // cutscene, clone-anim, or periscope
+  bool target_periscope = false;  // periscope specifically
+  bool target_clone_anim = false; // blue eco doors/bridges — grabbed but don't teleport
 
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing
@@ -492,6 +493,8 @@ class LibSM64Manager {
     u32 spiderwebs = 0;        // type ptr for spiderwebs (maincave bouncer)
     u32 teetertotter = 0;      // type ptr for teetertotter (misty seesaw)
     u32 sm64_mario_col = 0;    // type ptr for sm64-mario-col (our GOAL hitbox process)
+    u32 touch_tracker = 0;     // type ptr for touch-tracker (attack/eco hitboxes, not solid)
+    u32 projectile = 0;        // type ptr for projectile (temporary attack effects, not solid)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant
@@ -499,6 +502,7 @@ class LibSM64Manager {
   std::unordered_map<u32, bool> m_is_collide_shape_cache;
   std::unordered_map<u32, bool> m_is_pov_camera_cache;
   std::unordered_map<u32, bool> m_is_citadelcam_cache;
+  std::unordered_map<u32, bool> m_is_projectile_cache;
 
   // Tracked actor collision objects, keyed by ((process-drawable EE addr) << 32 |
   // collide-mesh EE addr). Different actor instances can SHARE the same

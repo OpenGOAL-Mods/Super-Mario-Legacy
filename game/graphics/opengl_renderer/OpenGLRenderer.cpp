@@ -1122,8 +1122,9 @@ void OpenGLRenderer::tick_mario_sm64() {
 
   // 6. Jak position sync (skip when Mario is dead or in cutscene/periscope)
   auto t10 = Clock::now();
-  if (mgr.target_grabbed && !mgr.target_periscope) {
-    // Cutscene (not periscope): teleport Mario to Jak each frame
+  if (mgr.target_grabbed && !mgr.target_periscope && !mgr.target_clone_anim) {
+    // Cutscene (not periscope, not clone-anim): teleport Mario to Jak each frame.
+    // clone-anim (blue eco doors/bridges) sets grabbed but Mario should stay put.
     mgr.teleport_mario_to_jak(g_ee_main_mem);
   } else if (mgr.follow_mario && !launcher_active && !mgr.target_grabbed) {
     auto cur_state = mgr.get_state();

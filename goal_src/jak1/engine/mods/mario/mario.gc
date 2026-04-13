@@ -135,15 +135,20 @@
 
       ;; ---- Write target state flags for C++ ----
       (let ((grabbed #f)
-            (periscope #f))
+            (periscope #f)
+            (clone-anim #f))
         (when *target*
           (let ((st (-> *target* state)))
             (when st
               (set! grabbed (logtest? (-> *target* state-flags) (state-flags grabbed)))
               (set! periscope (or (= (-> st name) 'target-periscope)
-                                  (logtest? (-> *target* state-flags) (state-flags first-person-mode)))))))
+                                  (logtest? (-> *target* state-flags) (state-flags first-person-mode))))
+              ;; clone-anim = blue eco doors/bridges/fuel-cell pickups — grabbed but
+              ;; should NOT teleport Mario (causes shove).  Mario just stays put.
+              (set! clone-anim (= (-> st name) 'target-clone-anim)))))
         (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
-        (set! (-> *sm64-target-flags* y) (if periscope 1.0 0.0)))
+        (set! (-> *sm64-target-flags* y) (if periscope 1.0 0.0))
+        (set! (-> *sm64-target-flags* z) (if clone-anim 1.0 0.0)))
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))

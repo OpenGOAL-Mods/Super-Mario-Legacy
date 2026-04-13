@@ -1959,6 +1959,7 @@ bool LibSM64Manager::read_target_transform(u8* ee_mem,
 void LibSM64Manager::read_target_flags(u8* ee_mem) {
   target_grabbed = false;
   target_periscope = false;
+  target_clone_anim = false;
   if (!ee_mem) return;
   u32 false_val = s7.offset;
   if (false_val == 0) return;
@@ -1972,6 +1973,7 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   std::memcpy(data, ee_mem + ptr, 16);
   target_grabbed = data[0] > 0.5f;
   target_periscope = data[1] > 0.5f;
+  target_clone_anim = data[2] > 0.5f;
 }
 
 void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
@@ -2862,12 +2864,21 @@ struct WalkCtx {
   // Our own GOAL hitbox process type — skip it so its collide-shape doesn't
   // get mirrored into libsm64 as a surface object.
   u32 sm64_mario_col_type;
+  // touch-tracker: temporary attack/eco hitbox spheres. Not solid geometry —
+  // must not become SM64 surfaces. Blue eco spawns an 18m-radius touch-tracker
+  // that was shoving Mario out of bounds.
+  u32 touch_tracker_type;
+  // projectile (base type): temporary flying attack effects (eco shots, etc.).
+  // Not solid geometry — projectile-blue spawns 5 spheres near Jak when blue
+  // eco activates a platform, shoving Mario for a frame before they fly away.
+  u32 projectile_type;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
   std::unordered_map<u32, bool>& is_collide_shape_cache;
   std::unordered_map<u32, bool>& is_pov_camera_cache;
   std::unordered_map<u32, bool>& is_citadelcam_cache;
+  std::unordered_map<u32, bool>& is_projectile_cache;
   std::unordered_map<uint64_t, LibSM64Manager::TrackedActor>& tracked_actors;
   std::unordered_set<u32>& broken_meshes;
   LibSM64Manager::TestSweepResult& result;
@@ -2990,6 +3001,7 @@ void do_sweep(WalkCtx& c) {
     // Skip our own GOAL-side hitbox process so its collide-shape doesn't get
     // mirrored into libsm64 as a surface object.
     if (c.sm64_mario_col_type != 0 && node_type == c.sm64_mario_col_type) continue;
+    if (c.touch_tracker_type != 0 && node_type == c.touch_tracker_type) continue;
 
     // Reject camera-owned process-drawables. These aren't things Mario should
     // stand on — they exist just to host cutscene cameras and level-specific
@@ -3002,6 +3014,10 @@ void do_sweep(WalkCtx& c) {
     }
     if (type_is_descendant(c.ee_mem, c.mem_size, node_type, c.citadelcam_type,
                             c.is_citadelcam_cache)) {
+      continue;
+    }
+    if (type_is_descendant(c.ee_mem, c.mem_size, node_type, c.projectile_type,
+                            c.is_projectile_cache)) {
       continue;
     }
 
@@ -3381,6 +3397,26 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       }
     }
   }
+  if (m_type_cache.touch_tracker == 0) {
+    auto tt = jak1::find_symbol_from_c("touch-tracker");
+    if (tt.offset != 0) {
+      u32 v = tt->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.touch_tracker = v;
+        lg::info("[libsm64] Actor collision: cached touch-tracker type @0x{:X}", v);
+      }
+    }
+  }
+  if (m_type_cache.projectile == 0) {
+    auto pj = jak1::find_symbol_from_c("projectile");
+    if (pj.offset != 0) {
+      u32 v = pj->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.projectile = v;
+        lg::info("[libsm64] Actor collision: cached projectile type @0x{:X}", v);
+      }
+    }
+  }
 
   // Resolve *target* every frame. Jak's process-drawable pointer changes
   // any time the player is re-spawned (e.g. death), and there's no upside
@@ -3418,12 +3454,15 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.spiderwebs,
       m_type_cache.teetertotter,
       m_type_cache.sm64_mario_col,
+      m_type_cache.touch_tracker,
+      m_type_cache.projectile,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
       m_is_collide_shape_cache,
       m_is_pov_camera_cache,
       m_is_citadelcam_cache,
+      m_is_projectile_cache,
       m_tracked_actors,
       m_broken_meshes,
       result,
@@ -3507,7 +3546,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
                                                            u32 prim_sphere_type) {
   TestSweepResult result;
   int dummy_diag_remaining = 0;  // tests shouldn't spam lg::info
-  std::unordered_map<u32, bool> pd_cache, cs_cache, pov_cache, citadel_cache;
+  std::unordered_map<u32, bool> pd_cache, cs_cache, pov_cache, citadel_cache, proj_cache;
   std::unordered_map<uint64_t, TrackedActor> tracked;
   std::unordered_set<u32> broken;
 
@@ -3529,12 +3568,15 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       0,  // spiderwebs_type: not needed in tests
       0,  // teetertotter_type: not needed in tests
       0,  // sm64_mario_col_type: not needed in tests
+      0,  // touch_tracker_type: not needed in tests
+      0,  // projectile_type: not needed in tests
       dry_run,
       dummy_diag_remaining,
       pd_cache,
       cs_cache,
       pov_cache,
       citadel_cache,
+      proj_cache,
       tracked,
       broken,
       result,

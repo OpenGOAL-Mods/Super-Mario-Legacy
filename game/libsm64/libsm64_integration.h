@@ -138,6 +138,9 @@ struct MarioInputState {
   bool button_z = false;
 };
 
+// Free function registered via make_function_symbol_from_c so GOAL can call it.
+u64 pc_sm64_damage_mario();
+
 class LibSM64Manager {
  public:
   static LibSM64Manager& instance();
@@ -229,6 +232,15 @@ class LibSM64Manager {
 
   // Tear down all tracked actor surface objects (on level change, disable, etc.)
   void clear_actor_collision();
+
+  // Write Mario's position, face angle, and attacking state to the GOAL-side
+  // bridge symbols (*sm64-mario-pos*, *sm64-mario-info*).  Also reads
+  // *sm64-mario-hit* and clears it if Jak struck Mario.
+  void write_mario_bridge_data(u8* ee_mem);
+
+  // Called from GOAL (via make_function_symbol_from_c "pc-sm64-damage-mario")
+  // when a GOAL enemy hits Mario's body sphere.  Thread-safe — grabs m_sm64_lock.
+  void damage_mario_from_goal();
 
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing
@@ -463,6 +475,7 @@ class LibSM64Manager {
     u32 springbox = 0;         // type ptr for springbox (jungle bouncer)
     u32 spiderwebs = 0;        // type ptr for spiderwebs (maincave bouncer)
     u32 teetertotter = 0;      // type ptr for teetertotter (misty seesaw)
+    u32 sm64_mario_col = 0;    // type ptr for sm64-mario-col (our GOAL hitbox process)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant

@@ -1033,7 +1033,31 @@ void OpenGLRenderer::tick_mario_sm64() {
   }
   auto t1 = Clock::now();
 
-  if (!mgr.has_mario()) return;
+  // Auto-spawn Mario at Jak's position if initialized but no Mario yet
+  if (!mgr.has_mario()) {
+    static int spawn_cooldown = 0;
+    if (spawn_cooldown > 0) {
+      spawn_cooldown--;
+      return;
+    }
+    math::Vector3f tpos;
+    float tyaw = 0.f;
+    if (mgr.read_target_transform(g_ee_main_mem, &tpos, &tyaw)) {
+      int32_t id = mgr.create_mario(tpos.x(), tpos.y(), tpos.z());
+      if (id >= 0) {
+        mgr.set_mario_face_angle(tyaw);
+        lg::info("[sm64] Auto-spawned Mario at ({:.1f}, {:.1f}, {:.1f})",
+                 tpos.x(), tpos.y(), tpos.z());
+      } else {
+        // No collision at spawn point — retry after ~2s
+        spawn_cooldown = 60;
+      }
+    } else {
+      // *target* not available yet — retry after ~1s
+      spawn_cooldown = 30;
+    }
+    return;
+  }
 
   // SM64 runs at 30Hz — only tick every other frame at 60fps
   static int tick_counter = 0;
@@ -1094,6 +1118,8 @@ void OpenGLRenderer::tick_mario_sm64() {
   if (mgr.follow_mario && !launcher_active) {
     mgr.sync_jak_to_mario(g_ee_main_mem, 0);
   }
+  // Write Mario's pos/angle/attacking to GOAL bridge symbols.
+  mgr.write_mario_bridge_data(g_ee_main_mem);
   auto t11 = Clock::now();
 
   // 7. Dynamic actor collision

@@ -16,6 +16,9 @@
 (define *sm64-skip-zoomer* #f)
 (define *sm64-zoomer-requested* #f)
 
+;; libsm64: C++ damage function so enemy hits on Jak also hurt SM64 Mario.
+(define-extern pc-sm64-damage-mario (function none))
+
 ;; DECOMP BEGINS
 
 (defbehavior target-generic-event-handler target ((arg0 process) (arg1 int) (arg2 symbol) (arg3 event-message-block))
@@ -218,6 +221,8 @@
     (when (not (logtest? (-> self attack-info-rec mask) (attack-mask attacker)))
       (set! (-> self attack-info-rec attacker) (process->handle arg2))
       (logior! (-> self attack-info-rec mask) (attack-mask attacker)))
+    ;; libsm64: Jak took a real hit → also damage SM64 Mario.
+    (pc-sm64-damage-mario)
     (cond
       ((and (logtest? (-> self attack-info-rec mask) (attack-mask mode))
             (and (= (-> self attack-info-rec mode) 'damage) (not (and (= (-> self game mode) 'play) (>= 1.0 (-> self fact health))))))

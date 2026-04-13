@@ -16,6 +16,7 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak1.h"
+#include "game/libsm64/libsm64_integration.h"
 #include "game/graphics/display.h"
 #include "game/graphics/gfx.h"
 #include "game/graphics/sceGraphicsInterface.h"
@@ -548,6 +549,9 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("__pc-set-levels", (void*)pc_set_levels);
 
   make_function_symbol_from_c("pc-discord-rpc-update", (void*)update_discord_rpc);
+
+  // libsm64: GOAL → C++ damage bridge
+  make_function_symbol_from_c("pc-sm64-damage-mario", (void*)sm64::pc_sm64_damage_mario);
 
   // setup string constants
   // TODO - these may be able to be moved into `init_common_pc_port_functions` but it's trickier

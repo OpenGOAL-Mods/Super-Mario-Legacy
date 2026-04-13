@@ -1722,6 +1722,91 @@ void LibSM64Manager::sync_jak_to_mario(u8* ee_mem, u32 s7_offset) {
   write_mario_pos_to_target(ee_mem, EE_MAIN_MEM_SIZE, false_val, target_ptr, mario_pos);
 }
 
+// ---------------------------------------------------------------------------
+// Write Mario state to GOAL-side bridge vectors so the sm64-mario-col process
+// (defined in mario.gc) can track Mario and spawn touch-tracker attacks.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
+
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  auto state = get_state();
+
+  // ---- *sm64-mario-pos*: vector with x,y,z = position, w = face angle (GOAL degrees) ----
+  auto pos_sym = jak1::intern_from_c("*sm64-mario-pos*");
+  if (pos_sym.offset != 0) {
+    u32 vec_ptr = pos_sym->value;
+    if (vec_ptr != 0 && vec_ptr != false_val && vec_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      // Convert radians → GOAL angle units (65536 = full revolution).
+      float goal_angle = state.face_angle * (65536.0f / (2.0f * 3.14159265358979f));
+      float data[4] = {state.position.x(), state.position.y(), state.position.z(), goal_angle};
+      std::memcpy(ee_mem + vec_ptr, data, 16);
+    }
+  }
+
+  // ---- *sm64-mario-info*: x = attacking (1.0 / 0.0) ----
+  auto info_sym = jak1::intern_from_c("*sm64-mario-info*");
+  if (info_sym.offset != 0) {
+    u32 info_ptr = info_sym->value;
+    if (info_ptr != 0 && info_ptr != false_val && info_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      // ACT_FLAG_ATTACKING = (1 << 23) is set on all punch/kick/dive/ground-pound actions.
+      constexpr uint32_t ACT_FLAG_ATTACKING = 0x00800000;
+      constexpr uint32_t ACT_GROUND_POUND_LAND = 0x0080023C;
+      constexpr uint32_t ACT_GROUND_POUND = 0x008008A9;
+      bool is_attacking = (state.action & ACT_FLAG_ATTACKING) != 0;
+      bool gp_impact = (state.action == ACT_GROUND_POUND_LAND);
+      bool gp_falling = (state.action == ACT_GROUND_POUND);
+      // x = punching/kicking, y = ground pound impact, z = ground pound falling
+      float info_data[4] = {is_attacking ? 1.0f : 0.0f,
+                            gp_impact ? 1.0f : 0.0f,
+                            gp_falling ? 1.0f : 0.0f, 0.0f};
+      std::memcpy(ee_mem + info_ptr, info_data, 16);
+    }
+  }
+
+  // ---- *sm64-mario-hit*: read x, if > 0.5 Mario was struck by Jak, clear it ----
+  auto hit_sym = jak1::intern_from_c("*sm64-mario-hit*");
+  if (hit_sym.offset != 0) {
+    u32 hit_ptr = hit_sym->value;
+    if (hit_ptr != 0 && hit_ptr != false_val && hit_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      float hit_flag;
+      std::memcpy(&hit_flag, ee_mem + hit_ptr, 4);
+      if (hit_flag > 0.5f) {
+        lg::info("[libsm64] Mario was struck by Jak!");
+        // Clear the flag.
+        float zero = 0.0f;
+        std::memcpy(ee_mem + hit_ptr, &zero, 4);
+        // Damage is now handled directly from GOAL via pc-sm64-damage-mario.
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GOAL-callable damage: registered as "pc-sm64-damage-mario".
+// ---------------------------------------------------------------------------
+void LibSM64Manager::damage_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  auto state = get_state();
+  // Impact position slightly in front of Mario so knockback pushes him backward.
+  float front_x = state.position.x() + std::sin(state.face_angle) * 100.0f;
+  float front_z = state.position.z() + std::cos(state.face_angle) * 100.0f;
+  float sm64_x = front_x * JAK_TO_SM64_SCALE;
+  float sm64_y = state.position.y() * JAK_TO_SM64_SCALE;
+  float sm64_z = front_z * JAK_TO_SM64_SCALE;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_mario_take_damage(m_mario_id, 1, 0, sm64_x, sm64_y, sm64_z);
+  }
+}
+
+u64 pc_sm64_damage_mario() {
+  LibSM64Manager::instance().damage_mario_from_goal();
+  return 0;
+}
+
 bool LibSM64Manager::read_target_transform(u8* ee_mem,
                                            math::Vector3f* out_pos,
                                            float* out_yaw_rad) {
@@ -2638,6 +2723,9 @@ struct WalkCtx {
   u32 springbox_type;
   u32 spiderwebs_type;
   u32 teetertotter_type;
+  // Our own GOAL hitbox process type — skip it so its collide-shape doesn't
+  // get mirrored into libsm64 as a surface object.
+  u32 sm64_mario_col_type;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
@@ -2762,6 +2850,10 @@ void do_sweep(WalkCtx& c) {
                              c.is_process_drawable_cache)) {
       continue;
     }
+
+    // Skip our own GOAL-side hitbox process so its collide-shape doesn't get
+    // mirrored into libsm64 as a surface object.
+    if (c.sm64_mario_col_type != 0 && node_type == c.sm64_mario_col_type) continue;
 
     // Reject camera-owned process-drawables. These aren't things Mario should
     // stand on — they exist just to host cutscene cameras and level-specific
@@ -3143,6 +3235,16 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       }
     }
   }
+  if (m_type_cache.sm64_mario_col == 0) {
+    auto mc = jak1::find_symbol_from_c("sm64-mario-col");
+    if (mc.offset != 0) {
+      u32 v = mc->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.sm64_mario_col = v;
+        lg::info("[libsm64] Actor collision: cached sm64-mario-col type @0x{:X}", v);
+      }
+    }
+  }
 
   // Resolve *target* every frame. Jak's process-drawable pointer changes
   // any time the player is re-spawned (e.g. death), and there's no upside
@@ -3179,6 +3281,7 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.springbox,
       m_type_cache.spiderwebs,
       m_type_cache.teetertotter,
+      m_type_cache.sm64_mario_col,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
@@ -3289,6 +3392,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       0,  // springbox_type: not needed in tests
       0,  // spiderwebs_type: not needed in tests
       0,  // teetertotter_type: not needed in tests
+      0,  // sm64_mario_col_type: not needed in tests
       dry_run,
       dummy_diag_remaining,
       pd_cache,

@@ -1,0 +1,188 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario.gc
+;; name in dgo: mario
+;; dgos: ENGINE, GAME
+
+(bundles "ENGINE.CGO" "GAME.CGO")
+(require "engine/common-obs/process-drawable.gc")
+(require "engine/common-obs/generic-obs.gc")
+
+;; ---------------------------------------------------------------------------
+;; C++ damage function — registered via make_function_symbol_from_c in kmachine.
+;; ---------------------------------------------------------------------------
+(define-extern pc-sm64-damage-mario (function none))
+
+;; ---------------------------------------------------------------------------
+;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.
+;; All data is packed into vectors (raw floats) to avoid fixnum/tag encoding.
+;; ---------------------------------------------------------------------------
+
+;; C++ writes: x,y,z = Mario world position (Jak units), w = face angle (GOAL degrees).
+(define *sm64-mario-pos* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = punching/kicking, y = ground-pound impact, z = ground-pound falling.
+(define *sm64-mario-info* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
+(define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; ---------------------------------------------------------------------------
+;; sm64-mario-col — invisible process that tracks Mario's position and
+;; spawns touch-tracker attack spheres for punches AND ground-pounds.
+;;
+;; Punch:        rising edge of *sm64-mario-info*.x → touch-tracker at
+;;               Mario's fist (forward 1.5m, up 1m), radius 1.5m, 15 frames,
+;;               sends 'attack 'punch.
+;;
+;; Ground pound: rising edge of *sm64-mario-info*.y → touch-tracker at
+;;               Mario's feet, radius 3m, 10 frames, sends 'attack 'flop.
+;;
+;; Enemy damage: handled in target-handler.gc (when Jak takes a hit,
+;;               target-attacked also calls pc-sm64-damage-mario).
+;;
+;; Debug draw:   when *debug-segment* is on, draws Mario's body (red),
+;;               punch reach (yellow), ground-pound AoE (blue).
+;; ---------------------------------------------------------------------------
+
+(deftype sm64-mario-col (process-drawable)
+  ((prev-attacking    symbol)
+   (prev-ground-pound symbol))
+  (:state-methods
+    idle))
+
+;; ---- Helper: spawn a touch-tracker, clear its collide-as, configure event --
+
+(defun sm64-spawn-attack-tracker ((parent process) (pos vector) (radius float)
+                                  (dur int) (attack-mode symbol))
+  "Spawn a touch-tracker at pos with given radius/duration/attack-mode.
+   Clears collide-as so Jak isn't reverse-matched."
+  (let ((tracker (process-spawn touch-tracker
+                   :init touch-tracker-init
+                   pos radius dur
+                   :to parent)))
+    (when tracker
+      ;; Clear collide-as so Jak can't reverse-match us.
+      ;; Leave collide-with untouched (crate/enemy/wall-object/etc — no target).
+      (let ((tt-root (the-as collide-shape
+                       (-> (the-as process-drawable (ppointer->process tracker)) root))))
+        (set! (-> tt-root root-prim prim-core collide-as) (collide-kind))
+        (backup-collide-with-as tt-root))
+      ;; Configure the event it sends on contact.
+      (send-event (ppointer->process tracker) 'event 'attack attack-mode))
+    tracker))
+
+;; ---- States -----------------------------------------------------------------
+
+(defstate idle (sm64-mario-col)
+  :virtual #t
+  :code (behavior ()
+    (set! (-> self prev-attacking) #f)
+    (set! (-> self prev-ground-pound) #f)
+    (loop
+      ;; ---- Track Mario's position ----
+      (set! (-> self root trans x) (-> *sm64-mario-pos* x))
+      (set! (-> self root trans y) (-> *sm64-mario-pos* y))
+      (set! (-> self root trans z) (-> *sm64-mario-pos* z))
+
+      ;; ---- Punch touch-tracker on rising edge ----
+      (let ((attacking (> (-> *sm64-mario-info* x) 0.5)))
+        (when (and attacking (not (-> self prev-attacking)))
+          (let ((fist-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w)))
+            (set-vector! fist-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+              (+ (-> *sm64-mario-pos* y) (meters 1.0))
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self fist-pos (meters 1.5) 15 'punch)))
+              (when tracker
+                ;; Give it a callback that tracks Mario's fist each frame.
+                (send-event (ppointer->process tracker) 'function
+                  (lambda :behavior touch-tracker ()
+                    (let ((yaw (-> *sm64-mario-pos* w)))
+                      (set! (-> self root trans x)
+                            (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5))))
+                      (set! (-> self root trans y)
+                            (+ (-> *sm64-mario-pos* y) (meters 1.0)))
+                      (set! (-> self root trans z)
+                            (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))))
+                    (update-transforms! (-> self root))
+                    (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
+        (set! (-> self prev-attacking) attacking))
+
+      ;; ---- Ground-pound touch-tracker on impact rising edge ----
+      (let ((gp-impact (> (-> *sm64-mario-info* y) 0.5)))
+        (when (and gp-impact (not (-> self prev-ground-pound)))
+          ;; Spawn at Mario's feet, large radius, short burst, 'flop attack
+          (let ((feet-pos (new 'stack-no-clear 'vector)))
+            (set-vector! feet-pos
+              (-> *sm64-mario-pos* x)
+              (-> *sm64-mario-pos* y)
+              (-> *sm64-mario-pos* z)
+              1.0)
+            (sm64-spawn-attack-tracker self feet-pos (meters 3.0) 10 'flop)))
+        (set! (-> self prev-ground-pound) gp-impact))
+
+      ;; ---- Debug draw ----
+      ;; keep this
+    ;;   (when *debug-segment*
+    ;;     (let ((dp (new 'stack-no-clear 'vector))
+    ;;           (yaw (-> *sm64-mario-pos* w)))
+    ;;       ;; Body area — red (Mario's approximate hitbox)
+    ;;       (set-vector! dp
+    ;;         (-> *sm64-mario-pos* x)
+    ;;         (+ (-> *sm64-mario-pos* y) (meters 1.0))
+    ;;         (-> *sm64-mario-pos* z)
+    ;;         1.0)
+    ;;       (add-debug-sphere #t (bucket-id debug-no-zbuf) dp (meters 1.2)
+    ;;         (new 'static 'rgba :r #xff :g #x40 :b #x40 :a #x80))
+    ;;       ;; Punch reach — yellow
+    ;;       (set-vector! dp
+    ;;         (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+    ;;         (+ (-> *sm64-mario-pos* y) (meters 1.0))
+    ;;         (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+    ;;         1.0)
+    ;;       (add-debug-sphere #t (bucket-id debug-no-zbuf) dp (meters 1.5)
+    ;;         (new 'static 'rgba :r #xff :g #xff :b #x00 :a #x80))
+    ;;       ;; Ground-pound AoE — blue (only while falling or impact)
+    ;;       (when (> (+ (-> *sm64-mario-info* y) (-> *sm64-mario-info* z)) 0.5)
+    ;;         (set-vector! dp
+    ;;           (-> *sm64-mario-pos* x)
+    ;;           (-> *sm64-mario-pos* y)
+    ;;           (-> *sm64-mario-pos* z)
+    ;;           1.0)
+    ;;         (add-debug-sphere #t (bucket-id debug-no-zbuf) dp (meters 3.0)
+    ;;           (new 'static 'rgba :r #x40 :g #x40 :b #xff :a #x80)))))
+
+      (suspend)))
+  :post ja-post)
+
+;; ---- Init + spawn -----------------------------------------------------------
+
+(defbehavior sm64-mario-col-init sm64-mario-col ()
+  "Initialize and enter idle."
+  (set! (-> self root) (new 'process 'trsqv))
+  (set! (-> self root trans quad) (-> *sm64-mario-pos* quad))
+  (set! (-> self prev-attacking) #f)
+  (set! (-> self prev-ground-pound) #f)
+  (go-virtual idle))
+
+(defun sm64-mario-col-start ()
+  "Spawn the Mario collision tracker.  Safe to call multiple times."
+  (let ((existing (process-by-name "sm64-mario-col" *active-pool*)))
+    (when existing
+      (deactivate existing)))
+  (process-spawn sm64-mario-col :init sm64-mario-col-init :name "sm64-mario-col")
+  (format #t "[sm64] Mario collision process started~%"))
+
+(defun sm64-mario-col-stop ()
+  "Kill the Mario collision process."
+  (let ((proc (process-by-name "sm64-mario-col" *active-pool*)))
+    (when proc
+      (deactivate proc)
+      (format #t "[sm64] Mario collision process stopped~%"))))
+
+;; Auto-start on load.
+(sm64-mario-col-start)

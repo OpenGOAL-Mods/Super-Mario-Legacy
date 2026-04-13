@@ -142,10 +142,11 @@
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))
-        (let ((jak-hp (-> *target* fact health))
-              (jak-max (-> *target* fact health-max)))
+        (let* ((jak-full-pip (= (-> *target* fact eco-pill) (-> *target* fact eco-pill-max)))
+               (jak-hp (+ (-> *target* fact health) (if jak-full-pip 1 0)))
+               (jak-max (= jak-hp (+ (-> *target* fact health-max) 1))))
           (when (> jak-hp (-> self prev-jak-health))
-            (if (>= jak-hp jak-max)
+            (if jak-max
               ;; Full health (respawn, checkpoint, etc.) → fully heal Mario
               (pc-sm64-full-heal-mario)
               ;; Partial heal (green eco) → heal Mario 2 wedges per 1 HP

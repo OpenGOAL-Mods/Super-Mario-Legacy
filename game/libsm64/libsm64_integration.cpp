@@ -2629,6 +2629,11 @@ struct WalkCtx {
   // into the sphere as Jak drifts — a very distinctive "bounces toward
   // Jak forever" failure mode. 0 disables the filter (unit tests).
   u32 target_ptr;
+  // Currently held (grabbed) actor process-drawable pointer, or 0 if not
+  // holding anything. We skip this node so Mario doesn't collide with the
+  // object he's carrying — otherwise the held actor's collide-shape pushes
+  // Mario away every frame.
+  u32 grabbed_actor_ptr;
   bool dry_run;
   int& diag_logs_remaining;
   std::unordered_map<u32, bool>& is_process_drawable_cache;
@@ -2721,6 +2726,7 @@ void do_sweep(WalkCtx& c) {
     // resurrect Jak. 0 disables the filter (unit tests, or a pre-kernel
     // tick where *target* isn't bound yet).
     if (c.target_ptr != 0 && node == c.target_ptr) continue;
+    if (c.grabbed_actor_ptr != 0 && node == c.grabbed_actor_ptr) continue;
 
     if (!visited_set.insert(node).second) continue;   // already walked
     c.result.process_tree_nodes_visited++;
@@ -3102,6 +3108,7 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.pov_camera,
       m_type_cache.citadelcam,
       target_ptr_now,
+      m_grabbed_yakow_ee,
       dynamic_actor_collision_dry_run,
       m_actor_diag_logs_remaining,
       m_is_process_drawable_cache,
@@ -3208,6 +3215,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       pov_camera_type,
       citadelcam_type,
       0,  // target_ptr: disabled in tests (synthetic buffers have no *target*)
+      0,  // grabbed_actor_ptr: no grab state in tests
       dry_run,
       dummy_diag_remaining,
       pd_cache,

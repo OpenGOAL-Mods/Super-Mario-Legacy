@@ -1794,6 +1794,18 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
+  // ---- *sm64-mario-on-shell*: x = 1.0 if riding shell, 0.0 otherwise ----
+  auto shell_sym = jak1::intern_from_c("*sm64-mario-on-shell*");
+  if (shell_sym.offset != 0) {
+    u32 shell_ptr = shell_sym->value;
+    if (shell_ptr != 0 && shell_ptr != false_val && shell_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      constexpr uint32_t ACT_FLAG_RIDING_SHELL = 0x00010000;
+      bool on_shell = (state.action & ACT_FLAG_RIDING_SHELL) != 0;
+      float shell_data[4] = {on_shell ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+      std::memcpy(ee_mem + shell_ptr, shell_data, 16);
+    }
+  }
+
   // ---- *sm64-mario-hit*: read x, if > 0.5 Mario was struck by Jak, clear it ----
   auto hit_sym = jak1::intern_from_c("*sm64-mario-hit*");
   if (hit_sym.offset != 0) {

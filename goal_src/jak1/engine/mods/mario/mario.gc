@@ -38,6 +38,9 @@
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
 (define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
+(define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; ---------------------------------------------------------------------------
 ;; sm64-mario-col — invisible process that tracks Mario's position and
 ;; spawns touch-tracker attack spheres for punches AND ground-pounds.
@@ -66,7 +69,9 @@
    (prev-diving       symbol)
    (mario-dead        symbol)
    (death-timer       int)
-   (prev-jak-health   float))
+   (prev-jak-health   float)
+   (prev-on-shell     symbol)
+   (shell-tracker-timer int))
   (:state-methods
     idle))
 
@@ -225,6 +230,49 @@
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-diving) diving))
 
+      ;; ---- Shell riding: racer-like behavior ----
+      (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
+        ;; Rising edge: just mounted shell
+        (when (and on-shell (not (-> self prev-on-shell)) *target*)
+          (logior! (-> *target* control root-prim prim-core action) (collide-action racer))
+          (set! (-> self shell-tracker-timer) 0)
+          ;; Pull camera back and track faster for shell speed
+          (set! (-> *camera* stringMaxLength) (meters 20))
+          (set! (-> *camera* string-push-z) (meters 18)))
+        ;; Falling edge: just dismounted shell
+        (when (and (not on-shell) (-> self prev-on-shell) *target*)
+          (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
+          ;; Restore default camera
+          (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
+          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
+        ;; While on shell: spawn a touch-tracker every 5 frames with 'racer attack
+        (when (and on-shell *target*)
+          (+! (-> self shell-tracker-timer) 1)
+          (when (zero? (mod (-> self shell-tracker-timer) 5))
+            (let ((shell-pos (new 'stack-no-clear 'vector))
+                  (yaw (-> *sm64-mario-pos* w)))
+              ;; Position slightly forward of Mario, matching racer attack sphere layout
+              (set-vector! shell-pos
+                (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+                (+ (-> *sm64-mario-pos* y) (meters 0.5))
+                (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+                1.0)
+              (let ((tracker (sm64-spawn-attack-tracker self shell-pos (meters 1.6) 8 'racer)))
+                (when tracker
+                  ;; Track ahead of Mario as he moves
+                  (send-event (ppointer->process tracker) 'function
+                    (lambda :behavior touch-tracker ()
+                      (let ((yaw (-> *sm64-mario-pos* w)))
+                        (set! (-> self root trans x)
+                              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5))))
+                        (set! (-> self root trans y)
+                              (+ (-> *sm64-mario-pos* y) (meters 0.5)))
+                        (set! (-> self root trans z)
+                              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))))
+                      (update-transforms! (-> self root))
+                      (not (time-elapsed? (-> self state-time) (-> self duration))))))))))
+        (set! (-> self prev-on-shell) on-shell))
+
       ;; ---- Debug draw ----
       ;; keep this
     ;;   (when *debug-segment*
@@ -271,6 +319,8 @@
   (set! (-> self mario-dead) #t)
   (set! (-> self death-timer) 0)
   (set! (-> self prev-jak-health) 0.0)
+  (set! (-> self prev-on-shell) #f)
+  (set! (-> self shell-tracker-timer) 0)
   (go-virtual idle))
 
 (defun sm64-mario-col-start ()

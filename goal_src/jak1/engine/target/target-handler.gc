@@ -19,6 +19,10 @@
 ;; libsm64: C++ damage function so enemy hits on Jak also hurt SM64 Mario.
 (define-extern pc-sm64-damage-mario (function none))
 
+;; libsm64: shell-riding bridge — C++ writes 1.0 when Mario is on the koopa shell.
+;; Used by the 'query 'mode handler to report 'racer so enemies like sharkey don't aggro.
+(define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; DECOMP BEGINS
 
 (defbehavior target-generic-event-handler target ((arg0 process) (arg1 int) (arg2 symbol) (arg3 event-message-block))
@@ -59,6 +63,10 @@
     (('continue) (go target-continue (the-as continue-point (-> arg3 param 0))))
     (('query)
      (case (-> arg3 param 0)
+       (('mode)
+        ;; libsm64: report 'racer when Mario is riding the koopa shell so
+        ;; enemies like sharkey see us as the racer and don't aggro.
+        (if (> (-> *sm64-mario-on-shell* x) 0.5) 'racer (-> self state name)))
        (('powerup) (and (= (-> self fact eco-type) (-> arg3 param 1)) (< 0.0 (-> self fact eco-level))))
        (('pickup)
         (pickup-collectable! (-> self fact) (the-as pickup-type (-> arg3 param 1)) (the-as float 0.0) (the-as handle #f)))

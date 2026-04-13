@@ -398,6 +398,18 @@ class LibSM64Manager {
   bool safety_floor = true;
   // How far below Mario (in SM64 units) the safety quad sits.
   float safety_floor_drop_sm64 = 200.0f;
+  // Collision streaming: instead of feeding all level triangles to libsm64 at
+  // once, only feed those within a radius of Mario. Re-filter when Mario moves
+  // far enough from the last reload center. Dramatically reduces the O(n) cost
+  // of libsm64's brute-force find_floor / find_ceil / find_wall_collisions.
+  bool collision_streaming = true;
+  // Radius (SM64 units) around Mario within which triangles are loaded.
+  // 6000 SM64u ≈ ~570k Jak units ≈ ~140m — covers a generous play area.
+  float collision_stream_radius = 6000.0f;
+  // Mario must move this far (SM64 units) from the last reload center before
+  // we re-filter. Set to ~40% of the radius so there's always a comfortable
+  // buffer of loaded collision ahead of Mario.
+  float collision_stream_reload_threshold = 2500.0f;
   // Proximity threshold (SM64 units) for initiating a grab when B is pressed.
   // 160 SM64u ≈ Mario's height. At 43 SM64u/Jak meter that's ~3.7m.
   float yakow_grab_radius_sm64 = 160.0f;
@@ -498,6 +510,26 @@ class LibSM64Manager {
   // which mesh / which step died. Reset on shutdown().
   int m_actor_sync_frame = 0;
   int m_actor_diag_logs_remaining = 500;
+
+  // ---- Collision streaming state -----------------------------------------
+  // All processed SM64Surface structs from the last load_level_collision call.
+  // We keep these on our side and only feed a spatial subset to libsm64.
+  std::vector<SM64Surface> m_all_static_surfaces;
+  // Per-triangle XZ centroid in SM64 coords, parallel to m_all_static_surfaces.
+  // Pre-computed once at load time to avoid recomputing every streaming pass.
+  struct SurfaceCentroid { float x, z; };
+  std::vector<SurfaceCentroid> m_surface_centroids;
+  // The SM64-unit position where we last reloaded the streaming subset.
+  float m_stream_center_x = 0.0f, m_stream_center_z = 0.0f;
+  // True once we've done at least one streaming load (so we can detect the
+  // initial case where Mario spawns but no subset has been sent yet).
+  bool m_stream_loaded = false;
+  // Number of triangles in the current streaming subset (for debug display).
+  int m_stream_loaded_count = 0;
+
+  // Called inside tick() (under sm64_lock) to reload the nearby subset when
+  // Mario moves far enough from the last center. No-op if streaming is off.
+  void update_streaming_collision(float mario_x_sm64, float mario_z_sm64);
 
   // ---- Safety floor state ----------------------------------------------
   // The libsm64 surface-object id we allocated for the safety quad, valid

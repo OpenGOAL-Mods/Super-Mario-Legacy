@@ -1,5 +1,6 @@
 #include "OpenGLRenderer.h"
 
+#include <chrono>
 #include <cmath>
 
 #include "common/goal_constants.h"
@@ -994,15 +995,22 @@ void OpenGLRenderer::blit_display(ScopedProfilerNode& prof) {
 }
 
 void OpenGLRenderer::tick_mario_sm64() {
+  using Clock = std::chrono::high_resolution_clock;
   auto& mgr = sm64::LibSM64Manager::instance();
   if (!mgr.enabled || !mgr.is_initialized()) return;
 
-  // Auto-sync collision whenever the loaded Jak level set changes. This must
-  // run BEFORE the has_mario() gate so that the first "Spawn Mario at Camera"
-  // click in a fresh level finds a floor — otherwise Mario can never spawn
-  // because tick never reaches the auto-sync block without a Mario (chicken
-  // and egg). The spawn-fallback in the debug GUI is still there as a safety
-  // net for the case where the user disables auto-sync.
+  // --- Profiling: log every N ticks (at 30Hz tick rate, every ~5 seconds) ---
+  static int profile_counter = 0;
+  static constexpr int PROFILE_INTERVAL = 150;  // print every 150 ticks
+  const bool profile_this_frame = (profile_counter % PROFILE_INTERVAL == 0);
+  // Accumulated microsecond totals between log prints
+  static double acc_collision_sync = 0, acc_input = 0, acc_water = 0,
+                acc_glue = 0, acc_tick = 0, acc_jak_sync = 0,
+                acc_actor_coll = 0, acc_yakow = 0, acc_zoomer = 0;
+  static int acc_frames = 0;
+
+  // 1. Auto-sync collision
+  auto t0 = Clock::now();
   if (mgr.auto_sync_collision && m_render_state.loader) {
     auto levels = m_render_state.loader->get_in_use_levels();
     std::set<u64> current_ids;
@@ -1011,7 +1019,6 @@ void OpenGLRenderer::tick_mario_sm64() {
     }
     if (current_ids != m_sm64_last_level_ids) {
       m_sm64_last_level_ids = current_ids;
-      // Merge collision from all loaded levels
       std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
       for (auto* lev : levels) {
         if (lev->level) {
@@ -1024,6 +1031,7 @@ void OpenGLRenderer::tick_mario_sm64() {
       }
     }
   }
+  auto t1 = Clock::now();
 
   if (!mgr.has_mario()) return;
 
@@ -1032,11 +1040,9 @@ void OpenGLRenderer::tick_mario_sm64() {
   tick_counter++;
   if (tick_counter % 2 != 0) return;
 
-  // Build SM64 inputs from the Jak camera and input state
+  // 2. Input gathering
+  auto t2 = Clock::now();
   sm64::MarioInputState input{};
-
-  // Compute camera look direction as vector from camera to Mario (projected onto XZ plane).
-  // SM64 uses this to orient stick input relative to the camera facing direction.
   if (m_render_state.has_pc_data) {
     auto mario_state = mgr.get_state();
     float dx = mario_state.position.x() - m_render_state.camera_pos.x();
@@ -1047,8 +1053,6 @@ void OpenGLRenderer::tick_mario_sm64() {
       input.cam_look_z = dz / len;
     }
   }
-
-  // Read pad data from the display's input manager
   auto display = Display::GetMainDisplay();
   if (display) {
     auto input_mgr = display->get_input_manager();
@@ -1056,67 +1060,91 @@ void OpenGLRenderer::tick_mario_sm64() {
       auto pad_data = input_mgr->get_current_data(0);
       if (pad_data.has_value()) {
         auto& pad = *pad_data.value();
-        // Left analog stick -> SM64 stick input (-1 to 1 range)
         auto [lx, ly] = pad.analog_left();
         input.stick_x = (static_cast<float>(lx) - 127.0f) / 127.0f;
-        // libsm64 convention: positive stick_y = forward (toward camera look direction)
-        // Pad ly: up on stick = low value, so (ly - 127) is negative for forward — no extra flip.
         input.stick_y = (static_cast<float>(ly) - 127.0f) / 127.0f;
-
-        // Apply deadzone to prevent stick drift
         constexpr float DEADZONE = 0.15f;
         if (std::abs(input.stick_x) < DEADZONE) input.stick_x = 0.0f;
         if (std::abs(input.stick_y) < DEADZONE) input.stick_y = 0.0f;
-
-        // Button mapping:
-        // Cross (X)          -> A (jump)
-        // Square OR Circle   -> B (punch / grab / throw)
-        // L2 OR L1           -> Z (crouch / ground pound)
-        // The punch and crouch actions accept either of two face/shoulder
-        // buttons so the player can use whichever grip is comfortable —
-        // Square keeps parity with the Jak control scheme while Circle is
-        // the more natural punch button for players coming from SM64, and
-        // similarly L2 is the original crouch trigger but L1 is closer at
-        // hand for most shoulder-button-heavy combos.
         input.button_a = pad.cross().first;
         input.button_b = pad.square().first || pad.circle().first;
         input.button_z = pad.l2().first || pad.l1().first;
       }
     }
   }
+  auto t3 = Clock::now();
 
-  // Mirror Jak's water volume into libsm64 before ticking Mario so the
-  // water state is current when sm64_mario_tick evaluates swim vs walk.
+  // 3. Water sync
+  auto t4 = Clock::now();
   mgr.update_mario_water(g_ee_main_mem);
+  auto t5 = Clock::now();
 
-  // Launcher glue detection: reads Jak's GOAL state before tick() so that
-  // tick() can apply the position override inside its sm64_lock scope.
+  // 4. Launcher / warp / continue glue
+  auto t6 = Clock::now();
   const bool launcher_active = mgr.update_launcher_glue(g_ee_main_mem);
+  auto t7 = Clock::now();
 
+  // 5. SM64 tick
+  auto t8 = Clock::now();
   mgr.tick(input);
+  auto t9 = Clock::now();
 
-  // Sync Jak's position to Mario's if follow mode is enabled — but skip
-  // during a launcher arc so GOAL's trajectory isn't overwritten.
+  // 6. Jak position sync
+  auto t10 = Clock::now();
   if (mgr.follow_mario && !launcher_active) {
     mgr.sync_jak_to_mario(g_ee_main_mem, 0);
   }
+  auto t11 = Clock::now();
 
-  // Dynamic actor collision: walk the process tree and mirror collide-shapes
-  // as libsm64 surface objects so Mario can stand on moving actors.
+  // 7. Dynamic actor collision
+  auto t12 = Clock::now();
   if (mgr.dynamic_actor_collision) {
     mgr.update_actor_collision(g_ee_main_mem);
   }
+  auto t13 = Clock::now();
 
-  // Yakow grab: walk the process tree, detect punch-edge + proximity, and
-  // glue a held yakow to Mario's hand position each frame via the libsm64
-  // fake-held-object API. No-op when the toggle is off.
+  // 8. Yakow grab
+  auto t14 = Clock::now();
   mgr.update_yakow_grab(g_ee_main_mem);
+  auto t15 = Clock::now();
 
-  // Zoomer → shell: read Jak's target-racing state each tick and force
-  // Mario into ACT_RIDING_SHELL_GROUND while he's on the zoomer, so he
-  // gets the shell-riding visual and picks up the native ACT_FLAG_RIDING_SHELL
-  // lava immunity used by check_lava_boost / update_mario_water.
+  // 9. Zoomer shell
+  auto t16 = Clock::now();
   mgr.update_zoomer_shell(g_ee_main_mem);
+  auto t17 = Clock::now();
+
+  // Accumulate timings (microseconds)
+  auto us = [](auto a, auto b) {
+    return std::chrono::duration<double, std::micro>(b - a).count();
+  };
+  acc_collision_sync += us(t0, t1);
+  acc_input          += us(t2, t3);
+  acc_water          += us(t4, t5);
+  acc_glue           += us(t6, t7);
+  acc_tick           += us(t8, t9);
+  acc_jak_sync       += us(t10, t11);
+  acc_actor_coll     += us(t12, t13);
+  acc_yakow          += us(t14, t15);
+  acc_zoomer         += us(t16, t17);
+  acc_frames++;
+
+  profile_counter++;
+  if (profile_this_frame && acc_frames > 0) {
+    double n = static_cast<double>(acc_frames);
+    double total = acc_collision_sync + acc_input + acc_water + acc_glue +
+                   acc_tick + acc_jak_sync + acc_actor_coll + acc_yakow + acc_zoomer;
+    lg::info("[sm64-profile] avg over {} ticks (us/tick): "
+             "collision_sync={:.0f}  input={:.0f}  water={:.0f}  glue={:.0f}  "
+             "tick={:.0f}  jak_sync={:.0f}  actor_coll={:.0f}  yakow={:.0f}  "
+             "zoomer={:.0f}  TOTAL={:.0f}",
+             acc_frames,
+             acc_collision_sync / n, acc_input / n, acc_water / n, acc_glue / n,
+             acc_tick / n, acc_jak_sync / n, acc_actor_coll / n, acc_yakow / n,
+             acc_zoomer / n, total / n);
+    acc_collision_sync = acc_input = acc_water = acc_glue = 0;
+    acc_tick = acc_jak_sync = acc_actor_coll = acc_yakow = acc_zoomer = 0;
+    acc_frames = 0;
+  }
 }
 
 void OpenGLRenderer::render_mario_sm64(ScopedProfilerNode& prof) {

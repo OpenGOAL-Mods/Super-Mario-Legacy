@@ -907,6 +907,10 @@ void LibSM64Manager::shutdown() {
   clear_safety_floor();
   m_in_launcher = false;
   m_post_glue_settle_frames = 0;
+  m_all_static_surfaces.clear();
+  m_surface_centroids.clear();
+  m_stream_loaded = false;
+  m_stream_loaded_count = 0;
   m_type_cache = {};
   m_is_process_drawable_cache.clear();
   m_is_collide_shape_cache.clear();
@@ -950,6 +954,14 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
   float sm64_x = x * JAK_TO_SM64_SCALE;
   float sm64_y = y * JAK_TO_SM64_SCALE;
   float sm64_z = z * JAK_TO_SM64_SCALE;
+
+  // If collision streaming is active, do an immediate load around the spawn
+  // position so sm64_mario_create can find a floor. Without this, the
+  // streaming subset is empty and Mario fails to spawn.
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    update_streaming_collision(sm64_x, sm64_z);
+  }
 
   m_mario_id = sm64_mario_create(sm64_x, sm64_y, sm64_z);
   if (m_mario_id < 0) {
@@ -1022,6 +1034,11 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     // correct. The quad tracks Mario's XYZ with a fixed Y drop; see
     // update_safety_floor's comment for why this never makes Mario "land"
     // on the pseudo floor during normal play.
+    // Stream in nearby collision surfaces before the tick so find_floor /
+    // find_ceil / find_wall only iterate over a small subset.
+    update_streaming_collision(m_state.position.x() * JAK_TO_SM64_SCALE,
+                               m_state.position.z() * JAK_TO_SM64_SCALE);
+
     update_safety_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
                         m_state.position.y() * JAK_TO_SM64_SCALE,
                         m_state.position.z() * JAK_TO_SM64_SCALE);
@@ -1331,6 +1348,56 @@ void LibSM64Manager::load_flat_ground(float y_height, float half_extent) {
   lg::info("[libsm64] Loaded flat ground at y={} extent={}", y_height, half_extent);
 }
 
+// ---------------------------------------------------------------------------
+// Collision streaming: only feed triangles near Mario to libsm64.
+// Called inside tick() under m_sm64_lock, before sm64_mario_tick.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::update_streaming_collision(float mario_x_sm64, float mario_z_sm64) {
+  if (!collision_streaming || m_all_static_surfaces.empty())
+    return;
+
+  // Check if we need to reload: first load, or Mario moved far enough.
+  if (m_stream_loaded) {
+    float dx = mario_x_sm64 - m_stream_center_x;
+    float dz = mario_z_sm64 - m_stream_center_z;
+    float dist_sq = dx * dx + dz * dz;
+    float thresh = collision_stream_reload_threshold;
+    if (dist_sq < thresh * thresh)
+      return;  // Mario hasn't moved far enough, skip
+  }
+
+  // Build the nearby subset.
+  float r = collision_stream_radius;
+  float r_sq = r * r;
+  std::vector<SM64Surface> nearby;
+  nearby.reserve(m_all_static_surfaces.size() / 4);  // rough estimate
+
+  for (size_t i = 0; i < m_all_static_surfaces.size(); i++) {
+    float dx = m_surface_centroids[i].x - mario_x_sm64;
+    float dz = m_surface_centroids[i].z - mario_z_sm64;
+    if (dx * dx + dz * dz <= r_sq) {
+      nearby.push_back(m_all_static_surfaces[i]);
+    }
+  }
+
+  if (nearby.empty()) {
+    // No surfaces nearby — still load an empty set to clear stale data.
+    // The safety floor will keep Mario from crashing.
+    sm64_static_surfaces_load(nullptr, 0);
+  } else {
+    sm64_static_surfaces_load(nearby.data(), static_cast<uint32_t>(nearby.size()));
+  }
+
+  m_stream_center_x = mario_x_sm64;
+  m_stream_center_z = mario_z_sm64;
+  m_stream_loaded = true;
+  m_stream_loaded_count = static_cast<int>(nearby.size());
+  m_loaded_surface_count = m_stream_loaded_count;
+
+  lg::info("[libsm64] Streaming collision: loaded {} / {} surfaces near ({:.0f}, {:.0f})",
+           nearby.size(), m_all_static_surfaces.size(), mario_x_sm64, mario_z_sm64);
+}
+
 void LibSM64Manager::update_safety_floor(float mario_x_sm64,
                                          float mario_y_sm64,
                                          float mario_z_sm64) {
@@ -1531,14 +1598,37 @@ void LibSM64Manager::load_level_collision(
 
   if (surfaces.empty()) {
     lg::warn("[libsm64] All {} level triangles were noentity — nothing to load", num_tris);
+    m_all_static_surfaces.clear();
+    m_surface_centroids.clear();
     return;
   }
 
-  sm64_static_surfaces_load(surfaces.data(), static_cast<uint32_t>(surfaces.size()));
-  m_loaded_surface_count = static_cast<int>(surfaces.size());
+  // Store all surfaces and pre-compute XZ centroids for streaming.
+  m_all_static_surfaces = std::move(surfaces);
+  m_surface_centroids.resize(m_all_static_surfaces.size());
+  for (size_t i = 0; i < m_all_static_surfaces.size(); i++) {
+    auto& s = m_all_static_surfaces[i];
+    m_surface_centroids[i].x = (s.vertices[0][0] + s.vertices[1][0] + s.vertices[2][0]) / 3.0f;
+    m_surface_centroids[i].z = (s.vertices[0][2] + s.vertices[1][2] + s.vertices[2][2]) / 3.0f;
+  }
+
+  // Reset streaming state so the next tick does an immediate reload around Mario.
+  m_stream_loaded = false;
+  m_stream_loaded_count = 0;
+
+  if (!collision_streaming) {
+    // Streaming off — load everything at once (old behavior).
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_static_surfaces_load(m_all_static_surfaces.data(),
+                              static_cast<uint32_t>(m_all_static_surfaces.size()));
+    m_loaded_surface_count = static_cast<int>(m_all_static_surfaces.size());
+    m_stream_loaded = true;
+    m_stream_loaded_count = m_loaded_surface_count;
+  }
+
   lg::info(
-      "[libsm64] Loaded {} collision surfaces from level geometry ({} noentity skipped, {} burning)",
-      surfaces.size(), skipped_noentity, burning_tris);
+      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} burning, streaming={})",
+      m_all_static_surfaces.size(), skipped_noentity, burning_tris, collision_streaming);
 }
 
 bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,

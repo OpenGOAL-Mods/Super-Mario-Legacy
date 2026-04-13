@@ -177,7 +177,7 @@
                     (cond
                       (continue-point-override (empty) continue-point-override)
                       ((!= *kernel-boot-message* 'play) "demo-start")
-                      (*debug-segment* "village1-hut")
+                      (*debug-segment* "swamp-start")
                       (else "title-start")))
      (set! (-> this auto-save-count) 0)
      (set! (-> *setting-control* default auto-save) #f)

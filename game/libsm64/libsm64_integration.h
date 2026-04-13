@@ -138,8 +138,11 @@ struct MarioInputState {
   bool button_z = false;
 };
 
-// Free function registered via make_function_symbol_from_c so GOAL can call it.
+// Free functions registered via make_function_symbol_from_c so GOAL can call them.
 u64 pc_sm64_damage_mario();
+u64 pc_sm64_delete_mario();
+u64 pc_sm64_heal_mario();
+u64 pc_sm64_full_heal_mario();
 
 class LibSM64Manager {
  public:
@@ -241,6 +244,8 @@ class LibSM64Manager {
   // Called from GOAL (via make_function_symbol_from_c "pc-sm64-damage-mario")
   // when a GOAL enemy hits Mario's body sphere.  Thread-safe — grabs m_sm64_lock.
   void damage_mario_from_goal();
+  void heal_mario_from_goal();
+  void full_heal_mario_from_goal();
 
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing

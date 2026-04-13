@@ -550,8 +550,11 @@ void InitMachine_PCPort() {
 
   make_function_symbol_from_c("pc-discord-rpc-update", (void*)update_discord_rpc);
 
-  // libsm64: GOAL → C++ damage bridge
+  // libsm64: GOAL → C++ bridges
   make_function_symbol_from_c("pc-sm64-damage-mario", (void*)sm64::pc_sm64_damage_mario);
+  make_function_symbol_from_c("pc-sm64-delete-mario", (void*)sm64::pc_sm64_delete_mario);
+  make_function_symbol_from_c("pc-sm64-heal-mario", (void*)sm64::pc_sm64_heal_mario);
+  make_function_symbol_from_c("pc-sm64-full-heal-mario", (void*)sm64::pc_sm64_full_heal_mario);
 
   // setup string constants
   // TODO - these may be able to be moved into `init_common_pc_port_functions` but it's trickier

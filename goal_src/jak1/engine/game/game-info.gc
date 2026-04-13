@@ -375,7 +375,8 @@
     (set! (-> this buzzer) 0.0))
   (when (or (not arg0) (= arg0 'eco-pill))
     (set! (-> this eco-pill-max) (-> *FACT-bank* eco-pill-max-default))
-    (set! (-> this eco-pill) 0.0))
+    ;; sm64 mod: spawn with full green eco bar
+    (set! (-> this eco-pill) (-> *FACT-bank* eco-pill-max-default)))
   (none))
 
 (declare-type vent process-drawable)

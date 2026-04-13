@@ -1113,10 +1113,14 @@ void OpenGLRenderer::tick_mario_sm64() {
   mgr.tick(input);
   auto t9 = Clock::now();
 
-  // 6. Jak position sync
+  // 6. Jak position sync (skip when Mario is dead so Jak can respawn normally)
   auto t10 = Clock::now();
   if (mgr.follow_mario && !launcher_active) {
-    mgr.sync_jak_to_mario(g_ee_main_mem, 0);
+    auto cur_state = mgr.get_state();
+    uint32_t wedges = (static_cast<uint16_t>(cur_state.health) >> 8) & 0xF;
+    if (wedges > 0) {
+      mgr.sync_jak_to_mario(g_ee_main_mem, 0);
+    }
   }
   // Write Mario's pos/angle/attacking to GOAL bridge symbols.
   mgr.write_mario_bridge_data(g_ee_main_mem);

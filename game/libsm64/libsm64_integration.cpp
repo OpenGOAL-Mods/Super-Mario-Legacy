@@ -1770,6 +1770,18 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
+  // ---- *sm64-mario-health*: x = wedge count (0.0–8.0, integer steps) ----
+  auto health_sym = jak1::intern_from_c("*sm64-mario-health*");
+  if (health_sym.offset != 0) {
+    u32 health_ptr = health_sym->value;
+    if (health_ptr != 0 && health_ptr != false_val && health_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      // SM64 health: 0xHHSS — high byte low nibble = wedge count.
+      float wedges = static_cast<float>((static_cast<uint16_t>(state.health) >> 8) & 0xF);
+      float health_data[4] = {wedges, 0.0f, 0.0f, 0.0f};
+      std::memcpy(ee_mem + health_ptr, health_data, 16);
+    }
+  }
+
   // ---- *sm64-mario-hit*: read x, if > 0.5 Mario was struck by Jak, clear it ----
   auto hit_sym = jak1::intern_from_c("*sm64-mario-hit*");
   if (hit_sym.offset != 0) {
@@ -1802,12 +1814,50 @@ void LibSM64Manager::damage_mario_from_goal() {
   float sm64_z = front_z * JAK_TO_SM64_SCALE;
   {
     std::scoped_lock lock(m_sm64_lock);
-    sm64_mario_take_damage(m_mario_id, 1, 0, sm64_x, sm64_y, sm64_z);
+    sm64_mario_take_damage(m_mario_id, 2, 0, sm64_x, sm64_y, sm64_z);
   }
 }
 
 u64 pc_sm64_damage_mario() {
   LibSM64Manager::instance().damage_mario_from_goal();
+  return 0;
+}
+
+void LibSM64Manager::heal_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  auto state = get_state();
+  uint16_t current = static_cast<uint16_t>(state.health);
+  uint16_t new_health = std::min<uint16_t>(current + 0x0200, 0x0880);
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_health(m_mario_id, new_health);
+  }
+}
+
+void LibSM64Manager::full_heal_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_health(m_mario_id, 0x0880);
+  }
+}
+
+u64 pc_sm64_heal_mario() {
+  LibSM64Manager::instance().heal_mario_from_goal();
+  return 0;
+}
+
+u64 pc_sm64_full_heal_mario() {
+  LibSM64Manager::instance().full_heal_mario_from_goal();
+  return 0;
+}
+
+u64 pc_sm64_delete_mario() {
+  auto& mgr = LibSM64Manager::instance();
+  if (mgr.has_mario()) {
+    lg::info("[libsm64] Mario deleted from GOAL (death chain)");
+    mgr.delete_mario(mgr.get_mario_id());
+  }
   return 0;
 }
 

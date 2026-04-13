@@ -13,6 +13,9 @@
 ;; C++ damage function — registered via make_function_symbol_from_c in kmachine.
 ;; ---------------------------------------------------------------------------
 (define-extern pc-sm64-damage-mario (function none))
+(define-extern pc-sm64-delete-mario (function none))
+(define-extern pc-sm64-heal-mario (function none))
+(define-extern pc-sm64-full-heal-mario (function none))
 
 ;; ---------------------------------------------------------------------------
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.
@@ -24,6 +27,9 @@
 
 ;; C++ writes: x = punching/kicking (not dive/gp), y = ground-pound impact, z = ground-pound falling, w = diving.
 (define *sm64-mario-info* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = health wedges (0.0–8.0).
+(define *sm64-mario-health* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
 (define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
@@ -53,7 +59,10 @@
 (deftype sm64-mario-col (process-drawable)
   ((prev-attacking    symbol)
    (prev-ground-pound symbol)
-   (prev-diving       symbol))
+   (prev-diving       symbol)
+   (mario-dead        symbol)
+   (death-timer       int)
+   (prev-jak-health   float))
   (:state-methods
     idle))
 
@@ -86,7 +95,49 @@
     (set! (-> self prev-attacking) #f)
     (set! (-> self prev-ground-pound) #f)
     (set! (-> self prev-diving) #f)
+    ;; Start as #t so the initial health=0.0 (before C++ writes) doesn't
+    ;; false-trigger the death chain.  Clears to #f once C++ reports health > 0.
+    (set! (-> self mario-dead) #t)
+    (set! (-> self death-timer) 0)
+    (set! (-> self prev-jak-health) 0.0)
     (loop
+      ;; ---- Mario death → kill Jak, wait for respawn, THEN despawn Mario ----
+      (let ((dead (< (-> *sm64-mario-health* x) 0.5)))
+        ;; Rising edge: Mario just died — kill Jak, start waiting
+        (when (and dead (not (-> self mario-dead)))
+          (format #t "[sm64] Mario died! Killing Jak...~%")
+          (send-event *target* 'attack-invinc #f (static-attack-info ((mode 'endlessfall))))
+          (set! (-> self death-timer) 1))
+        (set! (-> self mario-dead) dead))
+
+      ;; While waiting, count frames then delete Mario once Jak has respawned
+      (when (> (-> self death-timer) 0)
+        (+! (-> self death-timer) 1)
+        (when (or
+                ;; After min delay, Jak is alive and no longer dying → respawned
+                (and (> (-> self death-timer) 90)
+                     *target*
+                     (not (logtest? (-> *target* state-flags) (state-flags dying))))
+                ;; Safety cap: force delete after ~20 seconds
+                (> (-> self death-timer) 600))
+          (format #t "[sm64] Jak respawned — deleting Mario for fresh spawn.~%")
+          (pc-sm64-delete-mario)
+          (set! (-> self death-timer) 0)))
+
+      ;; ---- Sync health: heal Mario when Jak heals ----
+      (when (and *target* (not (-> self mario-dead)))
+        (let ((jak-hp (-> *target* fact health))
+              (jak-max (-> *target* fact health-max)))
+          (when (> jak-hp (-> self prev-jak-health))
+            (if (>= jak-hp jak-max)
+              ;; Full health (respawn, checkpoint, etc.) → fully heal Mario
+              (pc-sm64-full-heal-mario)
+              ;; Partial heal (green eco) → heal Mario 2 wedges per 1 HP
+              (let ((times (the int (+ (- jak-hp (-> self prev-jak-health)) 0.5))))
+                (dotimes (i times)
+                  (pc-sm64-heal-mario)))))
+          (set! (-> self prev-jak-health) jak-hp)))
+
       ;; ---- Track Mario's position ----
       (set! (-> self root trans x) (-> *sm64-mario-pos* x))
       (set! (-> self root trans y) (-> *sm64-mario-pos* y))
@@ -128,7 +179,7 @@
               (-> *sm64-mario-pos* y)
               (-> *sm64-mario-pos* z)
               1.0)
-            (sm64-spawn-attack-tracker self feet-pos (meters 2.5) 10 'flop)))
+            (sm64-spawn-attack-tracker self feet-pos (meters 1.0) 10 'flop)))
         (set! (-> self prev-ground-pound) gp-impact))
 
       ;; ---- Dive touch-tracker on rising edge ----
@@ -200,6 +251,9 @@
   (set! (-> self prev-attacking) #f)
   (set! (-> self prev-ground-pound) #f)
   (set! (-> self prev-diving) #f)
+  (set! (-> self mario-dead) #t)
+  (set! (-> self death-timer) 0)
+  (set! (-> self prev-jak-health) 0.0)
   (go-virtual idle))
 
 (defun sm64-mario-col-start ()

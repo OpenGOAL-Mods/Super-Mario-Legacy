@@ -41,8 +41,8 @@ static constexpr int TEXTURE_HEIGHT = 64;
 // Mario is ~160 SM64 units tall (~1.55m real), so 1 SM64 unit ~ 0.0097m ~ 39.7 Jak units.
 // Original estimate: 1 Jak meter = 43 SM64 units. Combined with 4096 units/meter:
 //   1 Jak unit = 43/4096 SM64 units, 1 SM64 unit = 4096/43 Jak units.
-static constexpr float SM64_TO_JAK_SCALE = 4096.0f / 43.0f;   // ~95.26
-static constexpr float JAK_TO_SM64_SCALE = 43.0f / 4096.0f;   // ~0.0105
+static constexpr float SM64_TO_JAK_SCALE = 4096.0f / 50.0f;   // ~95.26
+static constexpr float JAK_TO_SM64_SCALE = 50.0f / 4096.0f;   // ~0.0105
 
 struct MarioGeometry {
   std::vector<float> position;   // 3 floats per vertex, 3 verts per tri

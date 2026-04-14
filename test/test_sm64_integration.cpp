@@ -936,7 +936,7 @@ TEST_F(SM64GroundPoundHitboxTest, ActorTouchingTopEdgeHits) {
 TEST_F(SM64GroundPoundHitboxTest, JakUnitMarioHitboxMatchesSm64) {
   // Sanity-check the actual Mario constants. SM64: r=37, h=160 SM64u.
   // Jak units: SM64_TO_JAK_SCALE = 4096/43 ≈ 95.26.
-  constexpr float SM64_TO_JAK = 4096.0f / 43.0f;
+  constexpr float SM64_TO_JAK = 4096.0f / 50.0f;
   float r_jak = 37.0f * SM64_TO_JAK;    // ~3525
   float h_jak = 160.0f * SM64_TO_JAK;   // ~15244
   auto hb = make_hitbox(0, 0, 0, r_jak, h_jak);

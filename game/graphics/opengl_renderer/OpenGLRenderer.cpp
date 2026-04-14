@@ -1090,7 +1090,7 @@ void OpenGLRenderer::tick_mario_sm64() {
         auto [lx, ly] = pad.analog_left();
         input.stick_x = (static_cast<float>(lx) - 127.0f) / 127.0f;
         input.stick_y = (static_cast<float>(ly) - 127.0f) / 127.0f;
-        constexpr float DEADZONE = 0.15f;
+        constexpr float DEADZONE = 0.3f;
         if (std::abs(input.stick_x) < DEADZONE) input.stick_x = 0.0f;
         if (std::abs(input.stick_y) < DEADZONE) input.stick_y = 0.0f;
         input.button_a = pad.cross().first;

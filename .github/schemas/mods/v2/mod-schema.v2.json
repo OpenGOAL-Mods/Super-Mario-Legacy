@@ -8,7 +8,7 @@
         "publishedDate": { "type": "string" },
         "schemaVersion": {
           "description": "Semantic Version",
-          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(...))?(?:\\+(...))?$",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(...))?(?:\\+(...))?",
           "type": "string"
         },
         "supportedGames": {
@@ -20,7 +20,7 @@
         },
         "version": {
           "description": "Semantic Version",
-          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(...))?(?:\\+(...))?$",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(...))?(?:\\+(...))?",
           "type": "string"
         }
       },

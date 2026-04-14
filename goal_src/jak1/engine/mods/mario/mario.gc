@@ -281,6 +281,20 @@
                       (not (time-elapsed? (-> self state-time) (-> self duration))))))))))
         (set! (-> self prev-on-shell) on-shell))
 
+      ;; ---- L3 button: put Mario on shell anywhere ----
+      ;; When player presses L3 (left stick click), mount Mario on the shell
+      ;; only in levels that have a racer (misty, rolling, lavatube, firecanyon, ogre).
+      (when (cpad-pressed? 0 l3)
+        (let ((cur-level (level-get-target-inside *level*)))
+          (when (and cur-level
+                     (or (= (-> cur-level name) 'misty)
+                         (= (-> cur-level name) 'rolling)
+                         (= (-> cur-level name) 'lavatube)
+                         (= (-> cur-level name) 'firecanyon)
+                         (= (-> cur-level name) 'ogre)))
+            (set! *sm64-skip-zoomer* #t)
+            (set! *sm64-zoomer-requested* #t))))
+
       ;; ---- Debug draw ----
       ;; keep this
     ;;   (when *debug-segment*

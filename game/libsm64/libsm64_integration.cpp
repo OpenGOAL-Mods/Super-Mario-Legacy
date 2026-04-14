@@ -26,7 +26,6 @@
 
 extern "C" {
 #include "libsm64.h"
-#include "decomp/include/sm64.h"
 #include "decomp/tools/libmio0.h"
 }
 
@@ -2086,7 +2085,7 @@ void LibSM64Manager::debug_glue_mario_to_jak(u8* ee_mem) {
     sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
     sm64_set_mario_velocity(m_mario_id, 0.0f, 0.0f, 0.0f);
     sm64_set_mario_forward_velocity(m_mario_id, 0.0f);
-    sm64_set_mario_action(m_mario_id, ACT_FREEFALL);
+    sm64_set_mario_action(m_mario_id, 0x0100088C);  // ACT_FREEFALL
     sm64_set_mario_faceangle(m_mario_id, jak_yaw);
   }
 }

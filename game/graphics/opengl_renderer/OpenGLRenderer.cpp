@@ -1064,7 +1064,10 @@ void OpenGLRenderer::tick_mario_sm64() {
   tick_counter++;
   if (tick_counter % 2 != 0) return;
 
-  // 1b. Read target state flags (grabbed / periscope)
+  // 1b. Check if the game is paused — don't tick Mario if Jak's game is paused
+  if (mgr.is_game_paused(g_ee_main_mem)) return;
+
+  // 1c. Read target state flags (grabbed / periscope)
   mgr.read_target_flags(g_ee_main_mem);
 
   // 2. Input gathering

@@ -220,6 +220,10 @@ class LibSM64Manager {
   // or the water-sync toggle is off.
   void update_mario_water(u8* ee_mem);
 
+  // Check if the Jak game is paused by reading *master-mode* from GOAL memory.
+  // Returns true if master-mode is 'pause'.
+  bool is_game_paused(u8* ee_mem);
+
   // Write Mario's position into a target process's root->trans in EE memory.
   // Returns true if the write succeeded. Exposed for testing.
   static bool write_mario_pos_to_target(u8* ee_mem,

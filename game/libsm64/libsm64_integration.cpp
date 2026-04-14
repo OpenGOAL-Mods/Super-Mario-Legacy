@@ -2056,6 +2056,26 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   target_clone_anim = data[2] > 0.5f;
 }
 
+bool LibSM64Manager::is_game_paused(u8* ee_mem) {
+  if (!ee_mem) return false;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  // Get *master-mode* symbol (contains current game state mode)
+  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
+  if (master_mode_sym.offset == 0) return false;
+  u32 master_mode_ptr = master_mode_sym->value;
+  if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
+
+  // Get the game mode symbol to compare against (normal gameplay)
+  auto game_sym = jak1::intern_from_c("game");
+  if (game_sym.offset == 0) return false;
+  u32 game_ptr = game_sym.offset;
+
+  // Mario should freeze when NOT in 'game mode (pause, menu, freeze, progress, etc.)
+  return master_mode_ptr != game_ptr;
+}
+
 void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
   if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
   math::Vector3f jak_pos;

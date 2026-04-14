@@ -76,6 +76,7 @@ jobs:
       metadataSupportedGames: ${{ needs.prep_vars.outputs.supported_games }}
       buildBinaries: ${{ inputs.binary_source == 'build_binaries'}}
       toolingRepo: ${{ needs.prep_vars.outputs.tooling_repo }}
+      releaseBranches: "master,main,VZero"
       skipMacOS: true
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}

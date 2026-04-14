@@ -144,6 +144,9 @@ u64 pc_sm64_delete_mario();
 u64 pc_sm64_heal_mario();
 u64 pc_sm64_full_heal_mario();
 u64 pc_sm64_star_dance_mario();
+u64 pc_sm64_play_sound(u64 sound_bits);
+u64 pc_sm64_play_music(u64 seq_id);
+u64 pc_sm64_stop_music();
 
 class LibSM64Manager {
  public:
@@ -248,9 +251,15 @@ class LibSM64Manager {
   void heal_mario_from_goal();
   void full_heal_mario_from_goal();
   void star_dance_mario_from_goal();
+  void play_sound_from_goal(int32_t sound_bits);
+  void play_music_from_goal(uint8_t seq_id);
+  void stop_music_from_goal();
 
   // Teleport Mario to Jak's current position/rotation (used during cutscenes).
   void teleport_mario_to_jak(u8* ee_mem);
+  // Debug: glue Mario to Jak's position, zeroing velocity and forcing freefall
+  // so SM64 physics don't snap him back to the ground.
+  void debug_glue_mario_to_jak(u8* ee_mem);
   // Read *sm64-target-flags* bridge vector and update public flags below.
   void read_target_flags(u8* ee_mem);
 

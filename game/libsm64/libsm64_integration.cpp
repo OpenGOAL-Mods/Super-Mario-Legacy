@@ -22,8 +22,11 @@
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kscheme.h"
 
+#include "third-party/libtinyfiledialogs/tinyfiledialogs.h"
+
 extern "C" {
 #include "libsm64.h"
+#include "decomp/include/sm64.h"
 #include "decomp/tools/libmio0.h"
 }
 
@@ -173,7 +176,43 @@ bool LibSM64Manager::init_autodetect() {
 
   if (picked.empty()) {
     lg::warn("[libsm64] Auto-detect: no matching .z64 found next to gk or in iso_data/mario");
-    return false;
+
+    // Prompt the user to pick a .z64 ROM file
+    char const* filter_patterns[] = {"*.z64", "*.Z64"};
+    char const* selection = tinyfd_openFileDialog(
+        "Select SM64 US ROM (.z64)", "", 2, filter_patterns, "SM64 ROM files (*.z64)", 0);
+    if (!selection) {
+      lg::warn("[libsm64] User cancelled ROM file selection");
+      return false;
+    }
+
+    fs::path selected_rom(selection);
+    std::error_code ec;
+    auto sz = fs::file_size(selected_rom, ec);
+    if (ec || sz != kExpectedSm64RomSize) {
+      lg::error("[libsm64] Selected ROM has wrong size ({} bytes, expected {})",
+                ec ? 0 : static_cast<size_t>(sz), static_cast<size_t>(kExpectedSm64RomSize));
+      return false;
+    }
+
+    // Copy the ROM to iso_data/mario/ so future launches find it automatically
+    try {
+      fs::path proj = file_util::get_jak_project_dir();
+      fs::path dest_dir = proj / "iso_data" / "mario";
+      fs::create_directories(dest_dir, ec);
+      fs::path dest = dest_dir / selected_rom.filename();
+      fs::copy_file(selected_rom, dest, fs::copy_options::overwrite_existing, ec);
+      if (ec) {
+        lg::warn("[libsm64] Could not copy ROM to {}: {}", dest.string(), ec.message());
+        // Still try to init from the original location
+        return init(selected_rom.string());
+      }
+      lg::info("[libsm64] Copied ROM to {}", dest.string());
+      picked = dest;
+    } catch (...) {
+      // If copy fails, just use the ROM from where the user picked it
+      return init(selected_rom.string());
+    }
   }
   lg::info("[libsm64] Auto-detected ROM: {}", picked.string());
   return init(picked.string());
@@ -1909,6 +1948,47 @@ u64 pc_sm64_star_dance_mario() {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// GOAL-callable sound player: registered as "pc-sm64-play-sound".
+// Takes a 32-bit SM64 sound-bits value and plays it globally.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::play_sound_from_goal(int32_t sound_bits) {
+  if (!m_initialized) return;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_play_sound_global(sound_bits);
+}
+
+u64 pc_sm64_play_sound(u64 sound_bits) {
+  LibSM64Manager::instance().play_sound_from_goal(static_cast<int32_t>(sound_bits));
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// GOAL-callable music player: registered as "pc-sm64-play-music".
+// Takes a sequence ID and plays it on player 0 with no fade.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::play_music_from_goal(uint8_t seq_id) {
+  if (!m_initialized) return;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_play_music(0, seq_id, 0);
+}
+
+void LibSM64Manager::stop_music_from_goal() {
+  if (!m_initialized) return;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_stop_background_music(sm64_get_current_background_music());
+}
+
+u64 pc_sm64_play_music(u64 seq_id) {
+  LibSM64Manager::instance().play_music_from_goal(static_cast<uint8_t>(seq_id));
+  return 0;
+}
+
+u64 pc_sm64_stop_music() {
+  LibSM64Manager::instance().stop_music_from_goal();
+  return 0;
+}
+
 bool LibSM64Manager::read_target_transform(u8* ee_mem,
                                            math::Vector3f* out_pos,
                                            float* out_yaw_rad) {
@@ -1988,6 +2068,25 @@ void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
   {
     std::scoped_lock lock(m_sm64_lock);
     sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
+    sm64_set_mario_faceangle(m_mario_id, jak_yaw);
+  }
+}
+
+void LibSM64Manager::debug_glue_mario_to_jak(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
+  math::Vector3f jak_pos;
+  float jak_yaw;
+  if (!read_target_transform(ee_mem, &jak_pos, &jak_yaw)) return;
+
+  float sm64_x = jak_pos.x() * JAK_TO_SM64_SCALE;
+  float sm64_y = jak_pos.y() * JAK_TO_SM64_SCALE;
+  float sm64_z = jak_pos.z() * JAK_TO_SM64_SCALE;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
+    sm64_set_mario_velocity(m_mario_id, 0.0f, 0.0f, 0.0f);
+    sm64_set_mario_forward_velocity(m_mario_id, 0.0f);
+    sm64_set_mario_action(m_mario_id, ACT_FREEFALL);
     sm64_set_mario_faceangle(m_mario_id, jak_yaw);
   }
 }

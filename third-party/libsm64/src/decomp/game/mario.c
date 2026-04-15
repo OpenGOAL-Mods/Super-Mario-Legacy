@@ -1371,9 +1371,9 @@ void update_mario_geometry_inputs(struct MarioState *m) {
             m->input |= INPUT_IN_WATER;
         }
 
-        if (m->pos[1] < (m->gasLevel - 100.0f)) {
-            m->input |= INPUT_IN_POISON_GAS;
-        }
+        // if (m->pos[1] < (m->gasLevel - 100.0f)) {
+        //     m->input |= INPUT_IN_POISON_GAS;
+        // }
 
     } else {
         level_trigger_warp(m, WARP_OP_DEATH);

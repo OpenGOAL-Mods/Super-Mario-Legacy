@@ -272,7 +272,7 @@
                 (+ (-> *sm64-mario-pos* y) (meters 0.5))
                 (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
                 1.0)
-              (let ((tracker (sm64-spawn-attack-tracker self shell-pos (meters 1.6) 8 'racer)))
+              (let ((tracker (sm64-spawn-attack-tracker self shell-pos (meters 3.0) 8 'racer))) ;; if this is TOO LOW, mario bonks on crates and loses shell when going fast
                 (when tracker
                   ;; Track ahead of Mario as he moves
                   (send-event (ppointer->process tracker) 'function

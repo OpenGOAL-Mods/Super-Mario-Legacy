@@ -676,7 +676,9 @@
        (send-event (-> obj process) 'attack #f (static-attack-info ((mode 'deadly) (shove-up (meters 3))))))
       (((pat-event burn))
        ;; burn. Send a burn event
-       (send-event (-> obj process) 'attack #f (static-attack-info ((mode 'burn) (shove-up (meters 3))))))
+       ;; only send if we don't have racer (on shell/zoomer) — blocks hot ground burns when riding shell
+       (if (zero? (logand (-> (the-as target (-> obj process)) control root-prim prim-core action) (collide-action racer)))
+         (send-event (-> obj process) 'attack #f (static-attack-info ((mode 'burn) (shove-up (meters 3)))))))
       (((pat-event deadlyup))
        ;; deadlyup. Launch!
        (target-attack-up (the-as target (-> obj process)) 'attack-or-shove 'deadlyup))

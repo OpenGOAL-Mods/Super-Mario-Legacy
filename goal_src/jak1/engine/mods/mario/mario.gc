@@ -20,6 +20,7 @@
 (define-extern pc-sm64-play-sound (function int none))
 (define-extern pc-sm64-play-music (function int none))
 (define-extern pc-sm64-stop-music (function none))
+(define-extern pc-sm64-teleport-mario (function float float float none))
 
 ;; ---------------------------------------------------------------------------
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.

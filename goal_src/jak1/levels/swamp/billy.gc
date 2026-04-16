@@ -3,6 +3,7 @@
 (bundles "SWA.DGO")
 (require "levels/swamp/swamp-rat.gc")
 (declare-type billy-snack process-drawable)
+(define-extern pc-sm64-teleport-mario (function float float float none))
 
 ;; DECOMP BEGINS
 
@@ -607,6 +608,9 @@
                      (set! (-> gp-0 destination x) (+ 6799.36 (-> gp-0 destination x)))))))))))))
   :enter
     (behavior ()
+      (let ((v1-0 (entity-actor-lookup (-> self entity) 'alt-actor 0)))
+        (when v1-0
+          (pc-sm64-teleport-mario (the float (-> v1-0 extra trans x)) (the float (-> v1-0 extra trans y)) (the float (-> v1-0 extra trans z)))))
       (add-setting! 'music 'danger 0.0 0)
       (ja-channel-set! 0)
       (clear-collide-with-as (-> self root))

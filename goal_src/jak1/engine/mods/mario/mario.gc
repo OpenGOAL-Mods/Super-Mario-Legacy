@@ -152,7 +152,12 @@
               (set! clone-anim (= (-> st name) 'target-clone-anim)))))
         (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
         (set! (-> *sm64-target-flags* y) (if periscope 1.0 0.0))
-        (set! (-> *sm64-target-flags* z) (if clone-anim 1.0 0.0)))
+        (set! (-> *sm64-target-flags* z) (if clone-anim 1.0 0.0))
+        
+        ;; During target-clone-anim (fuel-cell pickups): teleport Mario to Jak's position
+        (when (and *target* (= (-> (-> *target* state) name) 'target-clone-anim))
+          (let ((jak-pos (-> *target* control trans)))
+            (pc-sm64-teleport-mario (-> jak-pos x) (-> jak-pos y) (-> jak-pos z)))))
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))

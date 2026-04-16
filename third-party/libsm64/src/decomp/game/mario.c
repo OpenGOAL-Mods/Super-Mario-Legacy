@@ -590,15 +590,15 @@ u32 mario_floor_is_slippery(struct MarioState *m) {
 
     switch (mario_get_floor_class(m)) {
         case SURFACE_VERY_SLIPPERY:
-            normY = 0.9848077f; //~cos(10 deg)
+            normY = 0.85f;
             break;
 
         case SURFACE_SLIPPERY:
-            normY = 0.9396926f; //~cos(20 deg)
+            normY = 0.25f; 
             break;
 
         default:
-            normY = 0.7880108f; //~cos(38 deg)
+            normY = 0.7f; 
             break;
 
         case SURFACE_NOT_SLIPPERY:

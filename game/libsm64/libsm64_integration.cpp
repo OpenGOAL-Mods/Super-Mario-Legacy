@@ -1609,6 +1609,20 @@ void LibSM64Manager::load_level_collision(
   // SM64 bumps him into ACT_BURNING_JUMP / ACT_BURNING_FALL. See
   // third-party/libsm64/src/decomp/include/surface_terrains.h:6.
   constexpr int16_t SURFACE_BURNING_TYPE = 0x0001;
+  constexpr int16_t SURFACE_VERY_SLIPPERY = 0x0013;
+  constexpr int16_t SURFACE_SLIPPERY = 0x0014;
+  constexpr int16_t SURFACE_NOT_SLIPPERY = 0x0015;
+
+  constexpr int16_t TERRAIN_GROUND = 0x0001;  // TERRAIN_STONE
+  constexpr int16_t TERRAIN_WALL = 0x0006;    // TERRAIN_SLIDE (very slippery)
+
+  // Jak pat mode bits (see pat-h.gc):
+  // bits 3-5 = mode (3 bits)
+  constexpr uint32_t PAT_MODE_SHIFT = 3;
+  constexpr uint32_t PAT_MODE_MASK = 0x7;
+  constexpr uint32_t PAT_MODE_WALL = 1;
+  constexpr uint32_t PAT_MODE_GROUND = 0;
+  constexpr uint32_t PAT_MODE_OBSTACLE = 2;
 
   size_t num_tris = vertices.size() / 3;
   std::vector<SM64Surface> surfaces;
@@ -1626,15 +1640,55 @@ void LibSM64Manager::load_level_collision(
 
     SM64Surface surf;
     const uint32_t material = (v0.pat >> PAT_MATERIAL_SHIFT) & PAT_MATERIAL_MASK;
+
+    // Extract pat mode from v0.pat
+    uint32_t pat_mode = (v0.pat >> PAT_MODE_SHIFT) & PAT_MODE_MASK;
+
     if (material == PAT_MAT_HOTCOALS || material == PAT_MAT_LAVA) {
       // Hot surface — SM64 will launch Mario with the butt-on-fire action.
       surf.type = SURFACE_BURNING_TYPE;
       burning_tris++;
+    } else if (pat_mode == PAT_MODE_WALL) {
+      surf.type = SURFACE_VERY_SLIPPERY;
+    } else if (pat_mode == PAT_MODE_GROUND) {
+      surf.type = SURFACE_NOT_SLIPPERY;
+    } else if (pat_mode == PAT_MODE_OBSTACLE) {
+      surf.type = SURFACE_SLIPPERY;
     } else {
-      surf.type = 0x0000;    // SURFACE_DEFAULT
+      surf.type = 0x0000; // fallback to SURFACE_DEFAULT
     }
     surf.force = 0;
-    surf.terrain = 0x0001;  // TERRAIN_STONE
+
+    // Extract vertex positions in Jak coordinates.
+    const auto& v1 = vertices[i * 3 + 1];
+    const auto& v2 = vertices[i * 3 + 2];
+
+    // Compute triangle normal using cross product: (v1 - v0) x (v2 - v0)
+    float dx1 = v1.x - v0.x;
+    float dy1 = v1.y - v0.y;
+    float dz1 = v1.z - v0.z;
+    float dx2 = v2.x - v0.x;
+    float dy2 = v2.y - v0.y;
+    float dz2 = v2.z - v0.z;
+
+    float nx = (dy1 * dz2) - (dz1 * dy2);
+    float ny = (dz1 * dx2) - (dx1 * dz2);
+    float nz = (dx1 * dy2) - (dy1 * dx2);
+
+    // Normalize to get unit normal.
+    float mag = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (mag > 0.0001f) {
+      nx /= mag;
+      ny /= mag;
+      nz /= mag;
+    }
+
+    // Set terrain for wall/ground for friction
+    if (pat_mode == PAT_MODE_WALL) {
+      surf.terrain = TERRAIN_WALL;
+    } else {
+      surf.terrain = TERRAIN_GROUND;
+    }
 
     for (int v = 0; v < 3; v++) {
       const auto& vert = vertices[i * 3 + v];

@@ -147,6 +147,7 @@ u64 pc_sm64_star_dance_mario();
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_stop_music();
+u64 pc_sm64_teleport_mario(u32 x, u32 y, u32 z);
 
 class LibSM64Manager {
  public:
@@ -258,6 +259,7 @@ class LibSM64Manager {
   void play_sound_from_goal(int32_t sound_bits);
   void play_music_from_goal(uint8_t seq_id);
   void stop_music_from_goal();
+  void teleport_mario_from_goal(float x, float y, float z);
 
   // Teleport Mario to Jak's current position/rotation (used during cutscenes).
   void teleport_mario_to_jak(u8* ee_mem);

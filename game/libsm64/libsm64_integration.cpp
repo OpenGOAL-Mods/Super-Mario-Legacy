@@ -1988,6 +1988,31 @@ u64 pc_sm64_stop_music() {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// GOAL-callable teleport: registered as "pc-sm64-teleport-mario".
+// Takes x, y, z as GOAL floats (Jak units) packed into u32, converts to SM64
+// scale, and calls sm64_set_mario_position.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::teleport_mario_from_goal(float x, float y, float z) {
+  if (!m_initialized || m_mario_id < 0) return;
+  float sm64_x = x * JAK_TO_SM64_SCALE;
+  float sm64_y = y * JAK_TO_SM64_SCALE;
+  float sm64_z = z * JAK_TO_SM64_SCALE;
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
+  }
+}
+
+u64 pc_sm64_teleport_mario(u32 x_bits, u32 y_bits, u32 z_bits) {
+  float x, y, z;
+  memcpy(&x, &x_bits, 4);
+  memcpy(&y, &y_bits, 4);
+  memcpy(&z, &z_bits, 4);
+  LibSM64Manager::instance().teleport_mario_from_goal(x, y, z);
+  return 0;
+}
+
 bool LibSM64Manager::read_target_transform(u8* ee_mem,
                                            math::Vector3f* out_pos,
                                            float* out_yaw_rad) {

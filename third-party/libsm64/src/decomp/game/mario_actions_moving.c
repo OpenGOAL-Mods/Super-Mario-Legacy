@@ -1239,7 +1239,8 @@ s32 act_riding_shell_ground(struct MarioState *m) {
 
     tilt_body_ground_shell(m, startYaw);
     if (m->floor->type == SURFACE_BURNING) {
-        play_sound(SOUND_MOVING_RIDING_SHELL_LAVA, m->marioObj->header.gfx.cameraToObject);
+        // Disabled - this lava sound loops repeatedly and becomes extremely loud
+        // play_sound(SOUND_MOVING_RIDING_SHELL_LAVA, m->marioObj->header.gfx.cameraToObject);
     } else {
         play_sound(SOUND_MOVING_TERRAIN_RIDING_SHELL + m->terrainSoundAddend,
                    m->marioObj->header.gfx.cameraToObject);

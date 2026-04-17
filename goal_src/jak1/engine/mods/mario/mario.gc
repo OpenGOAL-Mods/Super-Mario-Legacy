@@ -84,18 +84,22 @@
 (defun sm64-spawn-attack-tracker ((parent process) (pos vector) (radius float)
                                   (dur int) (attack-mode symbol))
   "Spawn a touch-tracker at pos with given radius/duration/attack-mode.
-   Clears collide-as so Jak isn't reverse-matched."
+   Spawns :to *target* so the tracker's parent is Jak — this makes the
+   touch-tracker's event dispatch treat the attack as coming from target
+   (branch 2 in touch-tracker-idle), which matches what every enemy's
+   attack-handler expects (e.g. bully checks (= (-> arg0 type) target),
+   bonelurker queries *target*'s powerups, etc).  Without this enemies
+   silently ignore Mario's attacks because arg0 isn't target.
+   We keep the tracker's default collide-as=(target enemy) — clearing it
+   broke mutual visibility for enemies whose collide-with requires target
+   (plant-boss, bonelurker's body prims, bully).  The touch-tracker's
+   'touched handler already filters out the parent process, so Jak won't
+   reverse-match his own Mario-spawned tracker."
   (let ((tracker (process-spawn touch-tracker
                    :init touch-tracker-init
                    pos radius dur
-                   :to parent)))
+                   :to (if *target* *target* parent))))
     (when tracker
-      ;; Clear collide-as so Jak can't reverse-match us.
-      ;; Leave collide-with untouched (crate/enemy/wall-object/etc — no target).
-      (let ((tt-root (the-as collide-shape
-                       (-> (the-as process-drawable (ppointer->process tracker)) root))))
-        (set! (-> tt-root root-prim prim-core collide-as) (collide-kind))
-        (backup-collide-with-as tt-root))
       ;; Configure the event it sends on contact.
       (send-event (ppointer->process tracker) 'event 'attack attack-mode))
     tracker))

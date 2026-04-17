@@ -1335,7 +1335,7 @@
                    (send-event proc
                                (-> self event)
                                :from (the-as process v1-1)
-                               #f
+                               (-> block param 0)  ;; forward touching-shapes-entry from collision system
                                (-> self event-mode)
                                (-> *target* control unknown-dword50)
                                (-> *target* control unknown-dword51)))
@@ -1344,7 +1344,7 @@
                      (set! (-> a1-5 from) (the-as process v1-1))
                      (set! (-> a1-5 num-params) 4)
                      (set! (-> a1-5 message) (-> self event))
-                     (set! (-> a1-5 param 0) (the-as uint #f))
+                     (set! (-> a1-5 param 0) (-> block param 0))  ;; forward touching-shapes-entry from collision system
                      (set! (-> a1-5 param 1) (the-as uint (-> self event-mode)))
                      (let ((v1-19 (+ *global-attack-id* 1))) (set! *global-attack-id* v1-19) (set! (-> a1-5 param 2) (the-as uint v1-19)))
                      (set! (-> a1-5 param 3) (the-as uint 0))
@@ -1387,8 +1387,20 @@
               (if a0-6 (set! (-> self root trans quad) (-> (the-as collide-shape a0-6) root-prim prim-core world-sphere quad))))))
         (if (-> self callback) ((-> self callback) self))
         (update-transforms! (-> self root))
+        ;; overlaps-others-params reuses touching-shapes-entry's first two
+        ;; fields: cshape1 overlays `options` (uint32), cshape2 overlays
+        ;; `tlist` (touching-list).  The original value options=2 took the
+        ;; fast path in find-overlapping-shapes that writes root-prim vs
+        ;; root-prim into *touching-list* (no child recursion).  That meant
+        ;; enemies with prim-groups ended up with prim2.prim-id = 0 (the
+        ;; group's prim-id), so enemy attack-handlers that call
+        ;; prims-touching? with mask bits 1/2 (bonelurker, plant-boss,
+        ;; bully, etc.) never matched and the attack was silently dropped.
+        ;; Setting options=0 instead takes the overlaps-others-test path,
+        ;; which recurses through prim-groups and records the actual leaf
+        ;; prim (with prim-id 3/1/etc.) that overlaps the tracker.
         (let ((a1-3 (new 'stack-no-clear 'touching-shapes-entry)))
-          (set! (-> a1-3 cshape1) (the-as collide-shape 2))
+          (set! (-> a1-3 cshape1) (the-as collide-shape 0))  ;; options = 0 → recurse into children
           (set! (-> a1-3 cshape2) (the-as collide-shape *touching-list*))
           (find-overlapping-shapes (-> self root) (the-as overlaps-others-params a1-3)))
         (suspend))

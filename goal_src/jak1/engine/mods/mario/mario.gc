@@ -214,7 +214,7 @@
               (-> *sm64-mario-pos* y)
               (-> *sm64-mario-pos* z)
               1.0)
-            (sm64-spawn-attack-tracker self feet-pos (meters 1.1) 10 'flop)))
+            (sm64-spawn-attack-tracker self feet-pos (meters 1.5) 10 'flop)))
         (set! (-> self prev-ground-pound) gp-impact))
 
       ;; ---- Ground pound invincibility (falling + impact) ----

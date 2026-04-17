@@ -3219,6 +3219,13 @@ void do_sweep(WalkCtx& c) {
       if (!(action & kCollideActionSolid)) continue;
     }
 
+    // NOTE: per-prim action/flag filtering happens further down per-prim in
+    // the collect_mesh_prims loop below — we keep the root-level check here
+    // permissive so we can still walk an actor whose root is solid but whose
+    // individual children toggle solid on/off (e.g. plant-boss: alive body
+    // spheres are solid, on death those get cleared and the stem/head
+    // meshes become solid instead — both states need per-prim filtering).
+
     std::vector<CollectedPrim> prims;
     collect_mesh_prims(c.ee_mem, c.mem_size, root_prim, c.false_val, c.prim_mesh_type,
                        c.prim_group_type, c.prim_sphere_type, prims);
@@ -3252,6 +3259,25 @@ void do_sweep(WalkCtx& c) {
       // procedurally tessellated so they can't "break" in the extraction
       // sense — skip this check for them.
       if (cp.kind == CollectedPrim::Kind::Mesh && c.broken_meshes.count(mesh_ptr)) continue;
+
+      // Per-prim "solid" action check.  Within one actor's prim tree,
+      // children can flip solid on/off independently of the root — e.g.
+      // plant-boss-dead clears the body spheres (prim-id 8/16) to non-solid
+      // while simultaneously making the stem/head death-prim meshes solid.
+      // Without this filter, Mario bumped into the old body sphere that GOAL
+      // had already disabled (appearing to Mario as an invisible wall in the
+      // boss's head area) AND still physically interacted with meshes/spheres
+      // whose state is "disabled".  Skipping children that lack the solid
+      // action bit follows exactly how Jak's own physics treats them.  Pure
+      // trigger prims (offense=no-offense, action clear) with no solid bit
+      // are interaction-only — enemy hurtboxes, detection volumes, etc. —
+      // and should never be a wall for Mario.
+      {
+        constexpr uint32_t kCollideActionSolid = 1u << 0;
+        u32 prim_action = 0;
+        if (!read_u32(c.ee_mem, prim_ptr + PRIM_CORE_ACTION_OFF, c.mem_size, prim_action)) continue;
+        if (!(prim_action & kCollideActionSolid)) continue;
+      }
 
       // Key by (process-drawable, prim) so multiple prims inside one
       // prim-group that share a mesh template each get their own libsm64

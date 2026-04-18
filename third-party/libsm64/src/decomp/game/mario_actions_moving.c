@@ -362,9 +362,9 @@ void update_shell_speed(struct MarioState *m) {
     }
 
     if (m->floor != NULL && m->floor->type == SURFACE_SLOW) {
-        maxTargetSpeed = 40.0f;
+        maxTargetSpeed = 42.0f;
     } else {
-        maxTargetSpeed = 56.0f;
+        maxTargetSpeed = 60.0f;
     }
 
     targetSpeed = m->intendedMag * 2.0f;
@@ -384,8 +384,8 @@ void update_shell_speed(struct MarioState *m) {
     }
 
     //! No backward speed cap (shell hyperspeed)
-    if (m->forwardVel > 48.0f) {
-        m->forwardVel = 48.0f;
+    if (m->forwardVel > 60.0f) {
+        m->forwardVel = 60.0f;
     }
 
     m->faceAngle[1] =

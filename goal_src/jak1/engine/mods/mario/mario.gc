@@ -457,19 +457,19 @@
           ;; Restore default camera
           (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
           (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
-        ;; While on shell: spawn a touch-tracker every 5 frames with 'racer attack
+        ;; While on shell: spawn a touch-tracker every frame with 'racer attack
+        ;; 12-frame duration with per-frame spawn ensures continuous coverage at any shell speed
         (when (and on-shell *target*)
           (+! (-> self shell-tracker-timer) 1)
-          (when (zero? (mod (-> self shell-tracker-timer) 5))
-            (let ((shell-pos (new 'stack-no-clear 'vector))
-                  (yaw (-> *sm64-mario-pos* w)))
-              ;; Position slightly forward of Mario, matching racer attack sphere layout
-              (set-vector! shell-pos
-                (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
-                (+ (-> *sm64-mario-pos* y) (meters 0.5))
-                (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
-                1.0)
-              (let ((tracker (sm64-spawn-attack-tracker self shell-pos (meters 2.0) 8 'racer))) ;; if this is TOO LOW, mario bonks on crates and loses shell when going fast
+          (let ((shell-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w)))
+            ;; Position slightly forward of Mario, matching racer attack sphere layout
+            (set-vector! shell-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+              (+ (-> *sm64-mario-pos* y) (meters 0.5))
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self shell-pos (meters 1.8) 12 'racer))) ;; if this is TOO LOW, mario bonks on crates and loses shell when going fast
                 (when tracker
                   ;; Track ahead of Mario as he moves
                   (send-event (ppointer->process tracker) 'function
@@ -482,8 +482,23 @@
                         (set! (-> self root trans z)
                               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))))
                       (update-transforms! (-> self root))
-                      (not (time-elapsed? (-> self state-time) (-> self duration))))))))))
+                      (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-on-shell) on-shell))
+
+      ;; ---- L1+L3 button: put Mario on shell anywhere ----
+      ;; Hold L1 and press L3 to mount Mario on the shell
+      ;; only in levels that have a racer (misty, rolling, lavatube, firecanyon, ogre).
+      ;; Only works in debug mode.
+      (when (and *cheat-mode* (cpad-hold? 0 r1) (cpad-pressed? 0 l3))
+        (let ((cur-level (level-get-target-inside *level*)))
+          (when (and cur-level
+                     (or (= (-> cur-level name) 'misty)
+                         (= (-> cur-level name) 'rolling)
+                         (= (-> cur-level name) 'lavatube)
+                         (= (-> cur-level name) 'firecanyon)
+                         (= (-> cur-level name) 'ogre)))
+            (set! *sm64-skip-zoomer* #t)
+            (set! *sm64-zoomer-requested* #t))))
 
       ;; ---- Debug draw ----
       ;; keep this

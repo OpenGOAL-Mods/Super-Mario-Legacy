@@ -1886,6 +1886,16 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
+  // ---- *sm64-mario-velocity*: x = forward velocity (Jak units/frame) ----
+  auto vel_sym = jak1::intern_from_c("*sm64-mario-velocity*");
+  if (vel_sym.offset != 0) {
+    u32 vel_ptr = vel_sym->value;
+    if (vel_ptr != 0 && vel_ptr != false_val && vel_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      float vel_data[4] = {state.forward_velocity, 0.0f, 0.0f, 0.0f};
+      std::memcpy(ee_mem + vel_ptr, vel_data, 16);
+    }
+  }
+
   // ---- *sm64-mario-hit*: read x, if > 0.5 Mario was struck by Jak, clear it ----
   auto hit_sym = jak1::intern_from_c("*sm64-mario-hit*");
   if (hit_sym.offset != 0) {
@@ -4233,7 +4243,11 @@ void LibSM64Manager::update_shell_preserve_across_cell_grab() {
   const bool now_clone  = target_clone_anim;
   const bool prev_clone = m_prev_target_clone_anim;
 
-  if (now_clone && !prev_clone) {
+  // Only preserve Mario's state if he's actually riding a shell.
+  // ACT_FLAG_RIDING_SHELL = 0x00010000 (1 << 16)
+  const bool mario_on_shell = (m_state.action & 0x00010000) != 0;
+
+  if (now_clone && !prev_clone && mario_on_shell) {
     // Rising edge — cutscene just started.  Copy the whole MarioState
     // under the geo mutex so the restore at the falling edge has a
     // consistent snapshot.  We copy in Jak-unit form to match m_state.

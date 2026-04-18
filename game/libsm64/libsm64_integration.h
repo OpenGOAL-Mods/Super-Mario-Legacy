@@ -733,7 +733,7 @@ class LibSM64Manager {
   // physics resumes and he zips off on the shell.
   bool m_post_restore_pending_settle = false;
   int  m_post_restore_freeze_ticks = 0;
-  static constexpr int kPostCloneAnimFreezeTicks = 90;  // 3 s @ 30 Hz
+  static constexpr int kPostCloneAnimFreezeTicks = 60;  // @ 30 Hz
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

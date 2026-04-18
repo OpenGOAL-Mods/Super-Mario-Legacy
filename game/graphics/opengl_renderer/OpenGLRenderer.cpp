@@ -1059,10 +1059,41 @@ void OpenGLRenderer::tick_mario_sm64() {
     return;
   }
 
-  // SM64 runs at 30Hz — only tick every other frame at 60fps
-  static int tick_counter = 0;
-  tick_counter++;
-  if (tick_counter % 2 != 0) return;
+  // SM64 runs at 30 Hz internally.  We decouple sim rate from render rate
+  // with a wall-clock accumulator (Glenn-Fiedler-style fixed-timestep +
+  // variable render).  Every render frame we add the elapsed wall time
+  // to `accum`; when it crosses the 1/30-s threshold we run one sim tick
+  // and push the leftover fraction into Mario's interp alpha so the
+  // renderer can lerp between the previous and current tick snapshots.
+  //
+  // The accumulator is clamped to 0.25 s to cap "spiral of death" after
+  // a big hitch (debugger stop, heavy load frame) — we'd rather drop a
+  // bit of sim time than lock up running multiple ticks in a row.
+  // We only call the Mario pipeline once per render frame (not in a
+  // while-loop) to keep per-frame cost bounded.  If the accumulator is
+  // still above threshold after subtracting, the next render frame will
+  // naturally tick again.  At any sensible display rate this is enough.
+  static auto sm64_last_wall = Clock::now();
+  static double sm64_tick_accum = 0.0;
+  constexpr double kSm64Period = 1.0 / 30.0;
+  {
+    auto now = Clock::now();
+    sm64_tick_accum += std::chrono::duration<double>(now - sm64_last_wall).count();
+    sm64_last_wall = now;
+    if (sm64_tick_accum > 0.25) sm64_tick_accum = 0.25;
+  }
+  const bool should_sim_tick = (sm64_tick_accum >= kSm64Period);
+  if (should_sim_tick) sm64_tick_accum -= kSm64Period;
+  // Push alpha = "how far past the most recent sim tick we are, 0..1".
+  // After the subtract above, sm64_tick_accum is in [0, kSm64Period) for
+  // the normal case and in [kSm64Period, 0.25] if we're still behind —
+  // clamp to 1.0 in that latter case.
+  {
+    double alpha = sm64_tick_accum / kSm64Period;
+    if (alpha > 1.0) alpha = 1.0;
+    mgr.set_interp_alpha(static_cast<float>(alpha));
+  }
+  if (!should_sim_tick) return;
 
   // 1b. Check if the game is paused — don't tick Mario if Jak's game is paused.
   // update_music_pause_state MUST run on paused frames too so we actually

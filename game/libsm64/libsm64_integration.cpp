@@ -1015,6 +1015,9 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
     std::lock_guard<std::mutex> lock(m_geo_mutex);
     m_state.position = math::Vector3f(x, y, z);
   }
+  // Align the interp snapshot so the first rendered frame after create
+  // doesn't lerp Mario from wherever he was last time.
+  snap_interpolation_to_current();
 
   lg::info("[libsm64] Mario created at ({}, {}, {}) [SM64: ({}, {}, {})]",
            x, y, z, sm64_x, sm64_y, sm64_z);
@@ -1147,6 +1150,20 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   // Copy results into our managed buffers (threadsafe)
   std::lock_guard<std::mutex> lock(m_geo_mutex);
 
+  // Snapshot the previous sim-tick into *_prev BEFORE we overwrite the
+  // current buffers.  get_*_interpolated() lerps from prev → current
+  // using the render-thread's alpha (0 = just-after-tick state, 1 =
+  // just-before-next-tick).  We only really need position data for
+  // geometry interp (normals/colors/uv stay with current), but copying
+  // the whole struct keeps the two always in sync which matters when
+  // the triangle count changes (different action = different mesh).
+  m_geometry_prev.num_triangles = m_geometry.num_triangles;
+  m_geometry_prev.position = m_geometry.position;
+  m_geometry_prev.normal   = m_geometry.normal;
+  m_geometry_prev.color    = m_geometry.color;
+  m_geometry_prev.uv       = m_geometry.uv;
+  m_state_prev = m_state;
+
   m_geometry.num_triangles = sm64_geo.numTrianglesUsed;
   int num_verts = sm64_geo.numTrianglesUsed * 3;
 
@@ -1179,6 +1196,27 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   m_state.flags = sm64_state.flags;
   m_state.anim_id = sm64_state.animID;
   m_state.anim_frame = sm64_state.animFrame;
+
+  // Teleport auto-snap: if Mario moved more than ~4 m in a single 30 Hz
+  // tick the delta can't be normal locomotion — it's a warp, cutscene
+  // teleport, launcher glue position-set, respawn, etc.  Lerping across
+  // a teleport would render Mario sliding across the level for one
+  // frame, so we collapse the interpolation by copying current to prev.
+  // Explicit teleport sites also call snap_interpolation_to_current() as
+  // a belt-and-braces guarantee, but this catches the "physics teleported
+  // Mario inside sm64_mario_tick" cases (e.g. level_trigger_warp).
+  {
+    const math::Vector3f d = m_state.position - m_state_prev.position;
+    constexpr float kTeleportThresholdSq = 4.0f * 4.0f;  // 4 m squared, Jak units
+    if (d.squared_length() > kTeleportThresholdSq) {
+      m_geometry_prev.num_triangles = m_geometry.num_triangles;
+      m_geometry_prev.position = m_geometry.position;
+      m_geometry_prev.normal   = m_geometry.normal;
+      m_geometry_prev.color    = m_geometry.color;
+      m_geometry_prev.uv       = m_geometry.uv;
+      m_state_prev = m_state;
+    }
+  }
 
   // ---- Star dance timeout --------------------------------------------------
   // general_star_dance_handler is commented out in libsm64, so Mario never
@@ -2400,6 +2438,78 @@ MarioGeometry LibSM64Manager::get_geometry() {
 MarioState LibSM64Manager::get_state() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
   return m_state;
+}
+
+void LibSM64Manager::set_interp_alpha(float alpha) {
+  if (!std::isfinite(alpha)) alpha = 0.0f;
+  if (alpha < 0.0f) alpha = 0.0f;
+  if (alpha > 1.0f) alpha = 1.0f;
+  m_interp_alpha.store(alpha, std::memory_order_relaxed);
+}
+
+void LibSM64Manager::snap_interpolation_to_current() {
+  std::lock_guard<std::mutex> lock(m_geo_mutex);
+  m_geometry_prev.num_triangles = m_geometry.num_triangles;
+  m_geometry_prev.position = m_geometry.position;
+  m_geometry_prev.normal   = m_geometry.normal;
+  m_geometry_prev.color    = m_geometry.color;
+  m_geometry_prev.uv       = m_geometry.uv;
+  m_state_prev = m_state;
+}
+
+MarioGeometry LibSM64Manager::get_geometry_interpolated() {
+  std::lock_guard<std::mutex> lock(m_geo_mutex);
+  const float alpha = m_interp_alpha.load(std::memory_order_relaxed);
+  // Short-circuit: at exactly 0/1 or when prev is empty or the mesh
+  // topology changed (different triangle count = different mesh), just
+  // return the current snapshot.
+  if (alpha <= 0.0f || alpha >= 1.0f ||
+      m_geometry_prev.num_triangles == 0 ||
+      m_geometry_prev.num_triangles != m_geometry.num_triangles ||
+      m_geometry_prev.position.size() != m_geometry.position.size()) {
+    return m_geometry;
+  }
+  // Lerp position only; normals/colors/uv come straight from current.
+  MarioGeometry result;
+  result.num_triangles = m_geometry.num_triangles;
+  result.normal = m_geometry.normal;
+  result.color  = m_geometry.color;
+  result.uv     = m_geometry.uv;
+  const size_t n = m_geometry.position.size();
+  result.position.resize(n);
+  for (size_t i = 0; i < n; i++) {
+    const float a = m_geometry_prev.position[i];
+    const float b = m_geometry.position[i];
+    result.position[i] = a + alpha * (b - a);
+  }
+  return result;
+}
+
+MarioState LibSM64Manager::get_state_interpolated() {
+  std::lock_guard<std::mutex> lock(m_geo_mutex);
+  const float alpha = m_interp_alpha.load(std::memory_order_relaxed);
+  if (alpha <= 0.0f || alpha >= 1.0f) {
+    return m_state;
+  }
+  MarioState result = m_state;
+  // Linear interp of position (Jak units).
+  const math::Vector3f d = m_state.position - m_state_prev.position;
+  result.position = m_state_prev.position + d * alpha;
+  // Shortest-arc interp of face angle.  Mario's face_angle is in radians
+  // coming from sm64_state.faceAngle; a wraparound at ±π means raw lerp
+  // would go the long way around.  Normalize the delta into [-π, π]
+  // first, then lerp.
+  {
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+    float delta = m_state.face_angle - m_state_prev.face_angle;
+    while (delta > kPi)  delta -= kTwoPi;
+    while (delta < -kPi) delta += kTwoPi;
+    result.face_angle = m_state_prev.face_angle + alpha * delta;
+  }
+  // velocity / health / action / flags / anim_id / anim_frame — leave as
+  // current; interpolating those would break gameplay-facing reads.
+  return result;
 }
 
 // ========================================================================

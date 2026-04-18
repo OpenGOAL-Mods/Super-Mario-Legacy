@@ -301,8 +301,13 @@ void MarioRenderer::render(const float* camera_matrix,
     upload_texture();
   }
 
-  // Get latest geometry from the SM64 tick
-  auto geo = mgr.get_geometry();
+  // Get latest geometry from the SM64 tick.  We use the interpolated
+  // accessor so that at display rates higher than libsm64's 30 Hz sim
+  // rate Mario's mesh appears to move smoothly between ticks rather
+  // than stepping.  Internally this lerps vertex positions from the
+  // previous tick's snapshot using the alpha the OpenGLRenderer pushed
+  // this frame; normals/colors/uv come from the current snapshot.
+  auto geo = mgr.get_geometry_interpolated();
   if (geo.num_triangles == 0) return;
 
   update_geometry(geo);
@@ -341,7 +346,9 @@ void MarioRenderer::render(const float* camera_matrix,
   // Draw shell if Mario is in a shell-riding action. render_shell() binds the
   // shell's own texture so the dome shows the green pattern; belly and ring
   // vertices carry negative UVs, causing the shader to use vertex colour.
-  auto state = mgr.get_state();
+  // Interpolated state is used so the shell's position/yaw track Mario's
+  // smoothed render position rather than stepping at 30 Hz.
+  auto state = mgr.get_state_interpolated();
   if (state.action & kActFlagRidingShell) {
     render_shell(state);
   }

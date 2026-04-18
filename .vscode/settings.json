@@ -12,5 +12,8 @@
   "files.associations": {
     "xhash": "cpp",
     "vector": "cpp"
-  }
+  },
+  "cmake.automaticReconfigure": false,
+"cmake.configureOnEdit": false,
+
 }

@@ -8,6 +8,7 @@
  */
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -186,10 +187,37 @@ class LibSM64Manager {
   void load_level_collision(const std::vector<tfrag3::CollisionMesh::Vertex>& vertices);
   int get_loaded_surface_count() const { return m_loaded_surface_count; }
 
-  // Accessors (threadsafe via mutex)
+  // Accessors (threadsafe via mutex).  The plain get_geometry/get_state
+  // always return the most recent sim-tick snapshot — use these for
+  // gameplay logic / collision / bridge writes where we want the truth.
   MarioGeometry get_geometry();
   MarioState get_state();
   GroundPoundHitbox get_ground_pound_hitbox();
+
+  // Render-side interpolated accessors.  lerp between the previous and
+  // current sim snapshots using whatever alpha the renderer last pushed
+  // via set_interp_alpha.  Use these for visual rendering so Mario looks
+  // smooth at display rates higher than the sim rate (30 Hz).
+  //
+  // Only `position` is interpolated on the geometry (normals/colors/uv
+  // are taken from the current snapshot — normals would need renormalized
+  // slerp to look right, and the visible delta is invisible for 1/30s).
+  // On the state, position + face-angle are lerped (face-angle with
+  // shortest-arc wraparound handling); velocities / health / flags etc.
+  // are always the current snapshot.
+  MarioGeometry get_geometry_interpolated();
+  MarioState get_state_interpolated();
+
+  // Push the render-side interpolation alpha (0..1).  0 = render at the
+  // start of the current sim slot (i.e. the state right after the most
+  // recent tick); 1 = render at the end (right before the next tick
+  // would run).  Clamped internally.
+  void set_interp_alpha(float alpha);
+
+  // Snap the "prev" snapshot to match "current" so the next render frame
+  // produces no lerp.  Call after any teleport (create, warp, cutscene
+  // glue) so interpolation doesn't draw Mario sliding across the level.
+  void snap_interpolation_to_current();
 
   // Audio volume (0..100). Applied on the cubeb worker thread, lock-free.
   void set_audio_volume(int volume);
@@ -674,6 +702,17 @@ class LibSM64Manager {
   std::mutex m_geo_mutex;
   MarioGeometry m_geometry;
   MarioState m_state;
+  // Previous sim-tick snapshot — captured inside tick() right before the
+  // new sm64_state / sm64_geo values are committed to m_geometry/m_state.
+  // get_geometry_interpolated / get_state_interpolated lerp from these
+  // into m_geometry/m_state using m_interp_alpha.
+  MarioGeometry m_geometry_prev;
+  MarioState m_state_prev;
+  // Render-time interpolation factor, pushed by OpenGLRenderer each render
+  // frame via set_interp_alpha.  Atomic so the render thread can update
+  // without contending on m_geo_mutex (the mutex already guards the actual
+  // geometry buffers).
+  std::atomic<float> m_interp_alpha{0.0f};
   GroundPoundHitbox m_gp_hitbox;
   uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
   // Last frame's "is Mario submerged in a lava water-vol" flag. Used by

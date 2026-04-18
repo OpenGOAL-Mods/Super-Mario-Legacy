@@ -1064,8 +1064,13 @@ void OpenGLRenderer::tick_mario_sm64() {
   tick_counter++;
   if (tick_counter % 2 != 0) return;
 
-  // 1b. Check if the game is paused — don't tick Mario if Jak's game is paused
-  if (mgr.is_game_paused(g_ee_main_mem)) return;
+  // 1b. Check if the game is paused — don't tick Mario if Jak's game is paused.
+  // update_music_pause_state MUST run on paused frames too so we actually
+  // stop the SM64 music the moment Jak's pause menu opens (and so we resume
+  // it when the menu closes), hence the sync call BEFORE the early return.
+  bool paused = mgr.is_game_paused(g_ee_main_mem);
+  mgr.update_music_pause_state(paused);
+  if (paused) return;
 
   // 1c. Read target state flags (grabbed / periscope)
   mgr.read_target_flags(g_ee_main_mem);

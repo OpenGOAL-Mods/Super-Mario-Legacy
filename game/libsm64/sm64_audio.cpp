@@ -161,6 +161,17 @@ void SM64AudioPlayer::fill(int16_t* out, long nframes) {
   long frames_written = 0;
   const int volume = m_volume.load(std::memory_order_relaxed);
 
+  // If the game is paused, output silence for this whole buffer without
+  // advancing libsm64's audio engine.  The active music sequence cursor
+  // (and any active SFX) stays frozen, so unpausing resumes playback from
+  // exactly the same position.  Also drop whatever's left in the ring
+  // buffer so a stale trailing sample doesn't get spliced in on resume.
+  if (m_paused.load(std::memory_order_relaxed)) {
+    std::memset(out, 0, static_cast<size_t>(nframes) * 2 * sizeof(int16_t));
+    m_ring_read = m_ring_write;
+    return;
+  }
+
   auto available = [&]() -> size_t {
     return (m_ring_write + m_ring_capacity - m_ring_read) % m_ring_capacity;
   };

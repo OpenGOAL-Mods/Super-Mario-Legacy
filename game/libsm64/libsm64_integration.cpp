@@ -1964,22 +1964,78 @@ u64 pc_sm64_play_sound(u64 sound_bits) {
 
 // ---------------------------------------------------------------------------
 // GOAL-callable music player: registered as "pc-sm64-play-music".
-// Takes a sequence ID and plays it on player 0 with no fade.
+// Always stops the currently playing background music first so you don't end
+// up layering two tracks when GOAL switches songs, then starts the new track
+// on player 0 with no fade.  Clears the "force unpaused" flag so subsequent
+// pause transitions actually mute audio again (important when switching
+// from title-screen music to gameplay music).
 // ---------------------------------------------------------------------------
 void LibSM64Manager::play_music_from_goal(uint8_t seq_id) {
   if (!m_initialized) return;
   std::scoped_lock lock(m_sm64_lock);
-  sm64_play_music(0, seq_id, 0);
+  sm64_stop_background_music(sm64_get_current_background_music());
+  if (seq_id != 0) {
+    sm64_play_music(0, seq_id, 0);
+  }
+  // Back to pause-responsive mode, and re-sync audio player to the current
+  // game-pause state so if the player is paused right now (rare — GOAL
+  // usually doesn't fire this call mid-pause) audio still mutes correctly.
+  m_force_audio_unpaused = false;
+  if (m_audio) m_audio->set_paused(m_game_paused);
+}
+
+// Plays a track that ignores Jak's pause state — the audio worker is held
+// unpaused regardless of master-mode.  Use for title / menu / save-select
+// music where `master-mode` is already outside 'game and the default
+// pause-responsive behavior would wrongly mute the menu theme.
+void LibSM64Manager::play_music_forced_from_goal(uint8_t seq_id) {
+  if (!m_initialized) return;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_stop_background_music(sm64_get_current_background_music());
+  if (seq_id != 0) {
+    sm64_play_music(0, seq_id, 0);
+  }
+  m_force_audio_unpaused = true;
+  if (m_audio) m_audio->set_paused(false);  // immediately un-mute
 }
 
 void LibSM64Manager::stop_music_from_goal() {
   if (!m_initialized) return;
   std::scoped_lock lock(m_sm64_lock);
   sm64_stop_background_music(sm64_get_current_background_music());
+  // Stopping music returns audio to the default pause-responsive mode.
+  m_force_audio_unpaused = false;
+  if (m_audio) m_audio->set_paused(m_game_paused);
+}
+
+// Called each frame from the renderer BEFORE the pause early-return so we
+// see both pause→unpause and unpause→pause edges.  Instead of stopping and
+// restarting the track (which resets the sequence cursor), we flip a flag
+// on the cubeb audio worker: while paused, its fill() callback outputs
+// silence and never calls sm64_audio_tick().  The N64 audio engine — and
+// therefore the active music position, SFX, reverb tail, everything — stays
+// exactly where it was.  Unpausing resumes playback seamlessly mid-bar.
+//
+// When `m_force_audio_unpaused` is set (by play_music_forced_from_goal),
+// the audio player stays unpaused regardless of what the game master-mode
+// says — that's how title-screen / menu music keeps playing despite the
+// master-mode not being 'game.
+void LibSM64Manager::update_music_pause_state(bool is_paused) {
+  if (!m_initialized || !m_audio) return;
+  m_game_paused = is_paused;
+  const bool want_audio_paused = is_paused && !m_force_audio_unpaused;
+  if (want_audio_paused != m_audio->is_paused()) {
+    m_audio->set_paused(want_audio_paused);
+  }
 }
 
 u64 pc_sm64_play_music(u64 seq_id) {
   LibSM64Manager::instance().play_music_from_goal(static_cast<uint8_t>(seq_id));
+  return 0;
+}
+
+u64 pc_sm64_play_music_forced(u64 seq_id) {
+  LibSM64Manager::instance().play_music_forced_from_goal(static_cast<uint8_t>(seq_id));
   return 0;
 }
 

@@ -146,6 +146,7 @@ u64 pc_sm64_full_heal_mario();
 u64 pc_sm64_star_dance_mario();
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
+u64 pc_sm64_play_music_forced(u64 seq_id);
 u64 pc_sm64_stop_music();
 u64 pc_sm64_teleport_mario(u32 x, u32 y, u32 z);
 
@@ -258,7 +259,18 @@ class LibSM64Manager {
   void star_dance_mario_from_goal();
   void play_sound_from_goal(int32_t sound_bits);
   void play_music_from_goal(uint8_t seq_id);
+  // Same as play_music_from_goal but flips the "force unpaused" flag so the
+  // track keeps playing even while Jak's game is paused (title screen,
+  // menus, save-select, etc.).  Calling the non-forced variant (or
+  // stop_music_from_goal) clears the flag and restores pause-responsive
+  // behavior for subsequent pause transitions.
+  void play_music_forced_from_goal(uint8_t seq_id);
   void stop_music_from_goal();
+
+  // Per-frame music pause sync — called from the renderer BEFORE the
+  // pause-gate early return so we can stop libsm64's BG music the moment
+  // Jak's game pauses and resume the remembered track on unpause.
+  void update_music_pause_state(bool is_paused);
   void teleport_mario_from_goal(float x, float y, float z);
 
   // Teleport Mario to Jak's current position/rotation (used during cutscenes).
@@ -621,6 +633,24 @@ class LibSM64Manager {
   // hasn't happened yet when the glue releases.
   int m_post_glue_settle_frames = 0;
   static constexpr int POST_GLUE_SETTLE_DURATION = 30;  // ~1 second at 30Hz tick rate
+
+  // ---- Music pause/resume state ----------------------------------------
+  // The actual audio gating happens in SM64AudioPlayer::m_paused — when
+  // true, its cubeb callback emits silence without ticking the N64 audio
+  // engine, so the active sequence cursor stays frozen and unpause resumes
+  // in-place.  The two fields below drive whether we should be in that
+  // state:
+  //   `m_game_paused` mirrors update_music_pause_state's last input —
+  //     i.e. "is Jak's game currently in a non-game master-mode (paused /
+  //     menu / freeze / progress / etc.)?".
+  //   `m_force_audio_unpaused` is set by play_music_forced_from_goal and
+  //     cleared by play_music_from_goal / stop_music_from_goal.  When true,
+  //     audio never pauses regardless of `m_game_paused` — used for title
+  //     screen / menu music that should keep playing while master-mode
+  //     sits at something other than 'game.
+  //   Desired audio-paused = m_game_paused && !m_force_audio_unpaused.
+  bool m_game_paused = false;
+  bool m_force_audio_unpaused = false;
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

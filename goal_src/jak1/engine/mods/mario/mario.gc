@@ -19,8 +19,99 @@
 (define-extern pc-sm64-star-dance-mario (function none))
 (define-extern pc-sm64-play-sound (function int none))
 (define-extern pc-sm64-play-music (function int none))
+;; Variant that plays even while Jak's game is paused (title screen, menus).
+;; Calling pc-sm64-play-music or pc-sm64-stop-music afterwards restores
+;; the default pause-responsive behavior.
+(define-extern pc-sm64-play-music-forced (function int none))
 (define-extern pc-sm64-stop-music (function none))
 (define-extern pc-sm64-teleport-mario (function float float float none))
+
+;; ---------------------------------------------------------------------------
+;; sm64-music — friendly-name helpers.  Map a GOAL symbol to the SM64
+;; sequence id it corresponds to (see third-party/libsm64/src/decomp/include/
+;; seq_ids.h).  Always stops whatever track is currently playing before
+;; starting the new one, so two calls never layer.  Pass 'none / 'stop / #f
+;; to stop audio.
+;;
+;; By default pause/resume is handled automatically in C++
+;; (update_music_pause_state): the cubeb audio worker freezes while Jak's
+;; game is paused, so the track pauses in-place and resumes seamlessly on
+;; unpause.
+;;
+;; `sm64-music-forced` is the same but tells C++ to keep the audio worker
+;; ticking even while the master-mode is outside 'game — use for title /
+;; menu / save-select music where the game is "paused" by design but you
+;; still want audio.  Calling the non-forced `sm64-music` (or stopping)
+;; restores the default pause-responsive behavior on the next call.
+;;
+;; Examples:
+;;   (sm64-music 'bob-omb)              ;; gameplay, pauses with menu
+;;   (sm64-music-forced 'title)         ;; title screen, keeps playing
+;;   (sm64-music 'none)                 ;; stop (also clears forced mode)
+;; ---------------------------------------------------------------------------
+
+;; Symbol -> SM64 seq id.  Returns 0 for stop, -1 for unknown.
+(defun sm64-music-id ((track symbol))
+  (case track
+    (('none 'stop #f)             0)
+    (('collect-star)              #x01)
+    (('title)                     #x02)
+    (('bob-omb 'grass)            #x03)
+    (('inside-castle 'castle)     #x04)
+    (('water 'dire-dire)          #x05)
+    (('hot 'lava)                 #x06)
+    (('boss-koopa 'bowser)        #x07)
+    (('snow)                      #x08)
+    (('slide)                     #x09)
+    (('spooky 'bbh)               #x0A)
+    (('piranha-plant)             #x0B)
+    (('underground 'cave)         #x0C)
+    (('star-select)               #x0D)
+    (('powerup)                   #x0E)
+    (('metal-cap)                 #x0F)
+    (('koopa-message)             #x10)
+    (('koopa-road)                #x11)
+    (('high-score)                #x12)
+    (('merry-go-round)            #x13)
+    (('race)                      #x14)
+    (('star-spawn)                #x15)
+    (('boss 'mini-boss)           #x16)
+    (('collect-key)               #x17)
+    (('endless-stairs)            #x18)
+    (('final-bowser 'bowser-final) #x19)
+    (('credits)                   #x1A)
+    (('solve-puzzle)              #x1B)
+    (('toad-message)              #x1C)
+    (('peach-message)             #x1D)
+    (('intro)                     #x1E)
+    (('victory)                   #x1F)
+    (('ending)                    #x20)
+    (('file-select)               #x21)
+    (('lakitu)                    #x22)
+    (else -1)))
+
+;; Play a track that respects Jak's pause state (default behavior).
+(defun sm64-music ((track symbol))
+  (let ((id (sm64-music-id track)))
+    (cond
+      ((zero? id) (pc-sm64-stop-music))
+      ((> id 0)   (pc-sm64-play-music id))
+      (else
+        (format 0 "sm64-music: unknown track ~A — stopping music~%" track)
+        (pc-sm64-stop-music))))
+  (none))
+
+;; Play a track that keeps going even while Jak's game is paused (title,
+;; menus, file-select).  Switch back to `sm64-music` for in-game music.
+(defun sm64-music-forced ((track symbol))
+  (let ((id (sm64-music-id track)))
+    (cond
+      ((zero? id) (pc-sm64-stop-music))
+      ((> id 0)   (pc-sm64-play-music-forced id))
+      (else
+        (format 0 "sm64-music-forced: unknown track ~A — stopping music~%" track)
+        (pc-sm64-stop-music))))
+  (none))
 
 ;; ---------------------------------------------------------------------------
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.

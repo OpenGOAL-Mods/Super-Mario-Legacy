@@ -558,6 +558,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-star-dance-mario", (void*)sm64::pc_sm64_star_dance_mario);
   make_function_symbol_from_c("pc-sm64-play-sound", (void*)sm64::pc_sm64_play_sound);
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);
+  make_function_symbol_from_c("pc-sm64-play-music-forced", (void*)sm64::pc_sm64_play_music_forced);
   make_function_symbol_from_c("pc-sm64-stop-music", (void*)sm64::pc_sm64_stop_music);
   make_function_symbol_from_c("pc-sm64-teleport-mario", (void*)sm64::pc_sm64_teleport_mario);
 

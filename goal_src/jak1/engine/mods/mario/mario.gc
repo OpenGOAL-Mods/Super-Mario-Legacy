@@ -90,28 +90,49 @@
     (('lakitu)                    #x22)
     (else -1)))
 
-;; Play a track that respects Jak's pause state (default behavior).
+;; Play a track that respects Jak's pause state (default behavior).  No-op
+;; (and stops anything already playing) if the user has disabled SM64
+;; music via *mario-settings*.
 (defun sm64-music ((track symbol))
-  (let ((id (sm64-music-id track)))
-    (cond
-      ((zero? id) (pc-sm64-stop-music))
-      ((> id 0)   (pc-sm64-play-music id))
-      (else
-        (format 0 "sm64-music: unknown track ~A — stopping music~%" track)
-        (pc-sm64-stop-music))))
+  (cond
+    ((not (-> *mario-settings* play-sm64-music?))
+     (pc-sm64-stop-music))
+    (else
+     (let ((id (sm64-music-id track)))
+       (cond
+         ((zero? id) (pc-sm64-stop-music))
+         ((> id 0)   (pc-sm64-play-music id))
+         (else
+           (format 0 "sm64-music: unknown track ~A — stopping music~%" track)
+           (pc-sm64-stop-music))))))
   (none))
 
 ;; Play a track that keeps going even while Jak's game is paused (title,
 ;; menus, file-select).  Switch back to `sm64-music` for in-game music.
+;; Same disabled-by-settings short circuit as `sm64-music`.
 (defun sm64-music-forced ((track symbol))
-  (let ((id (sm64-music-id track)))
-    (cond
-      ((zero? id) (pc-sm64-stop-music))
-      ((> id 0)   (pc-sm64-play-music-forced id))
-      (else
-        (format 0 "sm64-music-forced: unknown track ~A — stopping music~%" track)
-        (pc-sm64-stop-music))))
+  (cond
+    ((not (-> *mario-settings* play-sm64-music?))
+     (pc-sm64-stop-music))
+    (else
+     (let ((id (sm64-music-id track)))
+       (cond
+         ((zero? id) (pc-sm64-stop-music))
+         ((> id 0)   (pc-sm64-play-music-forced id))
+         (else
+           (format 0 "sm64-music-forced: unknown track ~A — stopping music~%" track)
+           (pc-sm64-stop-music))))))
   (none))
+
+;; Toggle persistence for the `play-sm64-music?` setting.  Flips the flag,
+;; commits *mario-settings* to disk, and stops any currently-playing track
+;; if music was just turned off.  Returns the new (normalised) value.
+(defun sm64-set-music-enabled! ((enabled? symbol))
+  (set! (-> *mario-settings* play-sm64-music?) (if enabled? #t #f))
+  (commit-to-file *mario-settings*)
+  (when (not (-> *mario-settings* play-sm64-music?))
+    (pc-sm64-stop-music))
+  (-> *mario-settings* play-sm64-music?))
 
 ;; ---------------------------------------------------------------------------
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.

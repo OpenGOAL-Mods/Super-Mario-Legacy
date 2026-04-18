@@ -628,7 +628,8 @@
                         (= v1-2 (progress-screen mouse-binds))
                         (= v1-2 (progress-screen controller-options))
                         (= v1-2 (progress-screen mouse-options))
-                        (= v1-2 (progress-screen reassign-binds-options)))))))))
+                        (= v1-2 (progress-screen reassign-binds-options))
+                        (= v1-2 (progress-screen mario-options)))))))))
 
 (defmethod visible? ((this progress))
   (the-as symbol (and *progress-process* (zero? (-> *progress-process* 0 in-out-position)))))

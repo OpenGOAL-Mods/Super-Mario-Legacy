@@ -346,5 +346,7 @@
   "ropebridge.o"
   "ticky.o"
   "hud-classes-pc.o" ;; added
+  "mario-settings.o" ;; mario mod
   "mario.o"
+  "mario-menu.o" ;; mario mod
  ))

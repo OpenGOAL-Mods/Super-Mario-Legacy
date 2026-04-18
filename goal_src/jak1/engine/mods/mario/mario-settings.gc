@@ -1,0 +1,115 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-settings.gc
+;; name in dgo: mario-settings
+;; dgos: ENGINE, GAME
+
+(bundles "ENGINE.CGO" "GAME.CGO")
+
+;; ---------------------------------------------------------------------------
+;; mario-settings — persistent Mario-mod options, saved next to pc-settings.gc
+;; (same *pc-settings-folder*, same file-stream / (key value) format, just a
+;; separate `mario-settings.gc` file so the pc-kernel version gate doesn't
+;; reject us and we don't bloat pc-settings with mod-specific fields).
+;;
+;; Adding a new field:
+;;   1. add a slot to the deftype below
+;;   2. set its default in `reset`
+;;   3. serialize it in `write-to-file`
+;;   4. parse it in `read-from-file` (case-str branch)
+;;
+;; Top-level creates *mario-settings* via `define-once`, and the `new` method
+;; runs `initialize` which resets to defaults + loads the on-disk file (same
+;; pattern as pc-settings — see pckernel-common.gc:658).
+;; ---------------------------------------------------------------------------
+
+(deftype mario-settings (basic)
+  ;; Play SM64 music through libsm64's audio engine.  When #f the music
+  ;; helpers in mario.gc become no-ops and stop anything already playing.
+  ((play-sm64-music? symbol))
+  (:methods
+    (reset (_type_) _type_)
+    (load-settings (_type_) none)
+    (commit-to-file (_type_) none)
+    (read-from-file (_type_ string) symbol)
+    (write-to-file (_type_ string) symbol)
+    (initialize (_type_) _type_)))
+
+(defmethod reset ((obj mario-settings))
+  "Populate default values — call before load to guarantee fresh fields."
+  (set! (-> obj play-sm64-music?) #t)
+  obj)
+
+(defun mario-settings-filename ()
+  "Build the absolute save path into *pc-temp-string-1* and return it."
+  (format (clear *pc-temp-string-1*) "~S/mario-settings.gc" *pc-settings-folder*)
+  *pc-temp-string-1*)
+
+(defmethod write-to-file ((obj mario-settings) (filename string))
+  "Serialize obj to filename.  Returns #t on success."
+  (if (not filename) (return #f))
+  (let ((file (new 'stack 'file-stream filename 'write)))
+    (if (not (file-stream-valid? file)) (return #f))
+    (format file "(mario-settings~%")
+    (format file "  (play-sm64-music? ~A)~%" (-> obj play-sm64-music?))
+    (format file "  )~%")
+    (file-stream-close file))
+  (format 0 "mario settings file write: ~A~%" filename)
+  #t)
+
+(defmethod commit-to-file ((obj mario-settings))
+  "Persist obj to the canonical mario-settings.gc path."
+  (write-to-file obj (mario-settings-filename))
+  (none))
+
+(defmethod read-from-file ((obj mario-settings) (filename string))
+  "Parse filename into obj.  Returns #t on success.  Uses the same
+   with-settings-scope / dosettings / case-str helpers as pc-settings —
+   those are generic over file-stream + *pc-temp-string*."
+  (if (not filename) (return #f))
+  (let ((file (new 'stack 'file-stream filename 'read)))
+    (when (not (file-stream-valid? file)) (return #f))
+    (with-settings-scope (file)
+      (case-str (file-stream-read-word file)
+        (("mario-settings")
+         (dosettings (file)
+           (case-str *pc-temp-string*
+             (("play-sm64-music?")
+              (set! (-> obj play-sm64-music?) (file-stream-read-symbol file))))))))
+    (file-stream-close file))
+  (format 0 "mario settings file read: ~A~%" filename)
+  #t)
+
+(defmethod load-settings ((obj mario-settings))
+  "Load from disk, or write defaults if the file doesn't exist yet."
+  (let ((path (mario-settings-filename)))
+    (cond
+      ((pc-filepath-exists? path)
+       (format 0 "[mario] settings found at '~S', loading...~%" path)
+       (unless (read-from-file obj path)
+         (format 0 "[mario] settings parse failed at '~S', using defaults~%" path)
+         (reset obj)))
+      (else
+       (format 0 "[mario] no settings at '~S', writing defaults~%" path)
+       (reset obj)
+       (commit-to-file obj))))
+  (none))
+
+(defmethod initialize ((obj mario-settings))
+  "Prime with defaults, then overlay on-disk values if present."
+  (reset obj)
+  (load-settings obj)
+  obj)
+
+(defmethod new mario-settings ((allocation symbol) (type-to-make type))
+  (let ((obj (object-new allocation type-to-make (the-as int (-> type-to-make size)))))
+    (initialize obj)
+    obj))
+
+;; The singleton.  Forward-declared to #f so the define-once freshness check
+;; below can read the symbol on first load (same two-step pattern pc-settings
+;; uses in pckernel-impl.gc + pckernel.gc).  Created (and therefore loaded
+;; from disk) on first file-load; subsequent reloads are no-ops.
+(define *mario-settings* (the mario-settings #f))
+(define-once *mario-settings* (new 'global 'mario-settings))

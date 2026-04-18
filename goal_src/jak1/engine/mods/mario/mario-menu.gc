@@ -1,0 +1,141 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-menu.gc
+;; name in dgo: mario-menu
+;; dgos: ENGINE, GAME
+
+(bundles "ENGINE.CGO" "GAME.CGO")
+
+;; ---------------------------------------------------------------------------
+;; Mario Options pause-menu screen.
+;;
+;; Inserts a "MARIO OPTIONS" entry into the pause menu's GAME OPTIONS screen,
+;; between INPUT OPTIONS (index 0) and PLAY HINTS (originally index 1).
+;; The submenu currently exposes one toggle — PLAY SM64 MUSIC — which is
+;; backed by the persisted `*mario-settings*` flag; tweaking it commits to
+;; disk immediately and stops any currently-playing track.
+;;
+;; How this stays outside progress-pc.gc:
+;;   1. `*game-options-mario*` is a local copy of `*game-options-pc*`'s
+;;      entries with the Mario menu spliced in at index 1.
+;;   2. `*mario-options*` holds the Mario submenu items.
+;;   3. We save the PC-port's `init-game-options` into
+;;      `*mario-orig-init-game-options*` at file-load time, then replace
+;;      `init-game-options` with a wrapper that:
+;;        - runs the original (which wires up *options-remap* /
+;;          value-to-modify for the vanilla screens),
+;;        - swaps *options-remap*'s game-settings slot to
+;;          *game-options-mario* and registers *mario-options* under the new
+;;          (progress-screen mario-options) slot,
+;;        - fixes up value-to-modify on the shifted *game-options-mario*
+;;          entries (indices +1 from the originals) plus the Mario toggle.
+;;   Load order: game.gp places mario-menu.gc AFTER pc/progress-pc.gc, so
+;;   our redefinition wins.
+;; ---------------------------------------------------------------------------
+
+;; ---- Mario Options submenu -------------------------------------------------
+;; The menu's cpad-left/right handlers for `on-off` options are an EITHER/OR:
+;; if `on-change` is non-#f, the menu calls it with the new symbol value and
+;; SKIPS the default value-to-modify write (see progress-pc.gc:2257-2260 and
+;; 2343-2346).  So our on-change is responsible for *both* updating the
+;; backing flag AND side-effects (persist + stop audio if disabled).
+(defun sm64-music-setting-changed! ((new-val symbol))
+  (set! (-> *mario-settings* play-sm64-music?) new-val)
+  (commit-to-file *mario-settings*)
+  (when (not new-val)
+    (pc-sm64-stop-music))
+  (none))
+
+(define *mario-options*
+  (new 'static 'boxed-array :type game-option
+       (new 'static 'game-option
+            :option-type (game-option-type on-off)
+            :name (text-id mario-opts-play-music)
+            :scale #t
+            :on-change (lambda ((val object))
+                         (sm64-music-setting-changed! (the-as symbol val))
+                         (none)))
+       (new 'static 'game-option
+            :option-type (game-option-type button)
+            :name (text-id back)
+            :scale #t)))
+
+;; ---- Replacement for *game-options-pc* -------------------------------------
+;; Mirrors the 10-entry *game-options-pc* (progress-pc.gc:217) but with a
+;; MARIO OPTIONS submenu entry inserted at index 1.  Every non-Mario entry
+;; keeps its original `on-confirm`/`:param3` plumbing; value-to-modify gets
+;; wired in init-game-options below.
+(define *game-options-mario*
+  (new 'static 'boxed-array :type game-option
+       ;; [0] INPUT OPTIONS
+       (new 'static 'game-option
+            :option-type (game-option-type menu)
+            :name (text-id input-options)
+            :scale #t
+            :param3 (game-option-menu input-options))
+       ;; [1] MARIO OPTIONS  ← NEW
+       (new 'static 'game-option
+            :option-type (game-option-type menu)
+            :name (text-id mario-opts-title)
+            :scale #t
+            :param3 (game-option-menu mario-options))
+       ;; [2] PLAY HINTS  (was *game-options-pc*[1])
+       (new 'static 'game-option
+            :option-type (game-option-type on-off)
+            :name (text-id play-hints)
+            :scale #t
+            :on-confirm
+            (lambda ()
+              (set! (-> *setting-control* default play-hints) (-> *pc-settings* memcard-play-hints?))))
+       ;; [3] SUBTITLES  (was [2])
+       (new 'static 'game-option :option-type (game-option-type on-off) :name (text-id subtitles) :scale #t)
+       ;; [4] HINTTITLES  (was [3])
+       (new 'static 'game-option :option-type (game-option-type on-off) :name (text-id hinttitles) :scale #t)
+       ;; [5] LANGUAGE  (was [4])
+       (new 'static 'game-option :option-type (game-option-type language) :name (text-id language) :scale #t)
+       ;; [6] SUBTITLES LANGUAGE  (was [5])
+       (new 'static 'game-option :option-type (game-option-type language-subtitles) :name (text-id subtitles-language) :scale #t)
+       ;; [7] TEXT LANGUAGE  (was [6])
+       (new 'static 'game-option :option-type (game-option-type language-text) :name (text-id text-language) :scale #t)
+       ;; [8] SUBTITLES SPEAKER  (was [7])
+       (new 'static 'game-option :option-type (game-option-type speaker) :name (text-id subtitles-speaker) :scale #t)
+       ;; [9] MISC OPTIONS  (was [8])
+       (new 'static 'game-option
+            :option-type (game-option-type menu)
+            :name (text-id misc-options)
+            :scale #t
+            :param3 (game-option-menu misc-options))
+       ;; [10] BACK  (was [9])
+       (new 'static 'game-option :option-type (game-option-type button) :name (text-id back) :scale #t)))
+
+;; ---- init-game-options override --------------------------------------------
+;; Captures the current (progress-pc.gc) defun pointer, then redefines
+;; init-game-options to run it and add our post-init wiring.  Because GOAL
+;; uses late-binding for top-level defuns and game.gp loads this file after
+;; progress-pc.gc, callers of init-game-options resolve to our wrapper.
+(define *mario-orig-init-game-options* init-game-options)
+
+(defun init-game-options ((obj progress))
+  ;; Run the PC-port body first — it sets up *options-remap* for every
+  ;; vanilla screen and value-to-modify for *game-options-pc*.
+  ((the (function progress none) *mario-orig-init-game-options*) obj)
+
+  ;; Redirect the GAME OPTIONS screen to our extended array.
+  (set! (-> *options-remap* (progress-screen game-settings)) *game-options-mario*)
+  ;; Register the new MARIO OPTIONS screen.
+  (set! (-> *options-remap* (progress-screen mario-options)) *mario-options*)
+
+  ;; Value-to-modify wiring for *game-options-mario*.  All indices shift +1
+  ;; vs progress-pc.gc:2130 onwards because the Mario entry is at index 1.
+  (set! (-> *game-options-mario* 2 value-to-modify) (&-> *pc-settings* memcard-play-hints?))
+  (set! (-> *game-options-mario* 3 value-to-modify) (&-> *pc-settings* subtitles?))
+  (set! (-> *game-options-mario* 4 value-to-modify) (&-> *pc-settings* hinttitles?))
+  (set! (-> *game-options-mario* 5 value-to-modify) (&-> *setting-control* default language))
+  (set! (-> *game-options-mario* 6 value-to-modify) (&-> *progress-carousell* int-backup))
+  (set! (-> *game-options-mario* 7 value-to-modify) (&-> *progress-carousell* int-backup))
+  (set! (-> *game-options-mario* 8 value-to-modify) (&-> *progress-carousell* int-backup))
+
+  ;; Mario submenu value-to-modify (one toggle, index 0).
+  (set! (-> *mario-options* 0 value-to-modify) (&-> *mario-settings* play-sm64-music?))
+  (none))

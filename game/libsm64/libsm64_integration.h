@@ -64,6 +64,30 @@ void set_mario_scale(float scale);
 // same reference point the C decomp uses).
 float get_mario_scale();
 
+// Runtime-adjustable bone indices used by teleport_mario_to_jak during
+// cutscenes.  Both point into `(-> *target* node-list data N bone
+// transform)`.  See engine/data/joint-nodes.gc for the full table:
+//   1  = align (root-align bone)
+//   26 = hips
+//   29 = Lankle
+//   33 = Rankle
+//
+// `g_cutscene_track_bone` supplies **position** — Lankle (29) works
+// well because its world position moves with the animation and sits at
+// ground level (matches Mario's feet).
+//
+// `g_cutscene_track_rot_bone` supplies **rotation** — default is 1
+// (align) because Lankle's matrix orientation is the foot's forward
+// vector, which wobbles / mis-points whenever the leg isn't straight.
+// The align bone is the character's root joint and its forward axis
+// tracks Jak's body orientation cleanly.
+//
+// Set either to -1 to disable that axis and fall back to `root.trans`
+// (for position) or `root.quat` (for rotation).  The ImGui panel
+// exposes both sliders so you can A/B test live.
+inline int g_cutscene_track_bone     = 26;  // position source (Lankle)
+inline int g_cutscene_track_rot_bone = 26;   // rotation source (align)
+
 struct MarioGeometry {
   std::vector<float> position;   // 3 floats per vertex, 3 verts per tri
   std::vector<float> normal;     // 3 floats per vertex
@@ -234,6 +258,21 @@ class LibSM64Manager {
   // to spawn Mario where Jak currently stands.
   bool read_target_transform(u8* ee_mem, math::Vector3f* out_pos, float* out_yaw_rad);
 
+  // Debug helper: returns the same position teleport_mario_to_jak would
+  // pick this frame (bone at g_cutscene_track_bone if available, else
+  // *target* root.trans).  Pure-read, no side effects.  `out_used_bone`
+  // is set to the bone index we actually read (or -1 if we fell back to
+  // root.trans) so the debug GUI can show which source fired.
+  bool read_cutscene_track_position(u8* ee_mem,
+                                    math::Vector3f* out_pos,
+                                    int* out_used_bone = nullptr);
+
+  // Diagnostics: count of times teleport_mario_to_jak has actually been
+  // invoked this frame / session.  Bumped from inside the function.
+  // Reset nowhere — just a monotonically increasing counter so the ImGui
+  // panel can show a rate to confirm the gate is firing.
+  uint32_t teleport_call_count() const { return m_teleport_call_count; }
+
   // Force Mario's yaw (in radians, world Y axis). No-op if no Mario is spawned.
   void set_mario_face_angle(float yaw_rad);
 
@@ -246,8 +285,16 @@ class LibSM64Manager {
   void update_mario_water(u8* ee_mem);
 
   // Check if the Jak game is paused by reading *master-mode* from GOAL memory.
-  // Returns true if master-mode is 'pause'.
+  // Returns true if master-mode is anything except 'game (pause / menu /
+  // movie / freeze / …).
   bool is_game_paused(u8* ee_mem);
+
+  // Returns true when Jak's master-mode is specifically 'movie.  Used by
+  // the Mario pipeline to distinguish "skip everything" pause states
+  // from cutscene movies where we want the pipeline to KEEP RUNNING so
+  // teleport_mario_to_jak can glue Mario to the animating skeleton each
+  // frame.
+  bool is_in_movie(u8* ee_mem);
 
   // Write Mario's position into a target process's root->trans in EE memory.
   // Returns true if the write succeeded. Exposed for testing.
@@ -308,6 +355,7 @@ class LibSM64Manager {
   bool target_grabbed = false;    // cutscene, clone-anim, or periscope
   bool target_periscope = false;  // periscope specifically
   bool target_clone_anim = false; // blue eco doors/bridges — grabbed but don't teleport
+  bool target_in_movie = false;   // (movie?) — scene-player / cutscene movies active
 
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing
@@ -712,6 +760,10 @@ class LibSM64Manager {
   // pass through the lava surface without any reaction on the second drop.
   bool m_prev_in_lava = false;
   int m_star_dance_timer = -1;  // -1 = inactive, >= 0 = frames since star dance started
+  // Diagnostic counter bumped every time teleport_mario_to_jak fires.
+  // The ImGui panel displays the delta-per-frame to confirm the cutscene
+  // gate is actually reaching the teleport function.
+  uint32_t m_teleport_call_count = 0;
 
   // Cell-pickup state preservation.  Snapshotted at the rising edge of
   // target_clone_anim (cutscene start) and restored at the falling edge

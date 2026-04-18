@@ -1068,9 +1068,20 @@ void OpenGLRenderer::tick_mario_sm64() {
   // update_music_pause_state MUST run on paused frames too so we actually
   // stop the SM64 music the moment Jak's pause menu opens (and so we resume
   // it when the menu closes), hence the sync call BEFORE the early return.
+  //
+  // Special case: during movies we DON'T want to skip the pipeline,
+  // because teleport_mario_to_jak below is what glues Mario to Jak's
+  // animating skeleton during the cutscene.  Scene-player movies
+  // trigger pause-like states (master-mode may or may not change —
+  // many of them flip only the `movie` process-mask bit) so we can't
+  // rely on master-mode alone.  We use target_in_movie which GOAL
+  // populates from `(movie?)` (the process-mask check) — the
+  // authoritative "are we in a movie" predicate.  The gate below
+  // reads the bridge value that was refreshed on the PREVIOUS frame
+  // by read_target_flags, which is fine at 30 Hz for this decision.
   bool paused = mgr.is_game_paused(g_ee_main_mem);
   mgr.update_music_pause_state(paused);
-  if (paused) return;
+  if (paused && !mgr.target_in_movie) return;
 
   // 1c. Read target state flags (grabbed / periscope)
   mgr.read_target_flags(g_ee_main_mem);
@@ -1137,9 +1148,20 @@ void OpenGLRenderer::tick_mario_sm64() {
 
   // 6. Jak position sync (skip when Mario is dead or in cutscene/periscope)
   auto t10 = Clock::now();
-  if (mgr.target_grabbed && !mgr.target_periscope && !mgr.target_clone_anim) {
-    // Cutscene (not periscope, not clone-anim): teleport Mario to Jak each frame.
-    // clone-anim (blue eco doors/bridges) sets grabbed but Mario should stay put.
+  if ((mgr.target_grabbed && !mgr.target_periscope &&
+       (!mgr.target_clone_anim || mgr.target_in_movie)) ||
+      mgr.target_in_movie) {
+    // Fire the teleport when either:
+    //   1. Normal cutscene grab (grabbed && !periscope && !clone-anim),
+    //      OR
+    //   2. We're in a movie — movies often set clone-anim AND grabbed
+    //      both, and we want Mario to follow Jak through the scene
+    //      rather than staying put.  Some scene-player movies don't
+    //      even set `grabbed`, so we also fire on target_in_movie alone.
+    //
+    // The plain !clone-anim skip still applies to NON-movie clone-anims
+    // (fuel-cell-hold animation outside a scripted scene, blue eco
+    // doors/bridges) where Mario should stay put to avoid shove.
     mgr.teleport_mario_to_jak(g_ee_main_mem);
   } else if (mgr.follow_mario && !launcher_active && !mgr.target_grabbed) {
     auto cur_state = mgr.get_state();

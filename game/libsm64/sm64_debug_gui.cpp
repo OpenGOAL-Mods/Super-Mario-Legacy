@@ -5,6 +5,8 @@
 
 #include "sm64_debug_gui.h"
 
+#include <cmath>
+
 #include "common/log/log.h"
 #include "game/graphics/opengl_renderer/loader/Loader.h"
 #include "game/libsm64/libsm64_integration.h"
@@ -173,6 +175,94 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
                      "higher = smaller.  Vanilla SM64 uses 43; this project\n"
                      "ships with 50 as the default.  Live-updates everything\n"
                      "(rendered size, walk speed cap, collision scale).");
+  }
+
+  // Cutscene bone tracker.  teleport_mario_to_jak reads
+  // `(-> *target* node-list data N bone transform)` when this is >= 0,
+  // else falls back to root.trans / root.quat.  Useful eichar indices:
+  //   -1 = disabled (root.trans fallback)
+  //    1 = align (root-align bone)
+  //   26 = hips
+  //   29 = Lankle  (default)
+  //   33 = Rankle
+  // See engine/data/joint-nodes.gc for the full table.
+  ImGui::SliderInt("Track Bone (pos)", &g_cutscene_track_bone, -1, 80);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Bone whose WORLD POSITION Mario is teleported to\n"
+                     "during cutscenes.  -1 = *target* root.trans\n"
+                     "fallback.  Default 29 (Lankle on eichar).\n"
+                     "Handy: 1 = align, 26 = hips, 33 = Rankle.");
+  }
+  ImGui::SliderInt("Track Bone (rot)", &g_cutscene_track_rot_bone, -1, 80);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Bone whose ROTATION MATRIX Mario's pitch/yaw/roll\n"
+                     "are copied from.  -1 = *target* root.quat fallback.\n"
+                     "Default 1 (align) — the character root-align joint\n"
+                     "whose forward axis tracks Jak's body facing.\n"
+                     "Lankle is a poor rotation source (foot wobbles).");
+  }
+
+  // Live readout of the tracked bone's world position vs. Mario's live
+  // position.  During gameplay these should roughly coincide with
+  // whatever the teleport does; during a cutscene, watching the bone
+  // position update (or not) tells you whether *target*'s skeleton is
+  // actually being driven by the movie animation or whether it's frozen
+  // along with the rest of the process.  If "Bone pos" stops changing
+  // when you expect Jak to be walking around, the bone isn't updating
+  // and no amount of bone-index tweaking will help — we'd need a
+  // different data source entirely (e.g. pov-camera).
+  {
+    math::Vector3f bone_pos;
+    int used_bone = -2;
+    const bool have = mgr.read_cutscene_track_position(g_ee_main_mem, &bone_pos, &used_bone);
+    if (have) {
+      ImGui::Text("Bone pos (idx=%d): (%.1f, %.1f, %.1f)",
+                 used_bone, bone_pos.x(), bone_pos.y(), bone_pos.z());
+    } else {
+      ImGui::TextDisabled("Bone pos: (unavailable — *target* not ready)");
+    }
+    auto mstate = mgr.get_state();
+    ImGui::Text("Mario pos:       (%.1f, %.1f, %.1f)",
+               mstate.position.x(), mstate.position.y(), mstate.position.z());
+    // Delta helps eyeball whether the teleport is landing Mario where
+    // the bone is, or whether something else is immediately pulling him
+    // away (e.g. SM64 physics gravity on a non-solid surface).
+    if (have) {
+      const float dx = bone_pos.x() - mstate.position.x();
+      const float dy = bone_pos.y() - mstate.position.y();
+      const float dz = bone_pos.z() - mstate.position.z();
+      const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+      ImGui::Text("Delta |bone - mario|: %.1f Jak units", d);
+    }
+
+    // Gate state + teleport rate.  Pipeline runs the teleport only when
+    // (target_grabbed && !target_periscope && !target_clone_anim) AND
+    // (!paused || in_movie).  The Calls/sec counter tells you whether
+    // the function is actually being invoked each frame — if it's 0
+    // during a cutscene, the gate is blocking despite appearances.
+    ImGui::Text("Gate: grabbed=%d periscope=%d clone-anim=%d in_movie=%d",
+                mgr.target_grabbed ? 1 : 0,
+                mgr.target_periscope ? 1 : 0,
+                mgr.target_clone_anim ? 1 : 0,
+                mgr.target_in_movie ? 1 : 0);
+    ImGui::Text("Mode: paused=%d  (movie override: %d)",
+                mgr.is_game_paused(g_ee_main_mem) ? 1 : 0,
+                mgr.target_in_movie ? 1 : 0);
+    // Compute calls-per-second by diffing the monotonic counter against
+    // its value one second ago.  Rough sample — at 30 Hz sim rate a
+    // continuously-teleporting cutscene should read 30.
+    static uint32_t s_last_count = 0;
+    static double s_last_time = ImGui::GetTime();
+    const double now = ImGui::GetTime();
+    static float s_cached_rate = 0.0f;
+    if (now - s_last_time >= 0.5) {
+      const uint32_t cur = mgr.teleport_call_count();
+      s_cached_rate = static_cast<float>((cur - s_last_count) / (now - s_last_time));
+      s_last_count = cur;
+      s_last_time = now;
+    }
+    ImGui::Text("teleport_mario_to_jak: %u total, %.1f calls/sec",
+                mgr.teleport_call_count(), s_cached_rate);
   }
 
   ImGui::Separator();

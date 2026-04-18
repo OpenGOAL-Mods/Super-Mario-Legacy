@@ -348,7 +348,16 @@
               (set! clone-anim (= (-> st name) 'target-clone-anim)))))
         (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
         (set! (-> *sm64-target-flags* y) (if periscope 1.0 0.0))
-        (set! (-> *sm64-target-flags* z) (if clone-anim 1.0 0.0)))
+        (set! (-> *sm64-target-flags* z) (if clone-anim 1.0 0.0))
+        ;; w = in-movie flag.  `(movie?)` is the authoritative check — it
+        ;; looks at *kernel-context* prevent-from-run for the movie
+        ;; process-mask bit, which scene-player-driven cutscenes set
+        ;; whether or not they change master-mode.  C++ reads this off
+        ;; the bridge and uses it to (a) skip the pause early-return
+        ;; during movies and (b) override the clone-anim-skip in the
+        ;; cutscene teleport gate so Mario follows Jak's animating
+        ;; skeleton through the whole movie instead of staying put.
+        (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0)))
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))

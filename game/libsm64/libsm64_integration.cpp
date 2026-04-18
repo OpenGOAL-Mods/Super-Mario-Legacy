@@ -2186,6 +2186,7 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   target_grabbed = false;
   target_periscope = false;
   target_clone_anim = false;
+  target_in_movie = false;
   if (!ee_mem) return;
   u32 false_val = s7.offset;
   if (false_val == 0) return;
@@ -2200,6 +2201,7 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   target_grabbed = data[0] > 0.5f;
   target_periscope = data[1] > 0.5f;
   target_clone_anim = data[2] > 0.5f;
+  target_in_movie = data[3] > 0.5f;
 }
 
 bool LibSM64Manager::is_game_paused(u8* ee_mem) {
@@ -2222,19 +2224,248 @@ bool LibSM64Manager::is_game_paused(u8* ee_mem) {
   return master_mode_ptr != game_ptr;
 }
 
+bool LibSM64Manager::is_in_movie(u8* ee_mem) {
+  if (!ee_mem) return false;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
+  if (master_mode_sym.offset == 0) return false;
+  u32 master_mode_ptr = master_mode_sym->value;
+  if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
+
+  // Compare *master-mode* against the 'movie symbol.  Symbol pointers in
+  // GOAL live in the symbol table relative to s7, same pattern as the
+  // 'game comparison in is_game_paused.
+  auto movie_sym = jak1::intern_from_c("movie");
+  if (movie_sym.offset == 0) return false;
+  u32 movie_ptr = movie_sym.offset;
+
+  return master_mode_ptr == movie_ptr;
+}
+
+bool LibSM64Manager::read_cutscene_track_position(u8* ee_mem,
+                                                  math::Vector3f* out_pos,
+                                                  int* out_used_bone) {
+  if (out_used_bone) *out_used_bone = -1;
+  if (!ee_mem) return false;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return false;
+  u32 target_ptr = target_sym->value;
+  if (target_ptr == 0 || target_ptr == false_val) return false;
+
+  // Same offsets teleport_mario_to_jak uses — keep them in sync.
+  constexpr u32 ROOT_RUNTIME_OFF      = 108;
+  constexpr u32 NODE_LIST_RUNTIME_OFF = 112;
+  constexpr u32 TRANS_RUNTIME_OFF     = 12;
+  constexpr u32 CSPACE_ARRAY_DATA_OFF = 12;
+  constexpr u32 CSPACE_SIZE           = 32;
+  constexpr u32 CSPACE_BONE_OFF       = 16;
+
+  // ---- Try the bone path first (mirrors teleport_mario_to_jak) -------
+  if (g_cutscene_track_bone >= 0 &&
+      target_ptr + NODE_LIST_RUNTIME_OFF + 4 <= EE_MAIN_MEM_SIZE) {
+    u32 node_list = 0;
+    std::memcpy(&node_list, ee_mem + target_ptr + NODE_LIST_RUNTIME_OFF, 4);
+    if (node_list != 0 && node_list != false_val &&
+        (node_list & 0x7) == 4 &&
+        node_list + 4 <= EE_MAIN_MEM_SIZE) {
+      u32 cspace_len = 0;
+      std::memcpy(&cspace_len, ee_mem + node_list, 4);
+      if (cspace_len > 0 && cspace_len < 1024 &&
+          static_cast<u32>(g_cutscene_track_bone) < cspace_len) {
+        u32 cspace_addr = node_list + CSPACE_ARRAY_DATA_OFF +
+                          static_cast<u32>(g_cutscene_track_bone) * CSPACE_SIZE;
+        if (cspace_addr + CSPACE_SIZE <= EE_MAIN_MEM_SIZE) {
+          u32 bone_ptr = 0;
+          std::memcpy(&bone_ptr, ee_mem + cspace_addr + CSPACE_BONE_OFF, 4);
+          if (bone_ptr != 0 && bone_ptr != false_val &&
+              (bone_ptr & 0xF) == 0 &&
+              bone_ptr + 64 <= EE_MAIN_MEM_SIZE) {
+            float m[16];
+            std::memcpy(m, ee_mem + bone_ptr, 64);
+            bool ok = true;
+            for (int i = 0; i < 16; i++) if (!std::isfinite(m[i])) { ok = false; break; }
+            if (ok) {
+              for (int c = 0; c < 3; c++) {
+                if (std::abs(m[3 * 4 + c]) > 1.0e8f) { ok = false; break; }
+              }
+            }
+            if (ok) {
+              if (out_pos) *out_pos = math::Vector3f(m[12], m[13], m[14]);
+              if (out_used_bone) *out_used_bone = g_cutscene_track_bone;
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ---- Fallback: root.trans ------------------------------------------
+  if (target_ptr + ROOT_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
+  u32 root_ptr;
+  std::memcpy(&root_ptr, ee_mem + target_ptr + ROOT_RUNTIME_OFF, 4);
+  if (root_ptr == 0 || root_ptr == false_val) return false;
+  if (root_ptr + TRANS_RUNTIME_OFF + 16 > EE_MAIN_MEM_SIZE) return false;
+  float trans[4];
+  std::memcpy(trans, ee_mem + root_ptr + TRANS_RUNTIME_OFF, 16);
+  if (out_pos) *out_pos = math::Vector3f(trans[0], trans[1], trans[2]);
+  if (out_used_bone) *out_used_bone = -1;
+  return true;
+}
+
 void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
   if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
-  math::Vector3f jak_pos;
-  float jak_yaw;
-  if (!read_target_transform(ee_mem, &jak_pos, &jak_yaw)) return;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return;
 
-  float sm64_x = jak_pos.x() * JAK_TO_SM64_SCALE;
-  float sm64_y = jak_pos.y() * JAK_TO_SM64_SCALE;
-  float sm64_z = jak_pos.z() * JAK_TO_SM64_SCALE;
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return;
+  u32 target_ptr = target_sym->value;
+  if (target_ptr == 0 || target_ptr == false_val) return;
+
+  ++m_teleport_call_count;  // diagnostic — see teleport_call_count()
+
+  // Field offsets:
+  //   process-drawable.root          — GOAL :offset 112 → runtime 108
+  //   process-drawable.node-list     — GOAL :offset 116 → runtime 112
+  //   trsqv.trans                    — GOAL :offset 16  → runtime 12
+  //   trsqv.quat (overlays rot.x)    — GOAL :offset 32  → runtime 28
+  constexpr u32 ROOT_RUNTIME_OFF      = 108;
+  constexpr u32 NODE_LIST_RUNTIME_OFF = 112;
+  constexpr u32 TRANS_RUNTIME_OFF     = 12;
+  constexpr u32 QUAT_RUNTIME_OFF      = 28;
+  // cspace-array layout (same as update_actor_collision uses):
+  //   data starts at runtime offset 12 (GOAL :offset 16 minus 4 basic tag)
+  //   cspace entries are 32 bytes each
+  //   cspace.bone (a basic ptr) is at offset 16 within the cspace struct
+  constexpr u32 CSPACE_ARRAY_DATA_OFF = 12;
+  constexpr u32 CSPACE_SIZE           = 32;
+  constexpr u32 CSPACE_BONE_OFF       = 16;
+
+  // Helper: read `node-list[idx].bone.transform` into a 16-float matrix.
+  // Returns false and leaves m unchanged on any failure.
+  auto read_bone_matrix = [&](int idx, float m[16]) -> bool {
+    if (idx < 0) return false;
+    if (target_ptr + NODE_LIST_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
+    u32 node_list = 0;
+    std::memcpy(&node_list, ee_mem + target_ptr + NODE_LIST_RUNTIME_OFF, 4);
+    if (node_list == 0 || node_list == false_val) return false;
+    if ((node_list & 0x7) != 4) return false;
+    if (node_list + 4 > EE_MAIN_MEM_SIZE) return false;
+    u32 cspace_len = 0;
+    std::memcpy(&cspace_len, ee_mem + node_list, 4);
+    if (cspace_len == 0 || cspace_len >= 1024) return false;
+    if (static_cast<u32>(idx) >= cspace_len) return false;
+    u32 cspace_addr =
+        node_list + CSPACE_ARRAY_DATA_OFF + static_cast<u32>(idx) * CSPACE_SIZE;
+    if (cspace_addr + CSPACE_SIZE > EE_MAIN_MEM_SIZE) return false;
+    u32 bone_ptr = 0;
+    std::memcpy(&bone_ptr, ee_mem + cspace_addr + CSPACE_BONE_OFF, 4);
+    if (bone_ptr == 0 || bone_ptr == false_val) return false;
+    if ((bone_ptr & 0xF) != 0) return false;
+    if (bone_ptr + 64 > EE_MAIN_MEM_SIZE) return false;
+    std::memcpy(m, ee_mem + bone_ptr, 64);
+    for (int i = 0; i < 16; i++) if (!std::isfinite(m[i])) return false;
+    for (int c = 0; c < 3; c++) if (std::abs(m[3 * 4 + c]) > 1.0e8f) return false;
+    return true;
+  };
+
+  // Final outputs, in Jak world units + radians.
+  float pos[3]   = {0, 0, 0};
+  float pitch    = 0.0f;
+  float yaw      = 0.0f;
+  float roll     = 0.0f;
+  bool  have_pos = false;
+  bool  have_rot = false;
+
+  // ---- Position source -------------------------------------------------
+  // g_cutscene_track_bone > -1 → read that bone's translation (column 3
+  // of the bone matrix).  Default 29 (Lankle) since its world position
+  // follows the animation even when *target*'s root.trans is frozen.
+  {
+    float m[16];
+    if (read_bone_matrix(g_cutscene_track_bone, m)) {
+      pos[0] = m[3 * 4 + 0];
+      pos[1] = m[3 * 4 + 1];
+      pos[2] = m[3 * 4 + 2];
+      have_pos = true;
+    }
+  }
+
+  // ---- Rotation source -------------------------------------------------
+  // g_cutscene_track_rot_bone > -1 → extract Euler angles from that
+  // bone's rotation matrix.  Default 1 (align), which is the character
+  // root-align joint — its forward axis tracks the body's facing
+  // cleanly.  Lankle (the default *position* bone) is a poor rotation
+  // source because its Z basis is the foot's forward vector, which
+  // wobbles every step.
+  //
+  // Matrix → XYZ Euler (pitch/yaw/roll) assuming +Y-up, +Z-forward:
+  //   yaw   = atan2(z_basis.x, z_basis.z)
+  //   pitch = atan2(-z_basis.y, sqrt(z_basis.x² + z_basis.z²))
+  //   roll  = atan2(-x_basis.y, y_basis.y)
+  {
+    float m[16];
+    if (read_bone_matrix(g_cutscene_track_rot_bone, m)) {
+      const float zx = m[2 * 4 + 0];
+      const float zy = m[2 * 4 + 1];
+      const float zz = m[2 * 4 + 2];
+      yaw   = std::atan2(zx, zz);
+      pitch = std::atan2(-zy, std::sqrt(zx * zx + zz * zz));
+      const float xy = m[0 * 4 + 1];
+      const float yy = m[1 * 4 + 1];
+      roll  = std::atan2(-xy, yy);
+      have_rot = true;
+    }
+  }
+
+  // ---- Root-trans / root-quat fallback for whichever axis missed -------
+  // If either bone read bailed (skeleton uninitialized, index too big,
+  // user set the slider to -1), use the process's plain trsqv instead.
+  if (!have_pos || !have_rot) {
+    if (target_ptr + ROOT_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return;
+    u32 root_ptr;
+    std::memcpy(&root_ptr, ee_mem + target_ptr + ROOT_RUNTIME_OFF, 4);
+    if (root_ptr == 0 || root_ptr == false_val) return;
+    if (root_ptr + QUAT_RUNTIME_OFF + 16 > EE_MAIN_MEM_SIZE) return;
+    if (!have_pos) {
+      float trans[4];
+      std::memcpy(trans, ee_mem + root_ptr + TRANS_RUNTIME_OFF, 16);
+      pos[0] = trans[0];
+      pos[1] = trans[1];
+      pos[2] = trans[2];
+    }
+    if (!have_rot) {
+      float q[4];
+      std::memcpy(q, ee_mem + root_ptr + QUAT_RUNTIME_OFF, 16);
+      const float qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+      pitch = std::atan2(2.0f * (qw * qx - qy * qz),
+                         1.0f - 2.0f * (qx * qx + qy * qy));
+      yaw   = std::atan2(2.0f * (qw * qy + qx * qz),
+                         1.0f - 2.0f * (qy * qy + qx * qx));
+      float sr = 2.0f * (qw * qz + qx * qy);
+      if (sr >  1.0f) sr =  1.0f;
+      if (sr < -1.0f) sr = -1.0f;
+      roll = std::asin(sr);
+    }
+  }
+
+  const float sm64_x = pos[0] * JAK_TO_SM64_SCALE;
+  const float sm64_y = pos[1] * JAK_TO_SM64_SCALE;
+  const float sm64_z = pos[2] * JAK_TO_SM64_SCALE;
+
   {
     std::scoped_lock lock(m_sm64_lock);
     sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
-    sm64_set_mario_faceangle(m_mario_id, jak_yaw);
+    sm64_set_mario_faceangle(m_mario_id, yaw);
+    // sm64_set_mario_angle writes marioObj->header.gfx.angle — the
+    // rendered rotation, distinct from face_angle which is physics yaw.
+    sm64_set_mario_angle(m_mario_id, pitch, yaw, roll);
   }
 }
 

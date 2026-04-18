@@ -251,6 +251,20 @@ float get_mario_scale() {
   return g_libsm64_mario_scale;
 }
 
+// Source-of-truth for the "no slippery Mario" toggle.  Flips the C++
+// bool (which load_level_collision reads the next time a level is
+// streamed) and mirrors it into the libsm64 C-linkage int (which
+// mario.c reads every frame in mario_floor_is_slippery).  Keeping both
+// in one call prevents the two halves from drifting out of sync.
+void set_no_slippery_mario(bool enabled) {
+  g_no_slippery_mario = enabled;
+  sm64_set_no_slippery_mario(enabled ? 1 : 0);
+}
+
+bool get_no_slippery_mario() {
+  return g_no_slippery_mario;
+}
+
 // ---------------------------------------------------------------------------
 // Koopa-shell model extraction from the SM64 ROM
 // ---------------------------------------------------------------------------
@@ -1652,6 +1666,22 @@ void LibSM64Manager::load_level_collision(
   // third-party/libsm64/src/decomp/include/surface_terrains.h:6.
   constexpr int16_t SURFACE_BURNING_TYPE = 0x0001;
 
+  // "No slippery Mario" mode — when `g_no_slippery_mario` is on, we
+  // classify each tri by Jak pat-mode (wall / ground / obstacle) and
+  // map to SM64 slipperiness surface types so the vanilla SM64 slope
+  // thresholds match Jak's geometry better.  These constants are unused
+  // when the toggle is off.
+  constexpr int16_t SURFACE_VERY_SLIPPERY = 0x0013;
+  constexpr int16_t SURFACE_SLIPPERY      = 0x0014;
+  constexpr int16_t SURFACE_NOT_SLIPPERY  = 0x0015;
+  constexpr int16_t TERRAIN_STONE_TYPE    = 0x0001;  // default terrain
+  constexpr int16_t TERRAIN_SLIDE_TYPE    = 0x0006;  // slick (used on walls)
+  constexpr uint32_t PAT_MODE_SHIFT       = 3;
+  constexpr uint32_t PAT_MODE_MASK        = 0x7;
+  constexpr uint32_t PAT_MODE_GROUND      = 0;
+  constexpr uint32_t PAT_MODE_WALL        = 1;
+  constexpr uint32_t PAT_MODE_OBSTACLE    = 2;
+
   size_t num_tris = vertices.size() / 3;
   std::vector<SM64Surface> surfaces;
   surfaces.reserve(num_tris);
@@ -1668,15 +1698,31 @@ void LibSM64Manager::load_level_collision(
 
     SM64Surface surf;
     const uint32_t material = (v0.pat >> PAT_MATERIAL_SHIFT) & PAT_MATERIAL_MASK;
+    const uint32_t pat_mode = (v0.pat >> PAT_MODE_SHIFT) & PAT_MODE_MASK;
     if (material == PAT_MAT_HOTCOALS || material == PAT_MAT_LAVA) {
       // Hot surface — SM64 will launch Mario with the butt-on-fire action.
       surf.type = SURFACE_BURNING_TYPE;
       burning_tris++;
+    } else if (g_no_slippery_mario) {
+      // Classify by Jak pat-mode so the vanilla SM64 slippery thresholds
+      // line up with Jak's geometry.  Walls get SURFACE_VERY_SLIPPERY so
+      // Mario slides off them, flat ground gets SURFACE_NOT_SLIPPERY so
+      // he sticks to it, and obstacles fall in between.
+      switch (pat_mode) {
+        case PAT_MODE_WALL:     surf.type = SURFACE_VERY_SLIPPERY; break;
+        case PAT_MODE_GROUND:   surf.type = SURFACE_NOT_SLIPPERY;  break;
+        case PAT_MODE_OBSTACLE: surf.type = SURFACE_SLIPPERY;      break;
+        default:                surf.type = 0x0000;                break;  // SURFACE_DEFAULT
+      }
     } else {
       surf.type = 0x0000;    // SURFACE_DEFAULT
     }
     surf.force = 0;
-    surf.terrain = 0x0001;  // TERRAIN_STONE
+    // Terrain tag — slippery-mode tags walls as SLIDE so Mario glances
+    // off them; otherwise keep the vanilla STONE tag.
+    surf.terrain = (g_no_slippery_mario && pat_mode == PAT_MODE_WALL)
+                       ? TERRAIN_SLIDE_TYPE
+                       : TERRAIN_STONE_TYPE;
 
     for (int v = 0; v < 3; v++) {
       const auto& vert = vertices[i * 3 + v];

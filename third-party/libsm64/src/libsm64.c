@@ -110,6 +110,17 @@ SM64_LIB_FN void sm64_set_mario_scale(float scale)
     g_libsm64_mario_scale = scale;
 }
 
+// "No slippery Mario" toggle — read by mario.c's mario_floor_is_slippery
+// to swap in looser slope thresholds that keep Mario on his feet on
+// Jak's steeper-than-SM64-intended geometry.  Off by default (0); the
+// C++ ImGui checkbox keeps this in sync with `g_no_slippery_mario`.
+SM64_LIB_FN int g_libsm64_no_slippery_mario = 0;
+
+SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled)
+{
+    g_libsm64_no_slippery_mario = enabled ? 1 : 0;
+}
+
 
 SM64_LIB_FN void sm64_global_init( const uint8_t *rom, uint8_t *outTexture )
 {

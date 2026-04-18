@@ -588,17 +588,24 @@ u32 mario_floor_is_slippery(struct MarioState *m) {
         return TRUE;
     }
 
+    // Libsm64 fork: gate the "is floor slippery" normY thresholds behind
+    // the `g_libsm64_no_slippery_mario` toggle.  Off (vanilla, default)
+    // matches the original SM64 decomp thresholds; on keeps Mario on his
+    // feet on Jak's steeper-than-SM64-intended geometry.
+    extern int g_libsm64_no_slippery_mario;
+    const int no_slip = g_libsm64_no_slippery_mario;
+
     switch (mario_get_floor_class(m)) {
         case SURFACE_VERY_SLIPPERY:
-            normY = 0.9848077f; //~cos(10 deg)
+            normY = no_slip ? 0.85f : 0.9848077f; //~cos(10 deg)
             break;
 
         case SURFACE_SLIPPERY:
-            normY = 0.9396926f; //~cos(20 deg)
+            normY = no_slip ? 0.25f : 0.9396926f; //~cos(20 deg)
             break;
 
         default:
-            normY = 0.7880108f; //~cos(38 deg)
+            normY = no_slip ? 0.7f : 0.7880108f; //~cos(38 deg)
             break;
 
         case SURFACE_NOT_SLIPPERY:

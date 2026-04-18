@@ -9,6 +9,8 @@
     "editor.snippetSuggestions": "top"
   },
   "cmake.configureOnOpen": false,
+  "cmake.configureOnEdit": false,
+  "cmake.automaticReconfigure": false,
   "files.associations": {
     "xhash": "cpp",
     "vector": "cpp"

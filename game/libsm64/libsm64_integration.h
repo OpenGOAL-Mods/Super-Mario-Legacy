@@ -88,6 +88,32 @@ float get_mario_scale();
 inline int g_cutscene_track_bone     = 26;  // position source (Lankle)
 inline int g_cutscene_track_rot_bone = 26;   // rotation source (align)
 
+// "No slippery Mario" mode.  When off (default), every tri we stream
+// into libsm64 is tagged SURFACE_DEFAULT and the vanilla SM64 slope
+// thresholds are used — this is the classic behaviour Mario shipped
+// with and it means any slope over ~38° launches him into a slide.
+// When on, we:
+//   1. Classify each collision tri by its Jak `pat-mode` (wall / ground
+//      / obstacle) and map to SURFACE_VERY_SLIPPERY / NOT_SLIPPERY /
+//      SLIPPERY respectively, and tag walls with TERRAIN_SLIDE.
+//   2. Loosen the normY cutoffs in `mario_floor_is_slippery` so Mario
+//      stays on his feet on Jak's steeper-than-SM64-intended geometry.
+// Read from both C++ (load_level_collision) and C (mario.c via the
+// extern `g_libsm64_no_slippery_mario` int, kept in sync by
+// `set_no_slippery_mario` below).  Default OFF because it changes Mario
+// physics globally.
+inline bool g_no_slippery_mario = true;
+
+// Single-call setter — flips `g_no_slippery_mario` (used in
+// load_level_collision) AND mirrors it into the libsm64 C-linkage
+// `g_libsm64_no_slippery_mario` int (read by mario.c's slope-class
+// thresholds) so both sides stay in sync.  The slope-threshold half
+// applies immediately; the pat-mode surface classification only
+// re-applies on the next collision stream (level transition / the
+// streaming window rolling over around Mario).
+void set_no_slippery_mario(bool enabled);
+bool get_no_slippery_mario();
+
 struct MarioGeometry {
   std::vector<float> position;   // 3 floats per vertex, 3 verts per tri
   std::vector<float> normal;     // 3 floats per vertex

@@ -177,6 +177,33 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
                      "(rendered size, walk speed cap, collision scale).");
   }
 
+  // "No slippery Mario" toggle — off by default so Mario behaves like
+  // vanilla SM64.  Flipping it does two things atomically:
+  //   1. libsm64 C-side: swaps the slope-class normY cutoffs in
+  //      mario_floor_is_slippery to looser values so Mario stays on his
+  //      feet on Jak's steeper-than-SM64-intended geometry.
+  //   2. Jak-side: tells load_level_collision to classify each tri by
+  //      pat-mode (wall/ground/obstacle) instead of tagging everything
+  //      SURFACE_DEFAULT.  Only takes effect on the NEXT collision
+  //      stream (usually a level transition); flipping it at runtime in
+  //      the middle of a level leaves the existing tris unreclassified
+  //      until the streaming window around Mario rolls over.
+  {
+    bool no_slip = get_no_slippery_mario();
+    if (ImGui::Checkbox("No Slippery Mario", &no_slip)) {
+      set_no_slippery_mario(no_slip);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("OFF (default): vanilla SM64 slope thresholds — any\n"
+                       "slope over ~38 deg flips Mario into a slide.\n"
+                       "ON: looser thresholds + pat-mode surface mapping so\n"
+                       "walls slide (VERY_SLIPPERY) and ground sticks\n"
+                       "(NOT_SLIPPERY).  Surface-type change requires a\n"
+                       "collision reload (level transition) to apply;\n"
+                       "slope-threshold change is immediate.");
+    }
+  }
+
   // Cutscene bone tracker.  teleport_mario_to_jak reads
   // `(-> *target* node-list data N bone transform)` when this is >= 0,
   // else falls back to root.trans / root.quat.  Useful eichar indices:

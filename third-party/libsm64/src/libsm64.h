@@ -238,6 +238,15 @@ extern SM64_LIB_FN void sm64_set_sound_volume(float vol);
 extern SM64_LIB_FN float g_libsm64_mario_scale;
 extern SM64_LIB_FN void sm64_set_mario_scale(float scale);
 
+// "No slippery Mario" toggle (libsm64 fork extension).  When 0 (default),
+// mario_floor_is_slippery uses the vanilla SM64 thresholds and Mario
+// slides off anything steeper than ~38°.  When 1, looser thresholds are
+// used so Mario stays on his feet on Jak's steeper geometry.  Read
+// directly from mario.c; kept in sync with the C++ `g_no_slippery_mario`
+// bool by the ImGui checkbox in the libsm64 debug panel.
+extern SM64_LIB_FN int g_libsm64_no_slippery_mario;
+extern SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled);
+
 // ---- Fake held-object API (libsm64 fork extension) ----------------------
 // Forces Mario into a light-object hold state without needing a real SM64
 // Object. Plants a zero-initialized sentinel into heldObj/usedObj and kicks

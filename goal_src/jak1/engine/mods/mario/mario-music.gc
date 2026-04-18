@@ -1,0 +1,121 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-music.gc
+;; name in dgo: mario-music
+;; dgos: ENGINE, GAME
+
+(bundles "ENGINE.CGO" "GAME.CGO")
+
+;; ---------------------------------------------------------------------------
+;; mario-music — per-frame music orchestration for the Mario mod.
+;;
+;; Called as `(update-mario-music!)` from sm64-mario-col's idle loop.
+;;
+;; When *mario-settings* play-sm64-music? is true:
+;;   1. Jak's own music is silenced by pinning *setting-control*'s music +
+;;      music-volume at 0 each frame (all three layers — default, target,
+;;      current — so whatever setting stack is in play still resolves to
+;;      "no song, no volume").
+;;   2. The current Jak level is looked up via (level-get-target-inside
+;;      *level*) and translated to an SM64 sequence symbol through
+;;      `mario-music-for-level`.
+;;   3. On a level-change transition, we switch tracks by calling
+;;      `sm64-music` (pause-responsive) or `sm64-music-forced` for screens
+;;      where master-mode is intentionally outside 'game (title / intro /
+;;      demo / file-select style screens).
+;;
+;; When the flag flips off:
+;;   - We stop the SM64 track we were playing, clear the tracked level so
+;;     re-enabling restarts cleanly, and stop pinning the Jak volume so
+;;     vanilla music resumes on the next ambient tick.
+;;
+;; The mapping below defaults every level to 'bob-omb — replace the RHS of
+;; each case to taste.  Valid track symbols are whatever `sm64-music-id`
+;; in mario.gc accepts.
+;; ---------------------------------------------------------------------------
+
+(defun mario-music-for-level ((lev symbol))
+  "Return the sm64-music symbol that should play in the given Jak level.
+   Default: 'bob-omb everywhere — fill in per level as desired."
+  (case lev
+    (('title)        'title)
+    ;;add case to play file-select when in file select?
+    (('intro)        'bob-omb)
+    (('demo)         'bob-omb)
+    (('training)     'bob-omb)
+    (('village1)     'inside-castle)
+    (('beach)        'credits)
+    (('jungle)       'file-select)
+    (('jungleb)      'underground)
+    (('misty)        'spooky)
+    (('firecanyon)   'hot)
+    (('village2)     'inside-castle)
+    (('swamp)        'bob-omb)
+    (('sunken)       'water)
+    (('rolling)      'slide)
+    (('ogre)         'boss)
+    (('snow)         'snow)
+    (('maincave)     'underground)
+    (('darkcave)     'spooky)
+    (('robocave)     'underground)
+    (('village3)     'hot)
+    (('lavatube)     'metal-cap)
+    (('citadel)      'koopa-road)
+    (('finalboss)    'bowser)
+    (else            'bob-omb)))
+
+;; True while a given level's track is considered "played in paused
+;; context".  These are the screens where Jak's master-mode sits at
+;; something other than 'game, so our pause gating would mute a normal
+;; sm64-music call.  sm64-music-forced keeps the audio worker ticking
+;; so the menu theme is audible.
+(defun mario-music-level-is-forced? ((lev symbol))
+  (or (= lev 'title) (= lev 'intro) (= lev 'demo)))
+
+;; Cache: last level symbol we told libsm64 about.  #f means "nothing yet".
+(define *mario-music-last-level* (the symbol #f))
+
+;; Cache: were we muting Jak's music last frame?  Edge-detection so we
+;; call add-setting!/remove-setting! exactly once per transition — the
+;; underlying setting-control connection then persists across frames
+;; without re-registration.
+(define *mario-music-was-active* #f)
+
+;; update-mario-music! is declared as a `defbehavior process` because
+;; add-setting!/remove-setting! expand to `(... (with-pp pp) ...)` which
+;; only resolves inside a behavior.  It's called from sm64-mario-col's
+;; idle loop, so the caller's pp (an sm64-mario-col process) naturally
+;; owns the music-volume/music overrides — once the process dies (e.g.
+;; Mario is deleted) setting-control auto-cleans them.
+(defbehavior update-mario-music! process ()
+  (when *mario-settings*
+    (cond
+      ((-> *mario-settings* play-sm64-music?)
+       ;; Register the mute overrides on the rising edge.  We override
+       ;; both `music` (the "what to play" symbol — prevents new tracks
+       ;; from loading) and `music-volume` (clamps the sound-group-music
+       ;; volume to 0 for any audio already in flight).
+       (when (not *mario-music-was-active*)
+         (add-setting! 'music-volume 'abs 0.0 0)
+         (add-setting! 'music #f 0.0 0))
+       ;; Detect level transitions and start the mapped SM64 track.
+       (when *level*
+         (let ((cur-lev (-> (level-get-target-inside *level*) name)))
+           (when (!= cur-lev *mario-music-last-level*)
+             (set! *mario-music-last-level* cur-lev)
+             (let ((track (mario-music-for-level cur-lev)))
+               (if (mario-music-level-is-forced? cur-lev)
+                 (sm64-music-forced track)
+                 (sm64-music track))))))
+       (set! *mario-music-was-active* #t))
+      (else
+       ;; Falling edge: drop our overrides so the vanilla music setting
+       ;; flows through again, and stop whatever SM64 track was playing.
+       (when *mario-music-was-active*
+         (remove-setting! 'music-volume)
+         (remove-setting! 'music)
+         (pc-sm64-stop-music)
+         (set! *mario-music-last-level* #f)
+         (set! *mario-music-was-active* #f)))))
+  (none))

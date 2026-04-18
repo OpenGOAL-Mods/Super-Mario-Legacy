@@ -348,5 +348,6 @@
   "hud-classes-pc.o" ;; added
   "mario-settings.o" ;; mario mod
   "mario.o"
+  "mario-music.o" ;; mario mod
   "mario-menu.o" ;; mario mod
  ))

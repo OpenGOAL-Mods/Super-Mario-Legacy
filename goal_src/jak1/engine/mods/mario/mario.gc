@@ -26,6 +26,11 @@
 (define-extern pc-sm64-stop-music (function none))
 (define-extern pc-sm64-teleport-mario (function float float float none))
 
+;; Forward-decl: lives in mario-music.gc (loaded right after this file).
+;; sm64-mario-col's idle loop calls it every tick to track level
+;; transitions and mute Jak's music while SM64 music is enabled.
+(define-extern update-mario-music! (function none))
+
 ;; ---------------------------------------------------------------------------
 ;; sm64-music — friendly-name helpers.  Map a GOAL symbol to the SM64
 ;; sequence id it corresponds to (see third-party/libsm64/src/decomp/include/
@@ -122,6 +127,75 @@
          (else
            (format 0 "sm64-music-forced: unknown track ~A — stopping music~%" track)
            (pc-sm64-stop-music))))))
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; sm64-sound — friendly-name wrapper around pc-sm64-play-sound.
+;;
+;; Maps a GOAL symbol to the 32-bit SOUND_ARG_LOAD-encoded id libsm64
+;; expects in sm64_play_sound_global.  Packing order (from audio_defines.h):
+;;   bank      << 28
+;;   playFlags << 24
+;;   soundID   << 16
+;;   priority  << 8
+;;   flags2    << 4
+;;   status         ← SOUND_STATUS_STARTING (= 1) OR'd into the low nibble
+;;
+;; **Important**: the low status nibble MUST be 1 (SOUND_STATUS_STARTING),
+;; not 0.  The SM64 audio engine's dispatch rejects sounds whose status
+;; byte is STOPPED, so e.g. `#x24218080` silently no-ops while
+;; `#x24218081` plays — that one-bit difference is the whole reason
+;; sounds may appear broken.
+;;
+;; Most Mario voice clips live in bank 2 with playFlags=4, priority=0x80,
+;; flags2=8 → encoded as `#x24NN8081` where NN is the 2-digit hex soundID
+;; (from audio_defines.h).  Clips with a different priority/flags use the
+;; full SOUND_ARG_LOAD expansion + 1.  Menu / system sounds live in bank
+;; 7 → `#x70NNFF81` for playFlags=0, priority=0xFF, flags2=8.
+;;
+;; Note: audio_defines.h itself defines SOUND_MARIO_OKEY_DOKEY as the
+;; half-word 0x2021 — that value is the bank+soundID bits shifted into
+;; the low half and will NOT play correctly if passed to libsm64.  We
+;; use the full 32-bit encoding that matches every neighbouring Mario
+;; sound in the bank-2 voice group.
+;;
+;; Extend by adding more cases below — each is a one-liner.  Remember
+;; the trailing `1` status bit.
+;; ---------------------------------------------------------------------------
+(defun sm64-sound ((snd symbol))
+  (case snd
+    ;; ---- Iconic Mario voice (bank 2, standard priority) -----------------
+    (('yahoo)                    (pc-sm64-play-sound #x24048081))  ;; classic "Yahoo!"
+    (('hoo-hoo)                  (pc-sm64-play-sound #x24038081))  ;; short "Hoo hoo!"
+    (('here-we-go)               (pc-sm64-play-sound #x240C8081))  ;; "Here we go!"
+    (('mama-mia)                 (pc-sm64-play-sound #x24208081))
+    (('oki-doki 'okey-dokey)     (pc-sm64-play-sound #x24218081))
+    (('ground-pound-wah 'gp-wah) (pc-sm64-play-sound #x24228081))
+    (('punch-yah)                (pc-sm64-play-sound #x241E8081))
+    (('punch-hoo)                (pc-sm64-play-sound #x241F8081))
+    (('punch-wah)                (pc-sm64-play-sound #x24248081))
+    (('yahoo-waha-yippee 'jump)  (pc-sm64-play-sound #x242B8081))  ;; random Yahoo/Waha/Yippee
+    (('doh)                      (pc-sm64-play-sound #x24308081))
+    (('twirl-bounce)             (pc-sm64-play-sound #x24348081))
+    (('so-long-bowser 'so-long-gay-bowser)
+                                 (pc-sm64-play-sound #x24368081))
+    (('ima-tired)                (pc-sm64-play-sound #x24378081))
+    ;; ---- Mario voice with custom priority -------------------------------
+    (('whoa)                     (pc-sm64-play-sound #x2408C081))  ;; priority 0xC0
+    (('waaaoooow 'long-fall)     (pc-sm64-play-sound #x2410C081))  ;; falling scream, priority 0xC0
+    (('on-fire)                  (pc-sm64-play-sound #x2414A081))  ;; priority 0xA0
+    (('dying)                    (pc-sm64-play-sound #x2415FF81))  ;; priority 0xFF
+    (('drowning)                 (pc-sm64-play-sound #x2423F081))  ;; priority 0xF0
+    (('attacked)                 (pc-sm64-play-sound #x240AFF81))  ;; priority 0xFF
+    (('game-over)                (pc-sm64-play-sound #x2431FF81))  ;; priority 0xFF
+    (('hello 'its-a-me 'mario-hello)
+                                 (pc-sm64-play-sound #x2432FF81))  ;; "It's-a me, Mario!" / "Hello"
+    (('press-start)              (pc-sm64-play-sound #x2433FFA1))  ;; priority 0xFF, flags2 0xA
+    ;; ---- Menu / system sounds (bank 7) ----------------------------------
+    (('lets-a-go 'lets-go)       (pc-sm64-play-sound #x7024FF81))  ;; star-select "Let's-a go!"
+    (('star-okey-dokey)          (pc-sm64-play-sound #x7023FF81))  ;; star-select "Okey dokey"
+    (else
+      (format 0 "sm64-sound: unknown sound ~A~%" snd)))
   (none))
 
 ;; Toggle persistence for the `play-sm64-music?` setting.  Flips the flag,
@@ -230,6 +304,9 @@
     (set! (-> self death-timer) 0)
     (set! (-> self prev-jak-health) 0.0)
     (loop
+      ;; ---- Music orchestration (mute Jak music + pick SM64 track) ----
+      (update-mario-music!)
+
       ;; ---- Mario death → kill Jak, wait for respawn, THEN despawn Mario ----
       (let ((dead (< (-> *sm64-mario-health* x) 0.5)))
         ;; Rising edge: Mario just died — kill Jak, start waiting

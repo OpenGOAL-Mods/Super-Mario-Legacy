@@ -154,6 +154,27 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
     ImGui::SetTooltip("Volume of the SM64 audio stream (music + sfx).");
   }
 
+  // Live Mario scale slider.  Updates three things in lock step:
+  //   1. Jak-side SM64_TO_JAK_SCALE / JAK_TO_SM64_SCALE (inline-vars in
+  //      libsm64_integration.h) — affects rendered mesh size + every
+  //      Jak↔SM64 unit conversion in position sync, collision, etc.
+  //   2. libsm64 C-side g_libsm64_mario_scale — feeds the walk/swim
+  //      speed caps in mario_actions_moving.c / _submerged.c so Mario's
+  //      top speed scales proportionally with his size.
+  //   3. (Indirect) Everything downstream that reads the two above.
+  // Range [10, 150]: 10 makes Mario huge (feels like giant mode), 150
+  // makes him tiny.  Default 50 matches the mario-scale-testing branch.
+  float scale = get_mario_scale();
+  if (ImGui::SliderFloat("Mario Scale", &scale, 10.0f, 150.0f, "%.1f")) {
+    set_mario_scale(scale);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("SM64-units-per-Jak-meter.  Lower = bigger Mario,\n"
+                     "higher = smaller.  Vanilla SM64 uses 43; this project\n"
+                     "ships with 50 as the default.  Live-updates everything\n"
+                     "(rendered size, walk speed cap, collision scale).");
+  }
+
   ImGui::Separator();
 
   // Initialization

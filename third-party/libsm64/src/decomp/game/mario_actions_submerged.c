@@ -1128,7 +1128,11 @@ static void update_metal_water_walking_speed(struct MarioState *m) {
     if (m->forwardVel <= 0.0f) {
         m->forwardVel += 1.1f;
     } else if (m->forwardVel <= val) {
-        m->forwardVel += 1.1f - m->forwardVel / 43.0f;
+        // Metal-water walk-speed cap; see the comment in
+        // mario_actions_moving.c:update_walking_speed for why we route this
+        // through the runtime scale.
+        extern float g_libsm64_mario_scale;
+        m->forwardVel += 1.1f - m->forwardVel / g_libsm64_mario_scale;
     } else if (m->floor->normal.y >= 0.95f) {
         m->forwardVel -= 1.0f;
     }

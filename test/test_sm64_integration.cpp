@@ -935,10 +935,12 @@ TEST_F(SM64GroundPoundHitboxTest, ActorTouchingTopEdgeHits) {
 
 TEST_F(SM64GroundPoundHitboxTest, JakUnitMarioHitboxMatchesSm64) {
   // Sanity-check the actual Mario constants. SM64: r=37, h=160 SM64u.
-  // Jak units: SM64_TO_JAK_SCALE = 4096/43 ≈ 95.26.
-  constexpr float SM64_TO_JAK = 4096.0f / 43.0f;
-  float r_jak = 37.0f * SM64_TO_JAK;    // ~3525
-  float h_jak = 160.0f * SM64_TO_JAK;   // ~15244
+  // The Jak↔SM64 scale is runtime-adjustable (debug GUI slider); read the
+  // current value via get_mario_scale() so this test tracks whatever the
+  // project default is.  Default is 50 → SM64_TO_JAK ≈ 81.92.
+  const float SM64_TO_JAK = 4096.0f / sm64::get_mario_scale();
+  float r_jak = 37.0f * SM64_TO_JAK;    // r=37  SM64u → Jak units
+  float h_jak = 160.0f * SM64_TO_JAK;   // h=160 SM64u → Jak units
   auto hb = make_hitbox(0, 0, 0, r_jak, h_jak);
   // Actor 3000 Jak units away (2D), at Mario's feet → should hit.
   EXPECT_TRUE(sm64::ground_pound_hitbox_overlaps(hb, math::Vector3f(3000, 0, 0), 0, 0));

@@ -454,7 +454,11 @@ void update_walking_speed(struct MarioState *m) {
     if (m->forwardVel <= 0.0f) {
         m->forwardVel += 1.1f;
     } else if (m->forwardVel <= targetSpeed) {
-        m->forwardVel += 1.1f - m->forwardVel / 43.0f;
+        // Vanilla SM64 used a hardcoded 43 here (the same value as the Jak↔SM64
+        // scale); we route through g_libsm64_mario_scale so the walk-speed
+        // cap (= 1.1 * scale) tracks the runtime Mario scale.  See libsm64.h.
+        extern float g_libsm64_mario_scale;
+        m->forwardVel += 1.1f - m->forwardVel / g_libsm64_mario_scale;
     } else if (m->floor->normal.y >= 0.95f) {
         m->forwardVel -= 1.0f;
     }

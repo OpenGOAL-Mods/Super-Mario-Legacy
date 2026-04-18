@@ -223,6 +223,21 @@ extern SM64_LIB_FN void sm64_play_sound(int32_t soundBits, float *pos);
 extern SM64_LIB_FN void sm64_play_sound_global(int32_t soundBits);
 extern SM64_LIB_FN void sm64_set_sound_volume(float vol);
 
+// ---- Runtime Mario scale factor (libsm64 fork extension) -----------------
+// Single source of truth for "SM64 units per Jak meter".  Vanilla SM64
+// hard-codes 43 in a few tuning constants (walk-speed cap in
+// mario_actions_moving.c, metal-water walk-speed cap in
+// mario_actions_submerged.c, plus several Jak-side Jak↔SM64 unit
+// conversions).  This global is read by all of them so adjusting Mario's
+// rendered size also scales his walking / swimming top speeds
+// proportionally, keeping the action loop tuned.
+//
+// Clamped to [1, 500] by sm64_set_mario_scale so the C decomp's
+// `forwardVel / g_libsm64_mario_scale` never divides by ~0.  Default
+// value 50.0f corresponds to Mario standing at ~3m tall in Jak units.
+extern SM64_LIB_FN float g_libsm64_mario_scale;
+extern SM64_LIB_FN void sm64_set_mario_scale(float scale);
+
 // ---- Fake held-object API (libsm64 fork extension) ----------------------
 // Forces Mario into a light-object hold state without needing a real SM64
 // Object. Plants a zero-initialized sentinel into heldObj/usedObj and kicks

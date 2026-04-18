@@ -230,6 +230,27 @@ int LibSM64Manager::get_audio_volume() const {
   return m_audio_volume;
 }
 
+// Source-of-truth for the Mario scale factor.  g_libsm64_mario_scale is
+// the C-linkage storage in libsm64.c; set_mario_scale bumps it AND
+// updates the derived Jak-side SM64_TO_JAK_SCALE / JAK_TO_SM64_SCALE
+// inline-variables so every downstream read lands on a consistent value
+// within the same frame.
+void set_mario_scale(float scale) {
+  if (!std::isfinite(scale)) scale = 50.0f;
+  if (scale < 1.0f)   scale = 1.0f;
+  if (scale > 500.0f) scale = 500.0f;
+  // Bridge to libsm64 — this is what mario_actions_moving.c and
+  // mario_actions_submerged.c read in their walk-speed caps.
+  sm64_set_mario_scale(scale);
+  // Keep the Jak-side scale constants in lock step.
+  SM64_TO_JAK_SCALE = 4096.0f / scale;
+  JAK_TO_SM64_SCALE = scale / 4096.0f;
+}
+
+float get_mario_scale() {
+  return g_libsm64_mario_scale;
+}
+
 // ---------------------------------------------------------------------------
 // Koopa-shell model extraction from the SM64 ROM
 // ---------------------------------------------------------------------------

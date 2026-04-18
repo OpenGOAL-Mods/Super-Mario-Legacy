@@ -38,11 +38,31 @@ static constexpr int TEXTURE_HEIGHT = 64;
 
 // Scale factors between SM64 units and Jak internal units.
 // Jak's coordinate system uses 4096 units per meter (PS2 fixed-point heritage).
-// Mario is ~160 SM64 units tall (~1.55m real), so 1 SM64 unit ~ 0.0097m ~ 39.7 Jak units.
-// Original estimate: 1 Jak meter = 43 SM64 units. Combined with 4096 units/meter:
-//   1 Jak unit = 43/4096 SM64 units, 1 SM64 unit = 4096/43 Jak units.
-static constexpr float SM64_TO_JAK_SCALE = 4096.0f / 43.0f;   // ~95.26
-static constexpr float JAK_TO_SM64_SCALE = 43.0f / 4096.0f;   // ~0.0105
+// Mario is ~160 SM64 units tall (~1.55m real); dividing by a "Mario scale"
+// constant (historically 43 in vanilla SM64, currently 50 by default in
+// this project) gives us the Jak-meter/SM64-unit conversion ratio.
+//
+// These used to be constexpr, but the debug GUI now lets the user adjust
+// the scale live via sm64_set_mario_scale().  They're defined as inline
+// float variables (C++17) so they have a single definition shared across
+// TUs and can be mutated at runtime by set_mario_scale below.  All 55+
+// existing call sites read them as plain floats — no change needed at the
+// use sites.
+//
+// The libsm64 C decomp also reads the same underlying value via
+// `extern float g_libsm64_mario_scale;` in mario_actions_moving.c and
+// mario_actions_submerged.c (walk/swim-speed caps), so set_mario_scale
+// updates both sides atomically.
+inline float SM64_TO_JAK_SCALE = 4096.0f / 50.0f;   // ~81.92 at scale 50
+inline float JAK_TO_SM64_SCALE = 50.0f / 4096.0f;   // ~0.0122 at scale 50
+
+// Single-call scale setter — keeps SM64_TO_JAK_SCALE / JAK_TO_SM64_SCALE
+// on the Jak side and g_libsm64_mario_scale on the libsm64 side in lock
+// step.  Clamped to [1, 500].
+void set_mario_scale(float scale);
+// Current scale value (read from g_libsm64_mario_scale so it's always the
+// same reference point the C decomp uses).
+float get_mario_scale();
 
 struct MarioGeometry {
   std::vector<float> position;   // 3 floats per vertex, 3 verts per tri

@@ -97,6 +97,19 @@ SM64_LIB_FN void sm64_register_play_sound_function( SM64PlaySoundFunctionPtr pla
     g_play_sound_func = playSoundFunction;
 }
 
+// Runtime Mario scale factor.  See libsm64.h for semantics.  Default 50 is
+// the "feels good" value from the mario-scale-testing branch; the vanilla
+// SM64 decomp used 43.  Read directly by mario_actions_moving.c and
+// mario_actions_submerged.c via `extern float g_libsm64_mario_scale;`.
+SM64_LIB_FN float g_libsm64_mario_scale = 50.0f;
+
+SM64_LIB_FN void sm64_set_mario_scale(float scale)
+{
+    if (scale < 1.0f) scale = 1.0f;
+    if (scale > 500.0f) scale = 500.0f;
+    g_libsm64_mario_scale = scale;
+}
+
 
 SM64_LIB_FN void sm64_global_init( const uint8_t *rom, uint8_t *outTexture )
 {

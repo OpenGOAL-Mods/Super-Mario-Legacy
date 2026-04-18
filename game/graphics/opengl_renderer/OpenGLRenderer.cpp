@@ -1075,6 +1075,13 @@ void OpenGLRenderer::tick_mario_sm64() {
   // 1c. Read target state flags (grabbed / periscope)
   mgr.read_target_flags(g_ee_main_mem);
 
+  // 1d. Edge-detect Jak's target-clone-anim so Mario's full state gets
+  // snapshotted at cell-pickup start and restored at cell-pickup end
+  // (otherwise Mario drifts / falls off his shell during the cutscene).
+  // Has to run AFTER read_target_flags (which updates target_clone_anim)
+  // and BEFORE mgr.tick so the next sim tick sees any restoration.
+  mgr.update_shell_preserve_across_cell_grab();
+
   // 2. Input gathering
   auto t2 = Clock::now();
   sm64::MarioInputState input{};

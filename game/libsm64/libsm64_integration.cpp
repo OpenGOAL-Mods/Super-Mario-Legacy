@@ -1058,6 +1058,16 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
 void LibSM64Manager::tick(const MarioInputState& input) {
   if (!m_initialized || m_mario_id < 0) return;
 
+  // Post-cutscene freeze: skip sm64_mario_tick (and everything that
+  // depends on it) for 90 sim ticks after a cell-pickup cutscene, so
+  // Jak's camera has time to catch up.  m_state / m_geometry stay at
+  // the "settle tick" values so the renderer still draws Mario — he
+  // just doesn't advance.
+  if (m_post_restore_freeze_ticks > 0) {
+    --m_post_restore_freeze_ticks;
+    return;
+  }
+
   // Edge-detect the B (punch/grab) button for update_yakow_grab. Shift the
   // previous frame into _prev first so (_cur && !_prev) becomes a single-
   // frame "just pressed" pulse.
@@ -1334,6 +1344,17 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   }
 
   m_prev_action = sm64_state.action;
+
+  // If the previous frame did a cell-pickup restore, THIS tick is the
+  // settle tick (sm64_mario_tick above propagated the restored pose
+  // into m_state / m_geometry so the renderer is caught up).  Arm the
+  // freeze so the next kPostCloneAnimFreezeTicks ticks early-return
+  // before even calling sm64_mario_tick, holding Mario in place for Jak
+  // to catch up.
+  if (m_post_restore_pending_settle) {
+    m_post_restore_pending_settle = false;
+    m_post_restore_freeze_ticks = kPostCloneAnimFreezeTicks;
+  }
 }
 
 GroundPoundHitbox LibSM64Manager::get_ground_pound_hitbox() {
@@ -4187,6 +4208,77 @@ void LibSM64Manager::clear_yakow_grab() {
 // Graceful degradation: if neither symbol resolves (e.g. on an older GOAL
 // build without the bridge defines), this function is a silent no-op.
 // Rebuilding goal_src picks up the bridge.
+
+// Cell-pickup state preservation.  target_clone_anim is set by the GOAL
+// side whenever Jak enters target-clone-anim (fuel-cell pickup, blue-eco
+// door/bridge cutscene, etc.).  During that window the normal Mario↔Jak
+// sync is skipped (OpenGLRenderer.cpp's teleport gate) so Mario stays
+// where he was — but sm64_mario_tick keeps running, so gravity, action
+// timeouts, and similar will drift his state.  Most visibly, he gets
+// booted off a shell he was riding when the cell was grabbed.
+//
+// Fix: snapshot the full MarioState at the cutscene's rising edge, then
+// restore position / velocity / face angle / forward velocity / action
+// verbatim at the falling edge.  This puts Mario back exactly where he
+// started, still on the shell (or whatever he was doing), moving in the
+// same direction at the same speed.
+//
+// Implementation note: m_state stores values in Jak units (position /
+// velocity / forward_velocity all scaled by SM64_TO_JAK_SCALE).  libsm64
+// setters take SM64 units, so we multiply back by JAK_TO_SM64_SCALE on
+// restore.  face_angle stays in radians on both sides.
+void LibSM64Manager::update_shell_preserve_across_cell_grab() {
+  if (!m_initialized || m_mario_id < 0) return;
+
+  const bool now_clone  = target_clone_anim;
+  const bool prev_clone = m_prev_target_clone_anim;
+
+  if (now_clone && !prev_clone) {
+    // Rising edge — cutscene just started.  Copy the whole MarioState
+    // under the geo mutex so the restore at the falling edge has a
+    // consistent snapshot.  We copy in Jak-unit form to match m_state.
+    std::lock_guard<std::mutex> g(m_geo_mutex);
+    m_clone_anim_snapshot = m_state;
+    m_clone_anim_snapshot_valid = true;
+  }
+
+  if (!now_clone && prev_clone) {
+    // Falling edge — cutscene just ended.  Replay the snapshot into
+    // libsm64.  We issue the position, velocity, and action writes
+    // under the sm64 lock (serializes against the audio worker).
+    if (m_clone_anim_snapshot_valid) {
+      const auto& s = m_clone_anim_snapshot;
+      const float sm64_x = s.position.x() * JAK_TO_SM64_SCALE;
+      const float sm64_y = s.position.y() * JAK_TO_SM64_SCALE;
+      const float sm64_z = s.position.z() * JAK_TO_SM64_SCALE;
+      const float sm64_vx = s.velocity.x() * JAK_TO_SM64_SCALE;
+      const float sm64_vy = s.velocity.y() * JAK_TO_SM64_SCALE;
+      const float sm64_vz = s.velocity.z() * JAK_TO_SM64_SCALE;
+      const float sm64_fwd = s.forward_velocity * JAK_TO_SM64_SCALE;
+      {
+        std::scoped_lock lock(m_sm64_lock);
+        // Setting action FIRST means libsm64's action-entry hook runs
+        // with the restored position/velocity in place (some actions
+        // latch position on entry).  Then we apply position/velocity
+        // explicitly in case the action-entry clobbered them.
+        sm64_set_mario_action(m_mario_id, s.action);
+        sm64_set_mario_position(m_mario_id, sm64_x, sm64_y, sm64_z);
+        sm64_set_mario_velocity(m_mario_id, sm64_vx, sm64_vy, sm64_vz);
+        sm64_set_mario_forward_velocity(m_mario_id, sm64_fwd);
+        sm64_set_mario_faceangle(m_mario_id, s.face_angle);
+      }
+      lg::info("[libsm64] cell-pickup cutscene ended — restored Mario to "
+               "pre-cutscene state (action=0x{:08X})", s.action);
+      // Flag this tick's tail to arm a 90-frame (3 s) post-settle freeze
+      // so the Jak camera has time to catch up to Mario's restored
+      // position before physics resumes and he accelerates away.
+      m_post_restore_pending_settle = true;
+    }
+    m_clone_anim_snapshot_valid = false;
+  }
+
+  m_prev_target_clone_anim = now_clone;
+}
 
 void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
   if (!m_initialized || m_mario_id < 0 || !ee_mem) return;

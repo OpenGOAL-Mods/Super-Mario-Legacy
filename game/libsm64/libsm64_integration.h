@@ -357,6 +357,14 @@ class LibSM64Manager {
   // aren't present yet (e.g. kernel loaded but target-handler not linked).
   void update_zoomer_shell(u8* ee_mem);
 
+  // Edge-detect Jak's target-clone-anim state (fuel-cell pickup / blue
+  // eco door / bridge cutscenes) and snapshot Mario's full sim state at
+  // the rising edge.  When the cutscene ends, restore position + velocity
+  // + face angle + forward velocity + action so Mario resumes exactly as
+  // he was before the interaction — most importantly, still on the shell
+  // if he was on a shell when the cell was grabbed.  Call once per tick.
+  void update_shell_preserve_across_cell_grab();
+
   // Launcher glue: detects when Jak is launched by a spring pad (rapid
   // upward Y velocity) and glues Mario to Jak's trajectory instead of
   // the normal Mario→Jak sync. Called after tick() but before
@@ -704,6 +712,28 @@ class LibSM64Manager {
   // pass through the lava surface without any reaction on the second drop.
   bool m_prev_in_lava = false;
   int m_star_dance_timer = -1;  // -1 = inactive, >= 0 = frames since star dance started
+
+  // Cell-pickup state preservation.  Snapshotted at the rising edge of
+  // target_clone_anim (cutscene start) and restored at the falling edge
+  // so Mario picks back up exactly where he was — same position, same
+  // velocity, same action.  Without this Mario would drift during the
+  // ~1-2s cutscene (gravity, action timeouts, etc.) and most visibly
+  // fall off a shell he was riding when the cell was grabbed.
+  bool m_prev_target_clone_anim = false;
+  bool m_clone_anim_snapshot_valid = false;
+  MarioState m_clone_anim_snapshot;
+
+  // Post-cutscene freeze.  On the cutscene's falling edge we restore the
+  // libsm64 state, then flag `pending_settle`.  The next tick() runs
+  // normally (so sm64_mario_tick propagates the restored pose into
+  // m_state/m_geometry and the renderer sees it), and on its way out
+  // converts the flag into `freeze_ticks = 90` which makes subsequent
+  // ticks skip sm64_mario_tick for 3 s.  That holds Mario still long
+  // enough for Jak's camera to catch up to his new position before
+  // physics resumes and he zips off on the shell.
+  bool m_post_restore_pending_settle = false;
+  int  m_post_restore_freeze_ticks = 0;
+  static constexpr int kPostCloneAnimFreezeTicks = 90;  // 3 s @ 30 Hz
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

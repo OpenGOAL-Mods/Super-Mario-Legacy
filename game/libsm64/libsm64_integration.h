@@ -148,6 +148,9 @@ u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_play_music_forced(u64 seq_id);
 u64 pc_sm64_stop_music();
+// Set the SM64 audio output volume.  Takes a GOAL float (0.0..100.0)
+// packed into a u32, matching the existing pc-sm64-teleport-mario ABI.
+u64 pc_sm64_set_music_volume(u32 vol_bits);
 u64 pc_sm64_teleport_mario(u32 x, u32 y, u32 z);
 
 class LibSM64Manager {

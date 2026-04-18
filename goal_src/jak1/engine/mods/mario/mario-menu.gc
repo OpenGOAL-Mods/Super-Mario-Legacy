@@ -49,6 +49,7 @@
 
 (define *mario-options*
   (new 'static 'boxed-array :type game-option
+       ;; [0] PLAY SM64 MUSIC toggle
        (new 'static 'game-option
             :option-type (game-option-type on-off)
             :name (text-id mario-opts-play-music)
@@ -56,6 +57,21 @@
             :on-change (lambda ((val object))
                          (sm64-music-setting-changed! (the-as symbol val))
                          (none)))
+       ;; [1] SM64 MUSIC VOLUME slider (0..100, same range as the vanilla
+       ;; sfx/music/speech sliders).  Live preview is driven by
+       ;; update-mario-music! pushing *mario-settings* sm64-music-volume
+       ;; down to pc-sm64-set-music-volume every frame.  on-confirm
+       ;; persists the new value to disk so it survives a relaunch.
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id mario-opts-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm (lambda ()
+                          (commit-to-file *mario-settings*)))
+       ;; [2] BACK
        (new 'static 'game-option
             :option-type (game-option-type button)
             :name (text-id back)
@@ -136,6 +152,10 @@
   (set! (-> *game-options-mario* 7 value-to-modify) (&-> *progress-carousell* int-backup))
   (set! (-> *game-options-mario* 8 value-to-modify) (&-> *progress-carousell* int-backup))
 
-  ;; Mario submenu value-to-modify (one toggle, index 0).
+  ;; Mario submenu value-to-modify:
+  ;;   [0] Play SM64 Music toggle → *mario-settings* play-sm64-music?
+  ;;   [1] Volume slider          → *mario-settings* sm64-music-volume
+  ;;   [2] Back button has no backing value.
   (set! (-> *mario-options* 0 value-to-modify) (&-> *mario-settings* play-sm64-music?))
+  (set! (-> *mario-options* 1 value-to-modify) (&-> *mario-settings* sm64-music-volume))
   (none))

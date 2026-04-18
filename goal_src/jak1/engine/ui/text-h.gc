@@ -799,6 +799,7 @@
   ;; mario mod
   (mario-opts-title #x161a)
   (mario-opts-play-music #x161b)
+  (mario-opts-volume #x161c)
   ;; GAME-TEXT-ID ENUM ENDS
   )
 

@@ -2034,6 +2034,20 @@ u64 pc_sm64_play_music(u64 seq_id) {
   return 0;
 }
 
+// GOAL-callable volume: registered as "pc-sm64-set-music-volume".
+// Accepts a float in the 0.0..100.0 range (GOAL's standard volume slider
+// range); clamps and forwards to SM64AudioPlayer::set_volume which
+// applies to every sample coming out of sm64_audio_tick (music + SFX).
+u64 pc_sm64_set_music_volume(u32 vol_bits) {
+  float vol;
+  std::memcpy(&vol, &vol_bits, 4);
+  if (!std::isfinite(vol)) vol = 100.0f;
+  if (vol < 0.0f) vol = 0.0f;
+  if (vol > 100.0f) vol = 100.0f;
+  LibSM64Manager::instance().set_audio_volume(static_cast<int>(vol));
+  return 0;
+}
+
 u64 pc_sm64_play_music_forced(u64 seq_id) {
   LibSM64Manager::instance().play_music_forced_from_goal(static_cast<uint8_t>(seq_id));
   return 0;

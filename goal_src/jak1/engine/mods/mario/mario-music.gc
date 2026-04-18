@@ -88,8 +88,21 @@
 ;; idle loop, so the caller's pp (an sm64-mario-col process) naturally
 ;; owns the music-volume/music overrides — once the process dies (e.g.
 ;; Mario is deleted) setting-control auto-cleans them.
+;; Cache: last volume we pushed to C++.  Only re-send when the setting
+;; changes so we're not hammering pc-sm64-set-music-volume every frame.
+;; Initial sentinel of -1.0 forces the first frame to always push.
+(define *mario-music-last-volume* -1.0)
+
 (defbehavior update-mario-music! process ()
   (when *mario-settings*
+    ;; Push the slider value down to libsm64 whenever it changes.  Runs
+    ;; independent of the play-sm64-music? flag so SFX from (sm64-sound …)
+    ;; also respect the volume, and so the volume is applied as soon as
+    ;; the game boots.
+    (let ((vol (-> *mario-settings* sm64-music-volume)))
+      (when (!= vol *mario-music-last-volume*)
+        (pc-sm64-set-music-volume vol)
+        (set! *mario-music-last-volume* vol)))
     (cond
       ((-> *mario-settings* play-sm64-music?)
        ;; Register the mute overrides on the rising edge.  We override

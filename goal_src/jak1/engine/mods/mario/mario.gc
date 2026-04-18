@@ -24,6 +24,9 @@
 ;; the default pause-responsive behavior.
 (define-extern pc-sm64-play-music-forced (function int none))
 (define-extern pc-sm64-stop-music (function none))
+;; Set SM64 audio output volume (0.0..100.0).  Applied to every sample
+;; coming out of sm64_audio_tick — music and SFX alike.
+(define-extern pc-sm64-set-music-volume (function float none))
 (define-extern pc-sm64-teleport-mario (function float float float none))
 
 ;; Forward-decl: lives in mario-music.gc (loaded right after this file).

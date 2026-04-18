@@ -560,6 +560,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);
   make_function_symbol_from_c("pc-sm64-play-music-forced", (void*)sm64::pc_sm64_play_music_forced);
   make_function_symbol_from_c("pc-sm64-stop-music", (void*)sm64::pc_sm64_stop_music);
+  make_function_symbol_from_c("pc-sm64-set-music-volume", (void*)sm64::pc_sm64_set_music_volume);
   make_function_symbol_from_c("pc-sm64-teleport-mario", (void*)sm64::pc_sm64_teleport_mario);
 
   // setup string constants

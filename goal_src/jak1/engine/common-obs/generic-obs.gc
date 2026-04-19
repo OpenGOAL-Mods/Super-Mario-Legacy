@@ -1332,13 +1332,23 @@
                                #f
                                (static-attack-info ((mode (the-as symbol (-> self event-mode)))))))
                   ((= (-> v1-1 type) target)
-                   (send-event proc
-                               (-> self event)
-                               :from (the-as process v1-1)
-                               (-> block param 0)  ;; forward touching-shapes-entry from collision system
-                               (-> self event-mode)
-                               (-> *target* control unknown-dword50)
-                               (-> *target* control unknown-dword51)))
+                   ;; The tracker's parent is Jak (spawned :to *target* by Mario's attack helper).
+                   ;; Setting 'from' to Jak's process satisfies enemy arg0-type checks
+                   ;; (e.g. bully, bonelurker, plant-boss that require (= (-> arg0 type) target)).
+                   ;; Mario's sphere still originates the hit. Jak is only the 'from' pointer.
+                   ;; Use a fresh *global-attack-id* for param 2 rather than Jak's own attack
+                   ;; counter (unknown-dword50), which only increments when Jak himself attacks
+                   ;; and so stays constant across all of Mario's hits, breaking deduplication
+                   ;; in entities like yakow that ignore repeated param 2 values.
+                   (let ((a1-5 (new 'stack-no-clear 'event-message-block)))
+                     (set! (-> a1-5 from) (the-as process v1-1))
+                     (set! (-> a1-5 num-params) 4)
+                     (set! (-> a1-5 message) (-> self event))
+                     (set! (-> a1-5 param 0) (-> block param 0))  ;; forward touching-shapes-entry from collision system
+                     (set! (-> a1-5 param 1) (the-as uint (-> self event-mode)))
+                     (let ((v1-19 (+ *global-attack-id* 1))) (set! *global-attack-id* v1-19) (set! (-> a1-5 param 2) (the-as uint v1-19)))
+                     (set! (-> a1-5 param 3) (the-as uint 0))
+                     (send-event-function proc a1-5)))
                   (else
                    (let ((a1-5 (new 'stack-no-clear 'event-message-block)))
                      (set! (-> a1-5 from) (the-as process v1-1))

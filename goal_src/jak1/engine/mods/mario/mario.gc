@@ -240,6 +240,38 @@
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
 ;; ---------------------------------------------------------------------------
+;; HUD health override — display Mario's health (÷2) in place of Jak's.
+;;
+;; Mario's libsm64 health is tracked in *sm64-mario-health* x as 0.0..8.0
+;; (eight wedges).  Jak's HUD health meter shows 0..3 segments.  To
+;; "match the Jak world (4 hits instead of 8)", we halve Mario's value
+;; and feed it to the meter's tally-value call — Mario's 8 wedges map
+;; to 4 logical hits, capped to the 3 segments the meter can draw (so
+;; full-health Mario shows a full meter, and the meter drains down as
+;; Mario takes hits).
+;;
+;; Redefines `hud-update` for `hud-health`.  engine/ui/hud-classes.gc
+;; (game.gp line 2010) installs the vanilla implementation; mario.gc
+;; (line 2111) runs later, so this later definition wins at runtime.
+;; When Mario is absent / dead / not spawned (health <= 0), we fall
+;; back to Jak's native fact.health so the HUD still works outside
+;; libsm64 mode.  health-pickup-time is threaded through unchanged so
+;; the pickup-delay animation feels the same either way.
+;; ---------------------------------------------------------------------------
+(defmethod hud-update ((this hud-health))
+  (cond
+    ((and *target* (> (-> *sm64-mario-health* x) 0.0))
+     (tally-value this
+                  (the int (/ (-> *sm64-mario-health* x) 2.0))
+                  (the-as int (-> *target* fact health-pickup-time))))
+    (*target*
+     (tally-value this
+                  (the int (-> *target* fact health))
+                  (the-as int (-> *target* fact health-pickup-time)))))
+  0
+  (none))
+
+;; ---------------------------------------------------------------------------
 ;; sm64-mario-col — invisible process that tracks Mario's position and
 ;; spawns touch-tracker attack spheres for punches AND ground-pounds.
 ;;
@@ -546,6 +578,66 @@
     ;;           (new 'static 'rgba :r #x40 :g #x40 :b #xff :a #x80)))))
 
       (suspend)))
+  :trans (behavior ()
+    ;; ---- HP desync overlay --------------------------------------------
+    ;; Per-frame on-screen readout of Jak HP + Mario HP (raw values).
+    ;; The hud-health meter is driven by Mario's health/2 via the
+    ;; defmethod override above, so eye-balling the two numbers side
+    ;; by side is the easiest way to spot the sync path glitching
+    ;; (e.g. Mario takes lava damage but the bridge didn't relay it to
+    ;; Jak, or vice versa).  Highlights red when they disagree.
+    ;;
+    ;; Eco-pill counts as an extra hit for Jak: a full pill
+    ;; (fact.eco-pill >= eco-pill-max, default 50) means Jak has a
+    ;; shield wedge he can soak a hit on, so we treat him as having
+    ;; jak-hp + 1 effective health whenever the pill is maxed.  The
+    ;; sync invariant is therefore `mario-hp == 2 * effective-jak-hp`
+    ;; — e.g. full Jak (3 HP + full pill = 4 effective) matches Mario
+    ;; at 8 wedges.
+    ;;
+    ;; Visibility gates:
+    ;;   - no *progress-process*    (start menu obscures the HUD)
+    ;;   - not in a movie
+    ;;   - hud-health exists AND isn't in the `hud-hidden` state
+    ;;     (catches cutscenes, letterbox/blackout, target-grabbed —
+    ;;      all the cases the HUD's own visibility machinery covers)
+    ;; so the overlay only draws while Jak's normal HUD is on screen.
+    ;;
+    ;; Why this lives in `:trans` rather than `:code`: GOAL's main-
+    ;; thread backup-stack is hard-capped at PROCESS_STACK_SAVE_SIZE =
+    ;; 256 bytes (kernel/gkernel-h.gc:58), which is what the kernel
+    ;; copies aside on `(suspend)`.  The overlay's combined peak
+    ;; (stack-allocated font-context + string-format frame + print-game
+    ;; -text call chain) pushes past 256B and the kernel bails — so
+    ;; we draw in `:trans`, which never suspends itself.
+    (when (and *target*
+               (not *progress-process*)
+               (not (movie?))
+               (-> *hud-parts* health)
+               (not (hidden? (-> *hud-parts* health 0))))
+      (let* ((jak-hp          (the int (-> *target* fact health)))
+             (jak-hp-max      (the int (-> *target* fact health-max)))
+             (full-pill?      (>= (-> *target* fact eco-pill)
+                                  (-> *target* fact eco-pill-max)))
+             ;; A full 50-unit eco pill counts as an extra hit slot —
+             ;; it's the shield Jak can eat before real damage starts.
+             ;; So effective HP = health + (full-pill ? 1 : 0), and the
+             ;; max HP the HUD can ever show = health-max + 1.
+             (effective-jak   (+ jak-hp (if full-pill? 1 0)))
+             (effective-max   (+ jak-hp-max 1))
+             (mario-hp        (the int (-> *sm64-mario-health* x)))
+             (desync?         (!= (* effective-jak 2) mario-hp))
+             (ctx             (new 'stack 'font-context *font-default-matrix* 20 50 0.0
+                                   (font-color default) (font-flags shadow kerning))))
+        (when desync?
+          (set! (-> ctx color) (font-color red)))
+        (print-game-text
+          (string-format "Jak HP: ~D/~D   Mario HP: ~D/8~A"
+                         effective-jak
+                         effective-max
+                         mario-hp
+                         (if desync? "  [DESYNC]" ""))
+          ctx #f 128 22))))
   :post ja-post)
 
 ;; ---- Init + spawn -----------------------------------------------------------

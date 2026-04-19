@@ -323,6 +323,12 @@
       (set! (-> self cam-user-mode) 'look-around)
       (set! (-> self control unknown-surface00) *duck-mods*)
       (logior! (-> self state-flags) (state-flags first-person-mode))
+      ;; libsm64: SM64 "menu camera zoom in" SFX when Jak brings his
+      ;; goggles up (R2-hold first-person look-around).  Gated by
+      ;; *mario-settings* play-sm64-music? via the `mario-sm64-music-
+      ;; enabled?` extern declared in gsound.gc.
+      (when (mario-sm64-music-enabled?)
+        (sm64-play-preview-sound "menu camera zoom in"))
       (send-event *camera* 'blend-from-as-fixed)
       (send-event *camera* 'no-intro)
       (camera-change-to (the-as string 'cam-eye) 60 #f)
@@ -334,6 +340,10 @@
       (let ((a0-1 (handle->process (-> self fp-hud)))) (if a0-1 (send-event a0-1 'go-away)))
       (set! (-> self cam-user-mode) 'normal)
       (target-exit)
+      ;; libsm64: SM64 "menu camera zoom out" SFX when Jak drops his
+      ;; goggles.  Mirrors the zoom-in call in :enter.
+      (when (mario-sm64-music-enabled?)
+        (sm64-play-preview-sound "menu camera zoom out"))
       (when (send-event *camera* 'query-state cam-eye)
         (send-event *camera* 'no-intro)
         (send-event *camera* 'force-blend (seconds 0.2))
@@ -1691,6 +1701,12 @@
     (behavior ()
       (target-exit)
       (set! (-> self cam-user-mode) 'normal)
+      ;; libsm64: SM64 "menu camera zoom out" SFX when Jak pulls his eye
+      ;; away from the periscope / goggles.  Gated by *mario-settings*
+      ;; play-sm64-music? (via the `mario-sm64-music-enabled?` extern
+      ;; declared in gsound.gc) so Jak-only players don't hear it.
+      (when (mario-sm64-music-enabled?)
+        (sm64-play-preview-sound "menu camera zoom out"))
       ;; og:preserve-this PAL patch here
       (logclear! (-> self state-flags) (state-flags invulnerable grabbed)))
   :code
@@ -1698,6 +1714,10 @@
       (set! (-> self neck flex-blend) 0.0)
       (target-exit)
       (logior! (-> self state-flags) (state-flags invulnerable do-not-notice))
+      ;; libsm64: SM64 "menu camera zoom in" SFX when Jak puts his eye to
+      ;; the periscope / goggles.  Mirrors the zoom-out call in :exit.
+      (when (mario-sm64-music-enabled?)
+        (sm64-play-preview-sound "menu camera zoom in"))
       (let ((v1-4 (handle->process arg0)))
         (if v1-4
           (quaterion<-rotate-y-vector (-> self control dir-targ)

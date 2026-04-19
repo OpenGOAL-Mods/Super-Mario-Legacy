@@ -23,6 +23,26 @@
 ;; Used by the 'query 'mode handler to report 'racer so enemies like sharkey don't aggro.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; libsm64: "Mario just swung" window — bumped by sm64-spawn-attack-tracker
+;; in mario.gc, read here in the 'get-attack-count case to decide whether
+;; an enemy death should be attributed to Mario (and thus eligible for
+;; the 5% "so long-a Bowser!" quip).  target-handler.gc compiles before
+;; mario.gc (game.gp 1968 vs 2111), so we forward-declare the symbol as
+;; an extern and let runtime linking resolve it; mario.gc's `define`
+;; binds the actual storage.
+(define-extern *sm64-mario-attack-until* time-frame)
+(define-extern mario-sm64-music-enabled? (function symbol))
+(define-extern sm64-play-preview-sound (function string symbol))
+
+;; libsm64: forward-declare nav-enemy so we can type-guard the 'get-attack-count
+;; branch below.  The real deftype lives in common-obs/nav-enemy-h.gc (game.gp
+;; 2037), which loads after this file (1968); declare-type tells the compiler
+;; the name exists and at runtime the symbol resolves to the actual type
+;; record once nav-enemy-h.gc has run.  Needed because crates also send
+;; 'get-attack-count (crates.gc:463,482,520) — without this filter, smashing
+;; a crate during Mario's attack window would trigger the quip.
+(declare-type nav-enemy process-drawable)
+
 ;; DECOMP BEGINS
 
 (defbehavior target-generic-event-handler target ((arg0 process) (arg1 int) (arg2 symbol) (arg3 event-message-block))
@@ -59,6 +79,23 @@
     (('get-attack-count)
      (set! v0-0 (+ (-> self control unknown-dword51) (-> arg3 param 0)))
      (set! (-> self control unknown-dword51) (the-as int v0-0))
+     ;; libsm64: nav-enemy-attack-handler (nav-enemy.gc:96) sends this
+     ;; message to its attacker the frame it enters its die state.  If
+     ;; the enemy died inside the short window opened by a recent
+     ;; Mario attack-tracker spawn, roll 5% for Mario's "so long-a
+     ;; Bowser!" quip.  A tighter per-kill hook than the old per-swing
+     ;; 5% — no quips on whiffs, no double-counting.  Jak's own kills
+     ;; also fire 'get-attack-count but the window isn't open then
+     ;; (only `sm64-spawn-attack-tracker` bumps it), so this cleanly
+     ;; distinguishes Mario kills from Jak kills in the common case.
+     ;; The type-type? guard filters out crates (crates.gc:463,482,520
+     ;; also send 'get-attack-count) — quip only fires for true enemy kills.
+     (when (and (mario-sm64-music-enabled?)
+                arg0
+                (type-type? (-> arg0 type) nav-enemy)
+                (< (current-time) *sm64-mario-attack-until*)
+                (rand-vu-percent? 0.05))
+       (sm64-play-preview-sound "mario so longa bowser"))
      v0-0)
     (('continue) (go target-continue (the-as continue-point (-> arg3 param 0))))
     (('query)

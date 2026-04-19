@@ -239,6 +239,15 @@
 ;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; Time-frame deadline used by the "Mario just killed an enemy" sound
+;; hook in target-handler.gc's 'get-attack-count case.  Bumped ~0.5s
+;; into the future by every call to `sm64-spawn-attack-tracker` — an
+;; enemy death that arrives while the current-time is still below this
+;; deadline is attributed to Mario (vs Jak's own attacks, which don't
+;; touch this timestamp).  0 means "Mario hasn't swung recently, any
+;; enemy deaths in this window were Jak's doing."
+(define *sm64-mario-attack-until* (the time-frame 0))
+
 ;; ---------------------------------------------------------------------------
 ;; HUD health override — display Mario's health (÷2) in place of Jak's.
 ;;
@@ -328,6 +337,16 @@
     (when tracker
       ;; Configure the event it sends on contact.
       (send-event (ppointer->process tracker) 'event 'attack attack-mode))
+    ;; libsm64 kill-detection hook: open a 30-frame "Mario just swung"
+    ;; window.  nav-enemy-attack-handler (nav-enemy.gc:96) sends
+    ;; 'get-attack-count to its attacker the instant it goes into its
+    ;; die state, and *target*'s handler (target-handler.gc:59) catches
+    ;; that.  We don't modify the enemy path at all — instead we
+    ;; intercept at target's side: if a 'get-attack-count event arrives
+    ;; while this window is open, it's almost certainly Mario's kill
+    ;; (Jak himself could be swinging simultaneously, a rare false
+    ;; positive) and we roll 5% for the "so long-a Bowser!" quip.
+    (set! *sm64-mario-attack-until* (+ (current-time) (seconds 0.5)))
     tracker))
 
 ;; ---- States -----------------------------------------------------------------

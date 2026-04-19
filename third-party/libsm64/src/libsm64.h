@@ -247,6 +247,15 @@ extern SM64_LIB_FN void sm64_set_mario_scale(float scale);
 extern SM64_LIB_FN int g_libsm64_no_slippery_mario;
 extern SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled);
 
+// Pause / resume just the music + jingle sequence players, leaving the
+// SFX player running.  Useful for games like Jak where pressing Start
+// should freeze the BGM (so unpause resumes from the exact same bar)
+// while still letting pause-menu chimes and nav blips play through
+// libsm64's audio engine.  `paused == 1` saves the current enabled bit
+// of players 0 and 1 then clears them; `paused == 0` restores whatever
+// was saved (so a genuinely-stopped track stays stopped).
+extern SM64_LIB_FN void sm64_set_music_paused(int paused);
+
 // ---- Fake held-object API (libsm64 fork extension) ----------------------
 // Forces Mario into a light-object hold state without needing a real SM64
 // Object. Plants a zero-initialized sentinel into heldObj/usedObj and kicks

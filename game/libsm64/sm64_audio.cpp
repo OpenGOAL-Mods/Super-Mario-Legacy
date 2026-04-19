@@ -161,16 +161,14 @@ void SM64AudioPlayer::fill(int16_t* out, long nframes) {
   long frames_written = 0;
   const int volume = m_volume.load(std::memory_order_relaxed);
 
-  // If the game is paused, output silence for this whole buffer without
-  // advancing libsm64's audio engine.  The active music sequence cursor
-  // (and any active SFX) stays frozen, so unpausing resumes playback from
-  // exactly the same position.  Also drop whatever's left in the ring
-  // buffer so a stale trailing sample doesn't get spliced in on resume.
-  if (m_paused.load(std::memory_order_relaxed)) {
-    std::memset(out, 0, static_cast<size_t>(nframes) * 2 * sizeof(int16_t));
-    m_ring_read = m_ring_write;
-    return;
-  }
+  // `fill()` always ticks the N64 audio engine.  The pause freeze is
+  // now handled one level down — `pc_sm64_set_music_paused` toggles
+  // the `enabled` bit on the music + env sequence players (IDs 0 and
+  // 1), which makes `process_sequences` skip them each 240Hz tick.
+  // The SFX sequence player (ID 2) stays enabled, so queued SFX flow
+  // through normally.  This is what lets the SM64 "menu pause" chime
+  // actually play ON pause-entry while the music cursor stays frozen
+  // for a clean resume.
 
   auto available = [&]() -> size_t {
     return (m_ring_write + m_ring_capacity - m_ring_read) % m_ring_capacity;

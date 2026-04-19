@@ -49,11 +49,11 @@ class SM64AudioPlayer {
   }
   int get_volume() const { return m_volume.load(std::memory_order_relaxed); }
 
-  // When true, the fill() callback outputs silence without calling
-  // sm64_audio_tick().  The N64 audio engine (and therefore the active
-  // music-sequence cursor) never advances while paused — the next unpause
-  // resumes playback from the exact same musical position.  Atomic so the
-  // game thread can toggle it while the cubeb worker is mixing.
+  // Legacy setter — the cubeb worker no longer uses m_paused to
+  // silence output (pause freezing is done at the sequence-player
+  // layer via `pc_sm64_set_music_paused`).  The flag is kept for the
+  // existing call sites in libsm64_integration.cpp but has no effect
+  // on fill(); remove once those call sites are cleaned up.
   void set_paused(bool paused) { m_paused.store(paused, std::memory_order_relaxed); }
   bool is_paused() const { return m_paused.load(std::memory_order_relaxed); }
 
@@ -75,7 +75,7 @@ class SM64AudioPlayer {
   cubeb_stream* m_stream = nullptr;
   std::atomic<bool> m_running{false};
   std::atomic<int> m_volume{100};  // 0..100
-  std::atomic<bool> m_paused{false};  // when true, fill() outputs silence
+  std::atomic<bool> m_paused{false};  // legacy; unused by fill(), see set_paused
 
 #ifdef _WIN32
   bool m_coinitialized = false;

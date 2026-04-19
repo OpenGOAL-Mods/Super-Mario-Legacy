@@ -121,3 +121,17 @@
 ;; from disk) on first file-load; subsequent reloads are no-ops.
 (define *mario-settings* (the mario-settings #f))
 (define-once *mario-settings* (new 'global 'mario-settings))
+
+;; Tiny predicate used by engine-level code (gsound.gc's `sound-play`
+;; macro in particular) to ask "should we reroute audio through
+;; libsm64 right now?" without having to know the type of
+;; `*mario-settings*` or its field names.  gsound.gc compiles well
+;; before us (line 1863 vs 2110 in game.gp), so the macro's emitted
+;; code calls this function by name and resolves at runtime once this
+;; file is loaded — no `define-extern` for the type required.
+(defun mario-sm64-music-enabled? ()
+  "True when the SM64 audio override is turned on in *mario-settings*."
+  ;; Explicit `the symbol` cast so the inferred `and`-return type
+  ;; (basic, widening over the #f singleton + the symbol payload)
+  ;; narrows back to `symbol` — matches the define-extern in gsound.gc.
+  (the symbol (and *mario-settings* (-> *mario-settings* play-sm64-music?))))

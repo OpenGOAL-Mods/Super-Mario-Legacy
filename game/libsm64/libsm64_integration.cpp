@@ -2124,6 +2124,14 @@ void LibSM64Manager::update_music_pause_state(bool is_paused) {
   const bool want_audio_paused = is_paused && !m_force_audio_unpaused;
   if (want_audio_paused != m_audio->is_paused()) {
     m_audio->set_paused(want_audio_paused);
+    // sm64_audio.cpp's fill() no longer reads m_paused; the freeze
+    // happens at the N64 sequence-player layer so SFX still play while
+    // music stays pinned.  Toggle the music + jingle players (IDs 0 &
+    // 1) under the shared libsm64 lock — SFX player (2) stays active
+    // so `sm64_play_sound_global` calls made during pause (the menu
+    // pause chime, menu nav blips) audibly reach the speakers.
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_music_paused(want_audio_paused ? 1 : 0);
   }
 }
 

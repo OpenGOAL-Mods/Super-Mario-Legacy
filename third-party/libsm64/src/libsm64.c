@@ -11,6 +11,9 @@
 #include <math.h>
 
 #include "decomp/audio/external.h"
+#include "decomp/audio/internal.h"
+#include "decomp/audio/load.h"
+#include "decomp/audio/playback.h"
 #include "decomp/include/PR/os_cont.h"
 #include "decomp/engine/math_util.h"
 #include "decomp/include/sm64.h"
@@ -119,6 +122,79 @@ SM64_LIB_FN int g_libsm64_no_slippery_mario = 0;
 SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled)
 {
     g_libsm64_no_slippery_mario = enabled ? 1 : 0;
+}
+
+// Pause / resume only the music + jingle sequence players (0 = level BGM,
+// 1 = misc-music/jingle) without touching the SFX player (2).
+//
+// Iteration history:
+//  - v1: toggled only `enabled`.  Sequence script stops, but any note in
+//    its sustain phase at the pause edge holds forever — process_sound
+//    never runs for a disabled player, so noteVelocity never updates.
+//    Held drone under the pause menu.
+//  - v2: zeroed `fadeVolume` THEN cleared `enabled`.  Same bug: once
+//    enabled=FALSE, process_sound stops folding the new fadeVolume=0
+//    into each layer's noteVelocity (effects.c:67/79), so the old
+//    pre-pause noteVelocity keeps playing.
+//  - v3: zero `fadeVolume` only, leave `enabled` alone.  No held note,
+//    but sequence cursor drifts forward during the pause — music
+//    resumes from a later bar.  User didn't want drift.
+//  - v4 (this version): explicitly release every active note owned by
+//    players 0/1 BEFORE clearing `enabled`.  The note-release drives
+//    each layer's note into ADSR release state (a short natural
+//    decay, usually a few dozen ms), so nothing holds.  Then clear
+//    `enabled` to freeze the sequence cursor so unpause resumes from
+//    the exact same bar.  Also zero fadeVolume as belt-and-braces in
+//    case a new note slipped through before the disable took effect.
+//
+// SFX player (2) is deliberately untouched so pause-menu chimes & nav
+// blips still reach the speakers.
+static u8  s_saved_seq_player_enabled[2]     = {0, 0};
+static f32 s_saved_seq_player_fade_volume[2] = {1.0f, 1.0f};
+static int s_music_is_paused = 0;
+
+// Release any active notes owned by seqPlayer.  Safe to call on a player
+// with nothing playing — the loop just walks past empty channel / layer
+// slots.  This sends each active layer into ADSR release (playback.c's
+// `seq_channel_layer_note_release`), which naturally decays the note
+// over its release envelope — no hard cut, no held drone.
+static void pause_helper_release_all_notes(struct SequencePlayer *seqPlayer)
+{
+    for (int ch = 0; ch < CHANNELS_MAX; ch++) {
+        struct SequenceChannel *seqChannel = seqPlayer->channels[ch];
+        if (!IS_SEQUENCE_CHANNEL_VALID(seqChannel)) continue;
+        for (int ly = 0; ly < LAYERS_MAX; ly++) {
+            struct SequenceChannelLayer *layer = seqChannel->layers[ly];
+            if (layer != NULL && layer->enabled && layer->note != NULL) {
+                seq_channel_layer_note_release(layer);
+            }
+        }
+    }
+}
+
+SM64_LIB_FN void sm64_set_music_paused(int paused)
+{
+    if (paused && !s_music_is_paused) {
+        s_saved_seq_player_enabled[0]     = gSequencePlayers[0].enabled;
+        s_saved_seq_player_enabled[1]     = gSequencePlayers[1].enabled;
+        s_saved_seq_player_fade_volume[0] = gSequencePlayers[0].fadeVolume;
+        s_saved_seq_player_fade_volume[1] = gSequencePlayers[1].fadeVolume;
+        // Release currently-playing notes first so they don't sustain
+        // forever once the sequence script stops driving them.
+        pause_helper_release_all_notes(&gSequencePlayers[0]);
+        pause_helper_release_all_notes(&gSequencePlayers[1]);
+        gSequencePlayers[0].fadeVolume = 0.0f;
+        gSequencePlayers[1].fadeVolume = 0.0f;
+        gSequencePlayers[0].enabled    = FALSE;
+        gSequencePlayers[1].enabled    = FALSE;
+        s_music_is_paused = 1;
+    } else if (!paused && s_music_is_paused) {
+        gSequencePlayers[0].enabled    = s_saved_seq_player_enabled[0];
+        gSequencePlayers[1].enabled    = s_saved_seq_player_enabled[1];
+        gSequencePlayers[0].fadeVolume = s_saved_seq_player_fade_volume[0];
+        gSequencePlayers[1].fadeVolume = s_saved_seq_player_fade_volume[1];
+        s_music_is_paused = 0;
+    }
 }
 
 

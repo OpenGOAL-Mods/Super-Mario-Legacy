@@ -270,14 +270,134 @@
           (set! ,sound-trans (the vector #f)))))
     (sound-trans-convert (-> ,cmd parms trans) ,sound-trans)))
 
+;; Mario-mod runtime hooks for the sound-play redirect below.  Both
+;; live in later files in game.gp (mario-settings.gc line 2110,
+;; mario-menu.gc line 2116) — these externs give the compiler the
+;; type info it needs to emit a call here; the actual values bind at
+;; runtime once those files load, by which time any sound-play
+;; callsite executing this branch has them available.
+(define-extern mario-sm64-music-enabled? (function symbol))
+(define-extern sm64-play-preview-sound (function string symbol))
+
+;; Macro-expand-time string equality.  GOOS's `=` refuses non-numeric
+;; args, so we can't compare `(string-ref s i)` chars directly.
+;; Instead, we pack each string into the same uint128 layout that
+;; `static-sound-name` (gsound-h.gc:38) uses and compare the two 64-
+;; bit halves as numbers — identical strings ≤16 chars pack to
+;; identical (lo, hi) pairs.  The uint128 form is exactly what
+;; sound-name is, and `sound-play`'s `name` arg is already required
+;; to be ≤16 chars (static-sound-name errors otherwise), so the
+;; comparison is always well-defined for the macro's use case.
+;; Build lo / hi halves using the exact pattern from static-sound-name
+;; (gsound-h.gc:47) — iterate the whole string and branch on i >= 8.
+;; GOOS's built-in set seems to be fairly thin (no `min`, no
+;; `string=`), so we stay within `dotimes` + `string-length` +
+;; `string-ref` + `if` which we've verified are available.
+;; Build lo / hi halves using the exact pattern from static-sound-name
+;; (gsound-h.gc:47) — iterate the whole string and branch on i >= 8.
+;; GOOS's `if` is strict (both arms required), so the else-arm is a
+;; dummy 0 so `(+!)` only fires in the intended range.
+(desfun macro-sound-name-lo (s)
+  (let ((lo 0))
+    (dotimes (i (string-length s))
+      (if (< i 8)
+        (+! lo (ash (string-ref s i) (* 8 i)))
+        0))
+    lo))
+
+(desfun macro-sound-name-hi (s)
+  (let ((hi 0))
+    (dotimes (i (string-length s))
+      (if (>= i 8)
+        (+! hi (ash (string-ref s i) (* 8 (- i 8))))
+        0))
+    hi))
+
+;; NOTE: both args must be strings.  GOOS evaluates all arms of an
+;; `and` eagerly, so we nest `if`s instead — a non-string first arg
+;; otherwise trips the GOOS interpreter trying to look it up as a
+;; variable inside `macro-sound-name-lo`.
+(desfun macro-string=? (str-a str-b)
+  (if (string? str-a)
+    (if (string? str-b)
+      (if (= (macro-sound-name-lo str-a) (macro-sound-name-lo str-b))
+        (= (macro-sound-name-hi str-a) (macro-sound-name-hi str-b))
+        #f)
+      #f)
+    #f))
+
 (defmacro sound-play (name &key (id (new-sound-id)) &key (vol 100.0) &key (pitch 0) &key (bend 0) &key (group sfx) &key (position #t))
-  `(sound-play-by-name (static-sound-name ,name)
-                      ,id
-                      (the int (* (/ 1024.0 100.0) ,vol))
-                      (the int (* 1524.0 ,pitch))
-                      ,bend
-                      (sound-group ,group)
-                      ,position))
+  ;; Mario mod: redirect certain string-literal sound names to libsm64
+  ;; clips when the user has SM64 audio on.  Each redirect branches at
+  ;; MACRO-EXPAND time — non-matching call sites get the original
+  ;; zero-overhead expansion.  Callers that pass a non-literal
+  ;; expression (rare) also fall through to the default path since
+  ;; we can't predict the name.
+  ;;
+  ;; Current redirects — all hook Jak's own string sound names, no
+  ;; new call sites are injected anywhere else in the engine.
+  ;;   "money-pickup"   → SM64 "general coin"       (precursor-orb pickup chime;
+  ;;                                                  sole site: game-info.gc:448)
+  ;;   "cursor-up-down" → SM64 "menu change select" (menu vertical nav;
+  ;;                                                  sites: progress.gc 846 /
+  ;;                                                  865 / 1102 / 1108)
+  ;;   "select-menu"   → SM64 "menu pause"         (progress-coming-in :enter —
+  ;;                                                  progress.gc:1379.  Fires
+  ;;                                                  the instant the pause /
+  ;;                                                  options screen starts
+  ;;                                                  sliding in, which is the
+  ;;                                                  natural moment for an
+  ;;                                                  SM64 pause chime.  Also
+  ;;                                                  fires at main.gc:299 and
+  ;;                                                  pad.gc:431 — those paths
+  ;;                                                  are debug-only cheat
+  ;;                                                  toggles, audible but
+  ;;                                                  harmless overlap.)
+  (cond
+    ((macro-string=? name "money-pickup")
+     `(if (mario-sm64-music-enabled?)
+        (begin
+          (sm64-play-preview-sound "general coin")
+          ,id)
+        (sound-play-by-name (static-sound-name ,name)
+                            ,id
+                            (the int (* (/ 1024.0 100.0) ,vol))
+                            (the int (* 1524.0 ,pitch))
+                            ,bend
+                            (sound-group ,group)
+                            ,position)))
+    ((macro-string=? name "cursor-up-down")
+     `(if (mario-sm64-music-enabled?)
+        (begin
+          (sm64-play-preview-sound "menu change select")
+          ,id)
+        (sound-play-by-name (static-sound-name ,name)
+                            ,id
+                            (the int (* (/ 1024.0 100.0) ,vol))
+                            (the int (* 1524.0 ,pitch))
+                            ,bend
+                            (sound-group ,group)
+                            ,position)))
+    ((macro-string=? name "select-menu")
+     `(if (mario-sm64-music-enabled?)
+        (begin
+          (sm64-play-preview-sound "menu pause")
+          ,id)
+        (sound-play-by-name (static-sound-name ,name)
+                            ,id
+                            (the int (* (/ 1024.0 100.0) ,vol))
+                            (the int (* 1524.0 ,pitch))
+                            ,bend
+                            (sound-group ,group)
+                            ,position)))
+    (#t
+     `(sound-play-by-name (static-sound-name ,name)
+                         ,id
+                         (the int (* (/ 1024.0 100.0) ,vol))
+                         (the int (* 1524.0 ,pitch))
+                         ,bend
+                         (sound-group ,group)
+                         ,position))))
 
 (defun sound-play-by-name ((name sound-name) (id sound-id) (vol int) (pitch int) (bend int) (group sound-group) (trans symbol))
   "Play a sound called name with the specified params"

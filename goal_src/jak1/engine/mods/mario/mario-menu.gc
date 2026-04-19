@@ -239,6 +239,32 @@
                  :name "sm64-sound-previewer")
   (none))
 
+(defun sm64-play-preview-sound ((name string))
+  "Play the SM64 sound whose entry in *sm64-sound-preview-list* has
+   `name` == the given string.  Returns #t if a match was found and
+   played, #f otherwise (the sound is silently skipped so callers
+   don't have to wrap the call in a guard).
+
+   Covers every clip in audio_defines.h via the preview table, so it
+   works for sounds that `sm64-sound` doesn't have a friendly-name
+   case for — just pass the label exactly as it appears in the
+   previewer HUD (lowercased, underscores swapped for spaces), e.g.:
+
+     (sm64-play-preview-sound \"mario hello\")
+     (sm64-play-preview-sound \"menu star okey dokey\")
+     (sm64-play-preview-sound \"action teleport\")
+
+   Matching is exact (case- and whitespace-sensitive).  O(n) linear
+   scan over the 411-entry list; fine for one-off triggers, not for
+   per-frame polling."
+  (let ((n (-> *sm64-sound-preview-list* length)))
+    (dotimes (i n)
+      (let ((entry (-> *sm64-sound-preview-list* i)))
+        (when (string= name (-> entry name))
+          (pc-sm64-play-sound (the int (-> entry id)))
+          (return #t)))))
+  #f)
+
 ;; ---------------------------------------------------------------------------
 ;; Debug-menu registration.
 ;;

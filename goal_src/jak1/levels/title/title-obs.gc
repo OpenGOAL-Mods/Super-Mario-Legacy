@@ -612,7 +612,13 @@
   :enter
     (behavior ()
       (set-setting! 'allow-pause #f 0.0 0)
-      (set-setting! 'allow-progress #f 0.0 0))
+      (set-setting! 'allow-progress #f 0.0 0)
+      ;; libsm64: "It's-a me, Mario!" on the title-screen handshake —
+      ;; matches the vanilla SM64 boot beat where Mario greets the
+      ;; player as his face appears.  Gated by *mario-settings* via
+      ;; pc-sm64-play-sound → sm64_play_sound_global; if SM64 audio
+      ;; is disabled or Mario isn't initialized yet, the call no-ops.
+      (sm64-sound 'hello))
   :exit
     (-> target-title
         exit)

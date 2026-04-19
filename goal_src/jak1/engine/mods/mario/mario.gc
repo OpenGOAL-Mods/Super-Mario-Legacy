@@ -197,6 +197,11 @@
     ;; ---- Menu / system sounds (bank 7) ----------------------------------
     (('lets-a-go 'lets-go)       (pc-sm64-play-sound #x7024FF81))  ;; star-select "Let's-a go!"
     (('star-okey-dokey)          (pc-sm64-play-sound #x7023FF81))  ;; star-select "Okey dokey"
+    ;; SOUND_MENU_CLICK_FILE_SELECT — the classic "whoosh" that plays on
+    ;; the SM64 file-select / save-slot screen when a file is picked or
+    ;; the screen itself whooshes in.  Encoded as
+    ;; SOUND_ARG_LOAD(7, 0, 0x11, 0x00, 8) | SOUND_STATUS_STARTING.
+    (('whoosh 'file-select-click) (pc-sm64-play-sound #x70110081))
     (else
       (format 0 "sm64-sound: unknown sound ~A~%" snd)))
   (none))
@@ -547,6 +552,19 @@
 
 (defbehavior sm64-mario-col-init sm64-mario-col ()
   "Initialize and enter idle."
+  ;; Clear pause / menu / progress bits from our mask so the idle loop
+  ;; keeps ticking when Jak's game is paused, the debug menu is open,
+  ;; or the start-menu (progress screen) is up.  This is what lets
+  ;; `update-mario-music!` pick up the load-game → file-select track
+  ;; override the instant the progress screen opens — without this, the
+  ;; default-pool-inherited mask (`pause menu progress process-tree`,
+  ;; see gkernel.gc:2045) gates our entire behavior off during those
+  ;; modes and the music stays on the previous level's track.  Same
+  ;; pattern as `sage-finalboss.gc:599` / `anim-tester-x.gc:395`.  All
+  ;; other work in the idle loop (Mario death detection, health sync,
+  ;; target-flags, shell respawn timer) is either `(when *target* ...)`
+  ;; guarded or cheap bookkeeping, so it's safe to keep ticking.
+  (logclear! (-> self mask) (process-mask pause menu progress))
   (set! (-> self root) (new 'process 'trsqv))
   (set! (-> self root trans quad) (-> *sm64-mario-pos* quad))
   (set! (-> self prev-attacking) #f)

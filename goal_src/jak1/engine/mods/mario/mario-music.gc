@@ -40,7 +40,6 @@
    Default: 'bob-omb everywhere — fill in per level as desired."
   (case lev
     (('title)        'title)
-    ;;add case to play file-select when in file select?
     (('intro)        'bob-omb)
     (('demo)         'bob-omb)
     (('training)     'bob-omb)
@@ -73,14 +72,67 @@
 (defun mario-music-level-is-forced? ((lev symbol))
   (or (= lev 'title) (= lev 'intro) (= lev 'demo)))
 
-;; Cache: last level symbol we told libsm64 about.  #f means "nothing yet".
-(define *mario-music-last-level* (the symbol #f))
+;; True while a file-select-ish progress screen is on top of the title
+;; level.  Two screens qualify: `load-game` (picked from "Load Game" on
+;; the title menu) and `save-game-title` (picked from "New Game" — see
+;; `*title-pc*` in progress-pc.gc:752 where "New Game" routes to
+;; `game-option-menu save-game-title`).
+;;
+;; Gated to the title level only on purpose: the same `load-game` /
+;; `save-game-title` screens are ALSO reachable from the in-game pause
+;; menu, and switching to the SM64 file-select theme mid-level
+;; whenever the player opens the start menu to load/save would stomp
+;; on the level's music.  The title-level gate means we only play
+;; file-select music in its natural context — while sitting on the
+;; title screen picking a save slot — and leave in-game pause menus
+;; running the current level track.
+;;
+;; Safe against `*progress-process*` being `#f` (initial state before
+;; any progress screen has ever opened) — the `and` short-circuits
+;; before the deref.
+(defun mario-music-on-file-select? ((cur-lev symbol))
+  (if (and (= cur-lev 'title)
+           *progress-process*
+           (let ((ds (-> *progress-process* 0 display-state)))
+             (or (= ds (progress-screen load-game))
+                 (= ds (progress-screen save-game-title)))))
+    #t
+    #f))
+
+;; Cache: last track symbol we told libsm64 to play.  #f means "nothing
+;; yet".  Switched from level-tracking to track-tracking so that a
+;; change in desired music (either from a level transition OR a
+;; progress-screen overlay opening / closing — see
+;; `mario-music-on-file-select?`) triggers a single re-queue without
+;; either source restarting the current song every frame.
+(define *mario-music-last-track* (the symbol #f))
 
 ;; Cache: were we muting Jak's music last frame?  Edge-detection so we
 ;; call add-setting!/remove-setting! exactly once per transition — the
 ;; underlying setting-control connection then persists across frames
 ;; without re-registration.
 (define *mario-music-was-active* #f)
+
+;; Cache: was the file-select overlay open last frame?  Rising-edge
+;; detection for the SM64 "whoosh" sound that plays when the screen
+;; appears.  We keep it separate from `*mario-music-last-track*` because
+;; track changes fire for any reason (level transitions, etc.) and we
+;; only want the whoosh on the specific load-game/save-game-title
+;; overlay-open edge.
+(define *mario-music-was-on-file-select* #f)
+
+;; Cache: last progress-screen display-state we saw.  Used to detect the
+;; "user just picked a save slot" transition so we can play the classic
+;; SM64 "Okey dokey!" on the title-screen file pick.  The transition is
+;; (load-game → memcard-loading) for load, or
+;; (save-game-title → memcard-saving / memcard-data-exists) for new-game
+;; — both kicked off by `respond-memcard` in progress-pc.gc.  We can't
+;; call `sm64-sound` directly from progress-pc.gc because it compiles
+;; before mario.gc (see game.gp line 2097 vs 2111), so we watch the
+;; state transition from the Mario side instead.  The `invalid` default
+;; and `when *progress-process*` guard keep the first-frame and
+;; no-progress-process cases from false-firing.
+(define *mario-music-last-progress-state* (progress-screen invalid))
 
 ;; update-mario-music! is declared as a `defbehavior process` because
 ;; add-setting!/remove-setting! expand to `(... (with-pp pp) ...)` which
@@ -112,15 +164,55 @@
        (when (not *mario-music-was-active*)
          (add-setting! 'music-volume 'abs 0.0 0)
          (add-setting! 'music #f 0.0 0))
-       ;; Detect level transitions and start the mapped SM64 track.
+       ;; Pick this frame's desired track.  The file-select / load-game
+       ;; progress screen overlays whatever level is loaded, so it wins
+       ;; over the level-based map.  When the screen closes and returns
+       ;; us to the title (or pause scene), the desired track flips
+       ;; back to the level's track and we re-queue automatically.
        (when *level*
-         (let ((cur-lev (-> (level-get-target-inside *level*) name)))
-           (when (!= cur-lev *mario-music-last-level*)
-             (set! *mario-music-last-level* cur-lev)
-             (let ((track (mario-music-for-level cur-lev)))
-               (if (mario-music-level-is-forced? cur-lev)
-                 (sm64-music-forced track)
-                 (sm64-music track))))))
+         (let* ((cur-lev     (-> (level-get-target-inside *level*) name))
+                (on-fs?      (mario-music-on-file-select? cur-lev))
+                (track       (if on-fs? 'file-select (mario-music-for-level cur-lev)))
+                ;; Use the "forced" call whenever master-mode is outside
+                ;; 'game — both the level-is-forced set AND the
+                ;; load-game overlay, where the player sits in the menu
+                ;; with no active level state.  Without this, the
+                ;; pause-gate in sm64-music swallows the switch and the
+                ;; menu comes up silent.
+                (forced?     (or on-fs? (mario-music-level-is-forced? cur-lev))))
+           (when (!= track *mario-music-last-track*)
+             (set! *mario-music-last-track* track)
+             (if forced? (sm64-music-forced track) (sm64-music track)))
+           ;; Rising edge: the file-select overlay just opened.  Fire
+           ;; the SM64 "whoosh" one-shot to mirror the classic SM64
+           ;; file-select screen transition.  Falling edge clears the
+           ;; cache silently so the next open re-triggers.
+           (when (and on-fs? (not *mario-music-was-on-file-select*))
+             (sm64-sound 'whoosh))
+           (set! *mario-music-was-on-file-select* on-fs?)
+
+           ;; Slot-pick transition detection.  respond-memcard in
+           ;; progress-pc.gc flips the progress screen from
+           ;; load-game → memcard-loading (on load) or
+           ;; save-game-title → memcard-saving / memcard-data-exists
+           ;; (on new-game) the frame the user confirms a slot.  Watch
+           ;; both edges and play the SM64 star-select "Okey dokey!"
+           ;; only when we're on the title level — in-game pause-menu
+           ;; loads / saves stay Jak-only.
+           (let ((cur-ps (if *progress-process*
+                             (-> *progress-process* 0 display-state)
+                             (progress-screen invalid))))
+             (when (= cur-lev 'title)
+               (let ((prev *mario-music-last-progress-state*))
+                 (cond
+                   ((and (= prev (progress-screen load-game))
+                         (= cur-ps (progress-screen memcard-loading)))
+                    (sm64-sound 'star-okey-dokey))
+                   ((and (= prev (progress-screen save-game-title))
+                         (or (= cur-ps (progress-screen memcard-saving))
+                             (= cur-ps (progress-screen memcard-data-exists))))
+                    (sm64-sound 'star-okey-dokey)))))
+             (set! *mario-music-last-progress-state* cur-ps))))
        (set! *mario-music-was-active* #t))
       (else
        ;; Falling edge: drop our overrides so the vanilla music setting
@@ -129,6 +221,8 @@
          (remove-setting! 'music-volume)
          (remove-setting! 'music)
          (pc-sm64-stop-music)
-         (set! *mario-music-last-level* #f)
+         (set! *mario-music-last-track* #f)
+         (set! *mario-music-was-on-file-select* #f)
+         (set! *mario-music-last-progress-state* (progress-screen invalid))
          (set! *mario-music-was-active* #f)))))
   (none))

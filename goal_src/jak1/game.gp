@@ -2114,6 +2114,7 @@
 
 (goal-src "engine/mods/mario/mario-menu-h.gc")
 (goal-src "engine/mods/mario/mario-menu.gc" "mario" "progress" "pckernel" "mario-menu-h")
+(goal-src "engine/mods/mario/mario-debug-menu.gc" "mario" "mario-menu-h" "mario-menu" "default-menu")
 
 (group-list "all-code"
   `(,@(reverse *all-gc*))

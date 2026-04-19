@@ -351,4 +351,5 @@
   "mario-music.o" ;; mario mod
   "mario-menu-h.o" ;; mario mod (sm64-sound-entry + *sm64-sound-preview-list*)
   "mario-menu.o" ;; mario mod
+  "mario-debug-menu.o" ;; mario mod (sound previewer + debug-menu entry; declare-file debug, empty in retail)
  ))

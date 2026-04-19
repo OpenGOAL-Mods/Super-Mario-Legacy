@@ -159,3 +159,101 @@
   (set! (-> *mario-options* 0 value-to-modify) (&-> *mario-settings* play-sm64-music?))
   (set! (-> *mario-options* 1 value-to-modify) (&-> *mario-settings* sm64-music-volume))
   (none))
+
+;; ---------------------------------------------------------------------------
+;; SM64 Sound Previewer — debug-menu utility.
+;;
+;; The big list of sounds lives in mario-menu-h.gc (`*sm64-sound-preview-list*`);
+;; this file hosts the previewer process itself.  When spawned via the
+;; debug-menu entry registered at the bottom of this file:
+;;   R1       — next sound
+;;   L1       — previous sound
+;;   Triangle — replay current
+;;   Square   — exit previewer
+;; ---------------------------------------------------------------------------
+
+(deftype sm64-sound-previewer (process)
+  ((idx int32))
+  :heap-base #x100)
+
+(defstate sm64-sound-previewer-idle (sm64-sound-previewer)
+  :trans
+    (behavior ()
+      ;; ---- Input -----------------------------------------------------------
+      (let ((n (-> *sm64-sound-preview-list* length)))
+        (cond
+          ((cpad-pressed? 0 square)
+           (deactivate self))
+          ((cpad-pressed? 0 r1)
+           (set! (-> self idx) (mod (+ (-> self idx) 1) n))
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))
+          ((cpad-pressed? 0 l1)
+           (set! (-> self idx) (mod (+ (-> self idx) (- n 1)) n))
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))
+          ((cpad-pressed? 0 triangle)
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))))
+
+      ;; ---- HUD -------------------------------------------------------------
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 40 0.0
+                      (font-color default) (font-flags shadow kerning))))
+        (set! (-> ctx flags) (font-flags shadow kerning large))
+        (print-game-text (string-format "SM64 SOUND PREVIEWER") ctx #f 128 22))
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 70 0.0
+                      (font-color default) (font-flags shadow kerning)))
+            (cur (-> *sm64-sound-preview-list* (-> self idx))))
+        (print-game-text
+          (string-format "Sound ~D / ~D: ~A   id=#x~8,'0X"
+                         (+ (-> self idx) 1)
+                         (-> *sm64-sound-preview-list* length)
+                         (-> cur name)
+                         (-> cur id))
+          ctx #f 128 22))
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 100 0.0
+                      (font-color default) (font-flags shadow kerning))))
+        (print-game-text
+          (string-format "R1 = next   L1 = prev   Triangle = replay   Square = exit")
+          ctx #f 128 22)))
+  :code
+    (behavior ()
+      (loop (suspend))))
+
+(defbehavior sm64-sound-previewer-init sm64-sound-previewer ()
+  "Seed idx + enter idle.  Plays the first sound on activation so the
+   user hears something immediately instead of waiting for an L1/R1."
+  ;; Clear pause / menu / progress bits so the previewer keeps ticking
+  ;; even while the debug menu is still visible on top.  Same pattern
+  ;; as sm64-mario-col-init; see gkernel.gc:82 for mask semantics.
+  (logclear! (-> self mask) (process-mask pause menu progress))
+  (set! (-> self idx) 0)
+  (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* 0 id)))
+  (go sm64-sound-previewer-idle))
+
+(defun start-sm64-sound-previewer ()
+  "Spawn the SM64 sound previewer process.  Safe to call repeatedly —
+   any existing instance is deactivated first so a fresh one starts at
+   index 0 instead of accumulating duplicates in *active-pool*."
+  (let ((existing (process-by-name "sm64-sound-previewer" *active-pool*)))
+    (when existing (deactivate existing)))
+  (process-spawn sm64-sound-previewer
+                 :init sm64-sound-previewer-init
+                 :name "sm64-sound-previewer")
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; Debug-menu registration.
+;;
+;; Appends a new "Mario" submenu to the already-built root of
+;; `*debug-menu-context*`.  default-menu.gc (game.gp line 2030) calls
+;; `debug-menu-context-make-default-menus` at its top level to wire up
+;; Artist / Game / Sound / Shader / Instance / Task menus; we run after
+;; all of that (mario-menu.gc is at line 2115) so the root menu object
+;; is already live when this code executes — we just push one more
+;; submenu onto it.
+;; ---------------------------------------------------------------------------
+(when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
+  (debug-menu-append-item
+    (-> *debug-menu-context* root-menu)
+    (debug-menu-make-from-template
+      *debug-menu-context*
+      '(menu "Mario"
+             (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))))))

@@ -2112,7 +2112,8 @@
  "mods/mario/mario-music.gc"
 )
 
-(goal-src "engine/mods/mario/mario-menu.gc" "mario" "progress" "pckernel")
+(goal-src "engine/mods/mario/mario-menu-h.gc")
+(goal-src "engine/mods/mario/mario-menu.gc" "mario" "progress" "pckernel" "mario-menu-h")
 
 (group-list "all-code"
   `(,@(reverse *all-gc*))

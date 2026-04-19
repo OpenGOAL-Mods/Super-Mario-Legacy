@@ -349,5 +349,6 @@
   "mario-settings.o" ;; mario mod
   "mario.o"
   "mario-music.o" ;; mario mod
+  "mario-menu-h.o" ;; mario mod (sm64-sound-entry + *sm64-sound-preview-list*)
   "mario-menu.o" ;; mario mod
  ))

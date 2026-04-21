@@ -10,6 +10,10 @@
 #include "../global_state.h"
 #include "../../load_surfaces.h"
 
+// Runtime Mario scale — same extern pattern used by mario_actions_moving.c
+// and mario_actions_submerged.c rather than pulling in the full libsm64.h.
+extern float g_libsm64_mario_scale;
+
 #define absfx( x ) ( (x) < 0.0f ? -(x) : (x) )
 
 /**
@@ -39,7 +43,12 @@ void update_mario_platform(void) {
     marioZ = gMarioObject->oPosZ;
     floorHeight = find_floor(marioX, marioY, marioZ, &floor);
 
-    if (absfx(marioY - floorHeight) < 4.0f) {
+    // Scale the floor-proximity threshold proportionally to the current Mario
+    // scale so that fast platforms (whose per-tick SM64-unit velocity grows
+    // with scale) keep Mario tracked at scale > 43.
+    // At scale 43 (vanilla default) this evaluates to 4.0f exactly.
+    float floorThreshold = 4.0f * (g_libsm64_mario_scale / 43.0f);
+    if (absfx(marioY - floorHeight) < floorThreshold) {
         awayFromFloor = 0;
     } else {
         awayFromFloor = 1;
@@ -112,6 +121,11 @@ void apply_platform_displacement(u32 isMario, struct SM64SurfaceObjectTransform 
 //  }
 
     x += platform->aVelX;
+    // Apply vertical translation so elevators and other Y-moving platforms carry
+    // Mario upward/downward instead of relying solely on the floor-snap in
+    // bhv_mario_update (which has a hard 78 SM64-unit look-ahead limit that
+    // becomes tighter in Jak-space at higher Mario scales).
+    y += platform->aVelY;
     z += platform->aVelZ;
 
     if (rotation[0] != 0 || rotation[1] != 0 || rotation[2] != 0) {

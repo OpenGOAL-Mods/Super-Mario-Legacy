@@ -1192,6 +1192,11 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   // Copy results into our managed buffers (threadsafe)
   std::lock_guard<std::mutex> lock(m_geo_mutex);
 
+  // Snapshot the outgoing tick's geometry+state so the renderer can lerp
+  // between them on the intervening 60fps frame.
+  m_prev_geometry = m_geometry;
+  m_prev_state = m_state;
+
   m_geometry.num_triangles = sm64_geo.numTrianglesUsed;
   int num_verts = sm64_geo.numTrianglesUsed * 3;
 
@@ -2731,12 +2736,46 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
 
 MarioGeometry LibSM64Manager::get_geometry() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
+  // If blend < 1 and both snapshots have the same (non-zero) triangle count,
+  // linearly interpolate vertex positions between the previous and current tick.
+  if (render_blend < 1.0f &&
+      m_prev_geometry.num_triangles > 0 &&
+      m_prev_geometry.num_triangles == m_geometry.num_triangles) {
+    MarioGeometry blended = m_geometry;  // copy colors/uvs/normals as-is
+    const float t = render_blend;
+    const float s = 1.0f - t;
+    int n = m_geometry.num_triangles * 3;
+    blended.position.resize(n * 3);
+    for (int i = 0; i < n * 3; ++i) {
+      blended.position[i] = s * m_prev_geometry.position[i] + t * m_geometry.position[i];
+    }
+    return blended;
+  }
   return m_geometry;
 }
 
 MarioState LibSM64Manager::get_state() {
   std::lock_guard<std::mutex> lock(m_geo_mutex);
   return m_state;
+}
+
+MarioState LibSM64Manager::get_render_state() {
+  std::lock_guard<std::mutex> lock(m_geo_mutex);
+  if (render_blend >= 1.0f || m_prev_geometry.num_triangles == 0) {
+    return m_state;
+  }
+  const float t = render_blend;
+  const float s = 1.0f - t;
+  MarioState blended = m_state;
+  blended.position = math::Vector3f(
+      s * m_prev_state.position.x() + t * m_state.position.x(),
+      s * m_prev_state.position.y() + t * m_state.position.y(),
+      s * m_prev_state.position.z() + t * m_state.position.z());
+  // Lerp face angle via cos/sin to avoid discontinuity at the ±π wrap.
+  float ca = s * std::cosf(m_prev_state.face_angle) + t * std::cosf(m_state.face_angle);
+  float sa = s * std::sinf(m_prev_state.face_angle) + t * std::sinf(m_state.face_angle);
+  blended.face_angle = std::atan2f(sa, ca);
+  return blended;
 }
 
 // ========================================================================

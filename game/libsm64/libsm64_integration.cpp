@@ -24,6 +24,8 @@
 
 #include "third-party/libtinyfiledialogs/tinyfiledialogs.h"
 
+#include "game/graphics/gfx.h"
+
 extern "C" {
 #include "libsm64.h"
 #include "decomp/tools/libmio0.h"
@@ -123,19 +125,15 @@ bool LibSM64Manager::init_autodetect() {
   }
   // Uses the project's ghc::filesystem alias from FileUtil.h.
 
-  // Search order: directory next to gk.exe first (so a user drop-in ROM wins),
-  // then iso_data/mario/ under the project dir. We pick the first .z64 whose
-  // size matches the expected US ROM size.
+  // Search order:
+  //   1. iso_data/mario/ — the canonical in-mod location, populated by dialog on first run
+  //   2. Directory next to gk.exe — user drop-in
+  //   3. Saved path from sm64-settings.json — backup used when iso_data/mario/ was wiped
+  //      by a mod update but the user's original ROM still exists elsewhere
+  fs::path picked;
+
+  // 1 & 2. Scan filesystem search dirs
   std::vector<fs::path> search_dirs;
-  try {
-    std::string exe_str = file_util::get_current_executable_path();
-    if (!exe_str.empty()) {
-      fs::path exe(exe_str);
-      search_dirs.push_back(exe.parent_path());
-    }
-  } catch (...) {
-    // fall through; we still have iso_data/mario as a fallback
-  }
   try {
     fs::path proj = file_util::get_jak_project_dir();
     if (!proj.empty()) {
@@ -143,8 +141,14 @@ bool LibSM64Manager::init_autodetect() {
     }
   } catch (...) {
   }
+  try {
+    std::string exe_str = file_util::get_current_executable_path();
+    if (!exe_str.empty()) {
+      search_dirs.push_back(fs::path(exe_str).parent_path());
+    }
+  } catch (...) {
+  }
 
-  fs::path picked;
   for (const auto& dir : search_dirs) {
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) continue;
@@ -173,8 +177,56 @@ bool LibSM64Manager::init_autodetect() {
     if (!picked.empty()) break;
   }
 
+  // 3. Fall back to the saved path (original user selection) if scan found nothing.
+  //    This handles the case where iso_data/mario/ was wiped by a mod update.
+  if (picked.empty()) {
+    const std::string& saved_path = Gfx::g_sm64_settings.rom_path;
+    if (!saved_path.empty()) {
+      std::error_code ec;
+      fs::path saved(saved_path);
+      auto sz = fs::file_size(saved, ec);
+      if (!ec && sz == kExpectedSm64RomSize) {
+        lg::info("[libsm64] iso_data/mario/ empty — restoring ROM from saved path: {}", saved_path);
+        picked = saved;
+        // Re-copy into iso_data/mario/ so subsequent launches use the fast scan path
+        try {
+          fs::path dest_dir = file_util::get_jak_project_dir() / "iso_data" / "mario";
+          fs::create_directories(dest_dir, ec);
+          fs::path dest = dest_dir / saved.filename();
+          fs::copy_file(saved, dest, fs::copy_options::overwrite_existing, ec);
+          if (!ec) {
+            lg::info("[libsm64] Restored ROM to {}", dest.string());
+            picked = dest;
+          }
+        } catch (...) {
+        }
+      } else {
+        lg::warn("[libsm64] Saved ROM path '{}' is no longer valid", saved_path);
+      }
+    }
+  }
+
   if (picked.empty()) {
     lg::warn("[libsm64] Auto-detect: no matching .z64 found next to gk or in iso_data/mario");
+
+    // Probe whether a GUI file dialog is available before calling it.
+    // tinyfd_openFileDialog with title "tinyfd_query" returns (char const*)1
+    // when a native GUI dialog exists, (char const*)0 or null otherwise.
+    // On Linux without zenity/kdialog/etc. this would silently fall back to
+    // stdin, which hangs or returns nothing in a non-terminal launch.
+    char const* probe_filters[] = {"*.z64"};
+    const bool gui_available =
+        (tinyfd_openFileDialog("tinyfd_query", "", 1, probe_filters, nullptr, 0) != nullptr);
+
+    if (!gui_available) {
+      lg::error(
+          "[libsm64] No GUI file dialog available on this system. "
+          "To enable Mario, do one of:\n"
+          "  (a) Drop an SM64 US .z64 ROM next to gk (or into iso_data/mario/)\n"
+          "  (b) Use the 'ROM Path override' field in the SM64 debug panel (ImGui)\n"
+          "  (c) Install 'zenity' or 'kdialog' so the file picker can open");
+      return false;
+    }
 
     // Prompt the user to pick a .z64 ROM file
     char const* filter_patterns[] = {"*.z64", "*.Z64"};
@@ -194,26 +246,27 @@ bool LibSM64Manager::init_autodetect() {
       return false;
     }
 
-    // Copy the ROM to iso_data/mario/ so future launches find it automatically
+    // Save the original selection as backup for future mod updates, then copy
+    // into iso_data/mario/ as the canonical in-mod location.
+    Gfx::g_sm64_settings.rom_path = selected_rom.string();
+    Gfx::g_sm64_settings.save_settings();
+
     try {
-      fs::path proj = file_util::get_jak_project_dir();
-      fs::path dest_dir = proj / "iso_data" / "mario";
+      fs::path dest_dir = file_util::get_jak_project_dir() / "iso_data" / "mario";
       fs::create_directories(dest_dir, ec);
       fs::path dest = dest_dir / selected_rom.filename();
       fs::copy_file(selected_rom, dest, fs::copy_options::overwrite_existing, ec);
-      if (ec) {
-        lg::warn("[libsm64] Could not copy ROM to {}: {}", dest.string(), ec.message());
-        // Still try to init from the original location
-        return init(selected_rom.string());
+      if (!ec) {
+        lg::info("[libsm64] Copied ROM to {}", dest.string());
+        return init(dest.string());
       }
-      lg::info("[libsm64] Copied ROM to {}", dest.string());
-      picked = dest;
     } catch (...) {
-      // If copy fails, just use the ROM from where the user picked it
-      return init(selected_rom.string());
     }
+    // Copy failed — init from the original location directly
+    return init(selected_rom.string());
   }
-  lg::info("[libsm64] Auto-detected ROM: {}", picked.string());
+
+  lg::info("[libsm64] Using ROM: {}", picked.string());
   return init(picked.string());
 }
 

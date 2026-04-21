@@ -165,4 +165,35 @@ void InputSettings::save_settings() {
   file_util::create_dir_if_needed_for_file(file_path);
   file_util::write_text_file(file_path, data.dump(2));
 }
+
+void to_json(json& j, const SM64Settings& obj) {
+  json_serialize(rom_path);
+}
+
+void from_json(const json& j, SM64Settings& obj) {
+  json_deserialize_if_exists(rom_path);
+}
+
+void SM64Settings::load_settings() {
+  try {
+    std::string file_path =
+        (file_util::get_user_config_dir() / "sm64-settings.json").string();
+    if (!file_util::file_exists(file_path)) {
+      return;
+    }
+    lg::info("Loading SM64 settings at {}", file_path);
+    auto raw = file_util::read_text_file(file_path);
+    from_json(parse_commented_json(raw, "sm64-settings.json"), *this);
+  } catch (std::exception& e) {
+    lg::error("Error encountered when attempting to load SM64 settings {}", e.what());
+  }
+}
+
+void SM64Settings::save_settings() {
+  json data = *this;
+  auto file_path = file_util::get_user_config_dir() / "sm64-settings.json";
+  file_util::create_dir_if_needed_for_file(file_path);
+  file_util::write_text_file(file_path, data.dump(2));
+}
+
 }  // namespace game_settings

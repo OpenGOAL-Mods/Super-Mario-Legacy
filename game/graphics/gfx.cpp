@@ -28,6 +28,7 @@ namespace Gfx {
 std::function<void()> vsync_callback;
 GfxGlobalSettings g_global_settings;
 game_settings::DebugSettings g_debug_settings;
+game_settings::SM64Settings g_sm64_settings;
 
 const GfxRendererModule* GetRenderer(GfxPipeline pipeline) {
   switch (pipeline) {
@@ -56,6 +57,8 @@ u32 Init(GameVersion version) {
 
   g_debug_settings = game_settings::DebugSettings();
   g_debug_settings.load_settings();
+  g_sm64_settings = game_settings::SM64Settings();
+  g_sm64_settings.load_settings();
   {
     auto p = scoped_prof("startup::gfx::get_renderer");
     g_global_settings.renderer = GetRenderer(GfxPipeline::OpenGL);
@@ -104,6 +107,7 @@ u32 Exit() {
   Display::KillMainDisplay();
   GetCurrentRenderer()->exit();
   g_debug_settings.save_settings();
+  g_sm64_settings.save_settings();
   return 0;
 }
 

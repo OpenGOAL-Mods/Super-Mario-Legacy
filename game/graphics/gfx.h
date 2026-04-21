@@ -111,6 +111,7 @@ namespace Gfx {
 
 extern GfxGlobalSettings g_global_settings;
 extern game_settings::DebugSettings g_debug_settings;
+extern game_settings::SM64Settings g_sm64_settings;
 
 const GfxRendererModule* GetCurrentRenderer();
 

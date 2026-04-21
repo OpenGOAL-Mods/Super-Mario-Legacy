@@ -96,4 +96,20 @@ struct InputSettings {
 void to_json(json& j, const InputSettings& obj);
 void from_json(const json& j, InputSettings& obj);
 
+// Stores the SM64 ROM path so it persists across game versions and reinstalls.
+// Saved to {config}/OpenGOAL/sm64-settings.json (no game-version subdir) since
+// the ROM is version-agnostic.
+struct SM64Settings {
+  SM64Settings() = default;
+
+  // Absolute path to the last successfully used SM64 US ROM (.z64).
+  std::string rom_path = "";
+
+  void load_settings();
+  void save_settings();
+};
+
+void to_json(json& j, const SM64Settings& obj);
+void from_json(const json& j, SM64Settings& obj);
+
 }  // namespace game_settings

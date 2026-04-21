@@ -301,8 +301,11 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
     if (!detected.empty()) {
       ImGui::TextWrapped("Detected ROM: %s", detected.c_str());
     } else {
-      ImGui::TextDisabled("No ROM auto-detected — drop an SM64 US .z64 next to\n"
-                          "gk.exe or into iso_data/mario/, or use the override below.");
+      ImGui::TextDisabled("No ROM auto-detected.\n"
+                          "Options:\n"
+                          "  1. Drop an SM64 US .z64 next to gk.exe or into iso_data/mario/\n"
+                          "  2. Use the ROM Path override below and click 'Init From Override'\n"
+                          "  3. Linux: install 'zenity' or 'kdialog' so the file picker works");
     }
     ImGui::InputText("ROM Path override", m_rom_path, sizeof(m_rom_path));
 

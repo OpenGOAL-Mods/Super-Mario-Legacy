@@ -213,7 +213,7 @@
       (case message
         (('touch 'attack 'bonk)
          (when (and (= (-> proc type) target)
-                    (logtest? (-> *target* control root-prim prim-core action) (collide-action flut))
+                    ;;(logtest? (-> *target* control root-prim prim-core action) (collide-action flut))
                     (>= 10649.6 (vector-vector-xz-distance (-> self root trans) (target-pos 0))))
            (close-specific-task! (game-task snow-ball) (task-status need-hint))
            (logclear! (-> self mask) (process-mask actor-pause))
@@ -337,7 +337,7 @@
   (set! (-> this link) (new 'process 'actor-link-info this))
   (initialize-skeleton this *snow-button-sg* '())
   (logior! (-> this skel status) (janim-status inited))
-  (set! (-> this timeout) (the-as time-frame (the int (* 300.0 (res-lump-float arg0 'timeout :default 10.0)))))
+  (set! (-> this timeout) (the-as time-frame (* 4 (the int (* 300.0 (res-lump-float arg0 'timeout :default 10.0))))))
   (set! (-> this delay-til-wiggle) (+ (-> this timeout) (seconds -0.4)))
   (if (> (entity-actor-count arg0 'alt-actor) 0)
     (set! (-> this prev-button) (entity-actor-lookup arg0 'alt-actor 0))

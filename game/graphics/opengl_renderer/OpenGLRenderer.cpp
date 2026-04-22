@@ -1062,6 +1062,10 @@ void OpenGLRenderer::tick_mario_sm64() {
   // SM64 runs at 30Hz — only tick every other frame at 60fps
   static int tick_counter = 0;
   tick_counter++;
+  // Tell the renderer how far to blend between the previous and current tick.
+  // On tick frames (even) we just finished a new tick, so show the midpoint.
+  // On non-tick frames (odd) no new physics ran, so show the full current tick.
+  mgr.render_blend = (tick_counter % 2 == 0) ? 0.5f : 1.0f;
   if (tick_counter % 2 != 0) return;
 
   // 1b. Check if the game is paused — don't tick Mario if Jak's game is paused.

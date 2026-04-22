@@ -259,6 +259,9 @@ class LibSM64Manager {
   // Accessors (threadsafe via mutex)
   MarioGeometry get_geometry();
   MarioState get_state();
+  // Returns Mario's state lerped between the last two 30Hz ticks using render_blend.
+  // For use by the renderer only — gameplay code should use get_state().
+  MarioState get_render_state();
   GroundPoundHitbox get_ground_pound_hitbox();
 
   // Audio volume (0..100). Applied on the cubeb worker thread, lock-free.
@@ -580,6 +583,13 @@ class LibSM64Manager {
   // Up offset (SM64 units) from Mario's feet for the held yakow.
   float yakow_hold_up_sm64 = 80.0f;
 
+  // Visual interpolation blend factor for the renderer.
+  // Set each frame by tick_mario_sm64() so the renderer can smoothly
+  // lerp between the previous and current 30Hz tick positions at 60fps.
+  // 0.0 = show previous tick, 1.0 = show current tick.
+  // NOT guarded by m_geo_mutex — only written/read from the render thread.
+  float render_blend = 1.0f;
+
  private:
   LibSM64Manager() = default;
   ~LibSM64Manager();
@@ -776,6 +786,9 @@ class LibSM64Manager {
   std::mutex m_geo_mutex;
   MarioGeometry m_geometry;
   MarioState m_state;
+  // Previous tick's geometry and state, used for render-side interpolation.
+  MarioGeometry m_prev_geometry;
+  MarioState m_prev_state;
   GroundPoundHitbox m_gp_hitbox;
   uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
   // Last frame's "is Mario submerged in a lava water-vol" flag. Used by

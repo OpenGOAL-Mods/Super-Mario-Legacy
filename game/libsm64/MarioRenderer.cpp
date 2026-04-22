@@ -341,7 +341,7 @@ void MarioRenderer::render(const float* camera_matrix,
   // Draw shell if Mario is in a shell-riding action. render_shell() binds the
   // shell's own texture so the dome shows the green pattern; belly and ring
   // vertices carry negative UVs, causing the shader to use vertex colour.
-  auto state = mgr.get_state();
+  auto state = mgr.get_render_state();
   if (state.action & kActFlagRidingShell) {
     render_shell(state);
   }

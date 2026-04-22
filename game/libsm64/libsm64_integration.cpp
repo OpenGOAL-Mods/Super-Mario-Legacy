@@ -2575,6 +2575,12 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   u32 false_val = s7.offset;
   if (false_val == 0) return;
 
+  // Skip water sync while the fishing minigame is active — same effect as
+  // toggling water_sync off.  find_symbol_from_c is a no-op when the jungle
+  // level isn't loaded and the symbol doesn't exist yet.
+  auto fishing_sym = jak1::find_symbol_from_c("*sm64-fishing*");
+  if (fishing_sym.offset != 0 && fishing_sym->value != false_val) return;
+
   auto target_sym = jak1::intern_from_c("*target*");
   if (target_sym.offset == 0) return;
   u32 target_ptr = target_sym->value;

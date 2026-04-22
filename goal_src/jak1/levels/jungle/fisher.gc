@@ -8,6 +8,10 @@
 (declare-type fisher-fish process-drawable)
 (define-extern pc-sm64-teleport-mario (function float float float none))
 
+;; libsm64 bridge: set to #t while the fishing minigame is active so C++
+;; suppresses Mario's swim sync (update_mario_water forces him dry).
+(define *sm64-fishing* #f)
+
 ;; DECOMP BEGINS
 
 (deftype fisher-bank (basic)
@@ -1537,16 +1541,17 @@
          (set-zero! (-> self control unknown-smush00))
          (activate! (-> self control unknown-smush00) 1.0 120 210 0.3 1.0))
         ((= message 'lose) (set! (-> self control unknown-uint20) (the-as uint message)) message)
-        ((= message 'swim) #f) ;; fixes swimming in fish game
         (else ((-> target-grab event) proc argc message block))))
   :enter
     (behavior ((arg0 handle))
       (set! (-> self control unknown-surface00) *empty-mods*)
       (logior! (-> self state-flags) (state-flags invulnerable))
       (set-zero! (-> self control unknown-smush00))
-      (set! (-> self control unknown-uint20) (the-as uint #f)))
+      (set! (-> self control unknown-uint20) (the-as uint #f))
+      (set! *sm64-fishing* #t))
   :exit
     (behavior ()
+      (set! *sm64-fishing* #f)
       (logclear! (-> self state-flags) (state-flags invulnerable))
       (let ((v1-2 (-> self manipy)))
         (when v1-2

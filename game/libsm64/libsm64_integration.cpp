@@ -2977,9 +2977,13 @@ MarioState LibSM64Manager::get_render_state() {
       s * m_prev_state.position.y() + t * m_state.position.y(),
       s * m_prev_state.position.z() + t * m_state.position.z());
   // Lerp face angle via cos/sin to avoid discontinuity at the ±π wrap.
-  float ca = s * std::cosf(m_prev_state.face_angle) + t * std::cosf(m_state.face_angle);
-  float sa = s * std::sinf(m_prev_state.face_angle) + t * std::sinf(m_state.face_angle);
-  blended.face_angle = std::atan2f(sa, ca);
+  // Use the unsuffixed std::cos/sin/atan2 — they're properly overloaded
+  // for float in <cmath>, and unlike std::cosf/sinf/atan2f, they work on
+  // libstdc++ (Linux clang).  MSVC's STL exposes the `f`-suffixed names
+  // in std:: as an extension; libstdc++ doesn't.
+  float ca = s * std::cos(m_prev_state.face_angle) + t * std::cos(m_state.face_angle);
+  float sa = s * std::sin(m_prev_state.face_angle) + t * std::sin(m_state.face_angle);
+  blended.face_angle = std::atan2(sa, ca);
   return blended;
 }
 

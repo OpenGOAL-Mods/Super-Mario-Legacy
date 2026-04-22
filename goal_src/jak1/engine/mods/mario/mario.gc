@@ -236,6 +236,10 @@
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
 (define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; C++ writes: x = forward velocity (Jak units/frame), y = slide-kick active,
+;;              z = jump-kick active, w = butt-slide active.
+(define *sm64-mario-velocity* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
@@ -306,6 +310,9 @@
   ((prev-attacking    symbol)
    (prev-ground-pound symbol)
    (prev-diving       symbol)
+   (prev-slide-kick   symbol)
+   (prev-jump-kick    symbol)
+   (prev-butt-slide   symbol)
    (mario-dead        symbol)
    (death-timer       int)
    (prev-jak-health   float)
@@ -357,6 +364,9 @@
     (set! (-> self prev-attacking) #f)
     (set! (-> self prev-ground-pound) #f)
     (set! (-> self prev-diving) #f)
+    (set! (-> self prev-slide-kick) #f)
+    (set! (-> self prev-jump-kick) #f)
+    (set! (-> self prev-butt-slide) #f)
     ;; Start as #t so the initial health=0.0 (before C++ writes) doesn't
     ;; false-trigger the death chain.  Clears to #f once C++ reports health > 0.
     (set! (-> self mario-dead) #t)
@@ -439,13 +449,14 @@
       (let ((attacking (> (-> *sm64-mario-info* x) 0.5)))
         (when (and attacking (not (-> self prev-attacking)))
           (let ((fist-pos (new 'stack-no-clear 'vector))
-                (yaw (-> *sm64-mario-pos* w)))
+                (yaw (-> *sm64-mario-pos* w))
+                (atk-scale (if (and *target* (= (-> *target* fact eco-type) (pickup-type eco-red)) (>= (-> *target* fact eco-level) 1.0)) 2.0 1.0)))
             (set-vector! fist-pos
               (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
               (+ (-> *sm64-mario-pos* y) (meters 1.0))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self fist-pos (meters 1.5) 15 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self fist-pos (* (meters 1.8) atk-scale) 15 'punch)))
               (when tracker
                 ;; Give it a callback that tracks Mario's fist each frame.
                 (send-event (ppointer->process tracker) 'function
@@ -465,13 +476,14 @@
       (let ((gp-impact (> (-> *sm64-mario-info* y) 0.5)))
         (when (and gp-impact (not (-> self prev-ground-pound)))
           ;; Spawn at Mario's feet, large radius, short burst, 'flop attack
-          (let ((feet-pos (new 'stack-no-clear 'vector)))
+          (let ((feet-pos (new 'stack-no-clear 'vector))
+                (atk-scale (if (and *target* (= (-> *target* fact eco-type) (pickup-type eco-red)) (>= (-> *target* fact eco-level) 1.0)) 2.0 1.0)))
             (set-vector! feet-pos
               (-> *sm64-mario-pos* x)
               (-> *sm64-mario-pos* y)
               (-> *sm64-mario-pos* z)
               1.0)
-            (sm64-spawn-attack-tracker self feet-pos (meters 1.5) 10 'flop)))
+            (sm64-spawn-attack-tracker self feet-pos (* (meters 1.5) atk-scale) 10 'flop)))
         (set! (-> self prev-ground-pound) gp-impact))
 
       ;; ---- Ground pound invincibility (falling + impact) ----
@@ -485,13 +497,14 @@
       (let ((diving (> (-> *sm64-mario-info* w) 0.5)))
         (when (and diving (not (-> self prev-diving)))
           (let ((body-pos (new 'stack-no-clear 'vector))
-                (yaw (-> *sm64-mario-pos* w)))
+                (yaw (-> *sm64-mario-pos* w))
+                (atk-scale (if (and *target* (= (-> *target* fact eco-type) (pickup-type eco-red)) (>= (-> *target* fact eco-level) 1.0)) 2.0 1.0)))
             (set-vector! body-pos
               (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
               (+ (-> *sm64-mario-pos* y) (meters 0.3))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self body-pos (meters 2.0) 30 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 30 'punch)))
               (when tracker
                 ;; Track just ahead of Mario as he slides forward.
                 (send-event (ppointer->process tracker) 'function
@@ -506,6 +519,83 @@
                     (update-transforms! (-> self root))
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-diving) diving))
+
+      ;; ---- Slide-kick touch-tracker on rising edge ----
+      (let ((slide-kicking (> (-> *sm64-mario-velocity* y) 0.5)))
+        (when (and slide-kicking (not (-> self prev-slide-kick)))
+          (let ((body-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w))
+                (atk-scale (if (and *target* (= (-> *target* fact eco-type) (pickup-type eco-red)) (>= (-> *target* fact eco-level) 1.0)) 2.0 1.0)))
+            (set-vector! body-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5)))
+              (+ (-> *sm64-mario-pos* y) (meters 0.3))
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 80 'punch)))
+              (when tracker
+                (send-event (ppointer->process tracker) 'function
+                  (lambda :behavior touch-tracker ()
+                    (let ((yaw (-> *sm64-mario-pos* w)))
+                      (set! (-> self root trans x)
+                            (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.5))))
+                      (set! (-> self root trans y)
+                            (+ (-> *sm64-mario-pos* y) (meters 0.3)))
+                      (set! (-> self root trans z)
+                            (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))))
+                    (update-transforms! (-> self root))
+                    (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
+        (set! (-> self prev-slide-kick) slide-kicking))
+
+      ;; ---- Jump-kick touch-tracker on rising edge ----
+      (let ((jump-kicking (> (-> *sm64-mario-velocity* z) 0.5)))
+        (when (and jump-kicking (not (-> self prev-jump-kick)))
+          (let ((kick-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w))
+                (atk-scale (if (and *target* (= (-> *target* fact eco-type) (pickup-type eco-red)) (>= (-> *target* fact eco-level) 1.0)) 2.0 1.0)))
+            (set-vector! kick-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.2)))
+              (+ (-> *sm64-mario-pos* y) (meters 0.5))
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.2)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self kick-pos (* (meters 1.5) atk-scale) 12 'punch)))
+              (when tracker
+                (send-event (ppointer->process tracker) 'function
+                  (lambda :behavior touch-tracker ()
+                    (let ((yaw (-> *sm64-mario-pos* w)))
+                      (set! (-> self root trans x)
+                            (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 1.2))))
+                      (set! (-> self root trans y)
+                            (+ (-> *sm64-mario-pos* y) (meters 0.5)))
+                      (set! (-> self root trans z)
+                            (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.2)))))
+                    (update-transforms! (-> self root))
+                    (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
+        (set! (-> self prev-jump-kick) jump-kicking))
+
+      ;; ---- Butt-slide touch-tracker (continuous while active, like shell) ----
+      (let ((butt-sliding (> (-> *sm64-mario-velocity* w) 0.5)))
+        (when butt-sliding
+          (let ((slide-pos (new 'stack-no-clear 'vector))
+                (yaw (-> *sm64-mario-pos* w)))
+            (set-vector! slide-pos
+              (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 0.5)))
+              (-> *sm64-mario-pos* y)
+              (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 0.5)))
+              1.0)
+            (let ((tracker (sm64-spawn-attack-tracker self slide-pos (meters 1.5) 8 'flop)))
+              (when tracker
+                (send-event (ppointer->process tracker) 'function
+                  (lambda :behavior touch-tracker ()
+                    (let ((yaw (-> *sm64-mario-pos* w)))
+                      (set! (-> self root trans x)
+                            (+ (-> *sm64-mario-pos* x) (* (sin yaw) (meters 0.5))))
+                      (set! (-> self root trans y)
+                            (-> *sm64-mario-pos* y))
+                      (set! (-> self root trans z)
+                            (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 0.5)))))
+                    (update-transforms! (-> self root))
+                    (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
+        (set! (-> self prev-butt-slide) butt-sliding))
 
       ;; ---- Shell riding: racer-like behavior ----
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
@@ -676,6 +766,7 @@
   ;; target-flags, shell respawn timer) is either `(when *target* ...)`
   ;; guarded or cheap bookkeeping, so it's safe to keep ticking.
   (logclear! (-> self mask) (process-mask pause menu progress))
+  (stack-size-set! (-> self main-thread) 512)
   (set! (-> self root) (new 'process 'trsqv))
   (set! (-> self root trans quad) (-> *sm64-mario-pos* quad))
   (set! (-> self prev-attacking) #f)

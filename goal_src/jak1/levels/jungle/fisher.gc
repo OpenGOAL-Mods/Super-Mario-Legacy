@@ -1537,6 +1537,7 @@
          (set-zero! (-> self control unknown-smush00))
          (activate! (-> self control unknown-smush00) 1.0 120 210 0.3 1.0))
         ((= message 'lose) (set! (-> self control unknown-uint20) (the-as uint message)) message)
+        ((= message 'swim) #f) ;; fixes swimming in fish game
         (else ((-> target-grab event) proc argc message block))))
   :enter
     (behavior ((arg0 handle))

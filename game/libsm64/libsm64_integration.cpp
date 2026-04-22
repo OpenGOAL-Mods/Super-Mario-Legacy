@@ -1894,12 +1894,21 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
       constexpr uint32_t ACT_FLAG_DIVING = 0x00080000;
       constexpr uint32_t ACT_GROUND_POUND_LAND = 0x0080023C;
       constexpr uint32_t ACT_GROUND_POUND = 0x008008A9;
+      constexpr uint32_t ACT_SLIDE_KICK = 0x018008AA;
+      constexpr uint32_t ACT_SLIDE_KICK_SLIDE = 0x0080045A;
+      constexpr uint32_t ACT_JUMP_KICK = 0x018008AC;
+      constexpr uint32_t ACT_BUTT_SLIDE = 0x00840452;
+      constexpr uint32_t ACT_BUTT_SLIDE_STOP = 0x00840453;
+      constexpr uint32_t ACT_BUTT_SLIDE_AIR = 0x0300088E;
       bool is_diving = (state.action & ACT_FLAG_DIVING) != 0;
       bool is_gp = (state.action == ACT_GROUND_POUND) || (state.action == ACT_GROUND_POUND_LAND);
-      bool is_attacking = (state.action & ACT_FLAG_ATTACKING) != 0 && !is_diving && !is_gp;
+      bool is_slide_kick = (state.action == ACT_SLIDE_KICK) || (state.action == ACT_SLIDE_KICK_SLIDE);
+      bool is_jump_kick = (state.action == ACT_JUMP_KICK);
+      bool is_butt_slide = (state.action == ACT_BUTT_SLIDE) || (state.action == ACT_BUTT_SLIDE_STOP) || (state.action == ACT_BUTT_SLIDE_AIR);
+      // x = punching/kicking (not dive/gp/slide-kick/jump-kick/butt-slide), y = ground pound impact, z = ground pound falling, w = diving
+      bool is_attacking = (state.action & ACT_FLAG_ATTACKING) != 0 && !is_diving && !is_gp && !is_slide_kick && !is_jump_kick && !is_butt_slide;
       bool gp_impact = (state.action == ACT_GROUND_POUND_LAND);
       bool gp_falling = (state.action == ACT_GROUND_POUND);
-      // x = punching/kicking (not dive/gp), y = ground pound impact, z = ground pound falling, w = diving
       float info_data[4] = {is_attacking ? 1.0f : 0.0f,
                             gp_impact ? 1.0f : 0.0f,
                             gp_falling ? 1.0f : 0.0f,
@@ -1932,12 +1941,25 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
-  // ---- *sm64-mario-velocity*: x = forward velocity (Jak units/frame) ----
+  // ---- *sm64-mario-velocity*: x = forward velocity, y = slide-kick, z = jump-kick, w = butt-slide ----
   auto vel_sym = jak1::intern_from_c("*sm64-mario-velocity*");
   if (vel_sym.offset != 0) {
     u32 vel_ptr = vel_sym->value;
     if (vel_ptr != 0 && vel_ptr != false_val && vel_ptr + 16 <= EE_MAIN_MEM_SIZE) {
-      float vel_data[4] = {state.forward_velocity, 0.0f, 0.0f, 0.0f};
+      // Reuse the action booleans computed above in the info block.
+      constexpr uint32_t ACT_SLIDE_KICK_V = 0x018008AA;
+      constexpr uint32_t ACT_SLIDE_KICK_SLIDE_V = 0x0080045A;
+      constexpr uint32_t ACT_JUMP_KICK_V = 0x018008AC;
+      constexpr uint32_t ACT_BUTT_SLIDE_V = 0x00840452;
+      constexpr uint32_t ACT_BUTT_SLIDE_STOP_V = 0x00840453;
+      constexpr uint32_t ACT_BUTT_SLIDE_AIR_V = 0x0300088E;
+      bool vel_slide_kick = (state.action == ACT_SLIDE_KICK_V) || (state.action == ACT_SLIDE_KICK_SLIDE_V);
+      bool vel_jump_kick = (state.action == ACT_JUMP_KICK_V);
+      bool vel_butt_slide = (state.action == ACT_BUTT_SLIDE_V) || (state.action == ACT_BUTT_SLIDE_STOP_V) || (state.action == ACT_BUTT_SLIDE_AIR_V);
+      float vel_data[4] = {state.forward_velocity,
+                           vel_slide_kick ? 1.0f : 0.0f,
+                           vel_jump_kick ? 1.0f : 0.0f,
+                           vel_butt_slide ? 1.0f : 0.0f};
       std::memcpy(ee_mem + vel_ptr, vel_data, 16);
     }
   }

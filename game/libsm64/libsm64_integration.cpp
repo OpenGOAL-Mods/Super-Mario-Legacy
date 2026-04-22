@@ -123,10 +123,25 @@ bool LibSM64Manager::init_autodetect() {
   }
   // Uses the project's ghc::filesystem alias from FileUtil.h.
 
-  // Search order: directory next to gk.exe first (so a user drop-in ROM wins),
-  // then iso_data/mario/ under the project dir. We pick the first .z64 whose
-  // size matches the expected US ROM size.
+  // Search order:
+  //   1. %APPDATA%/OpenGOAL/mario/ (Windows) or the equivalent user config
+  //      dir — persistent across build-tree wipes and mod installer updates,
+  //      so once a user picks a ROM they never have to re-pick.  This is
+  //      where we copy ROMs on first pick (see the tinyfd path below).
+  //   2. Directory next to gk.exe — lets power users drop a ROM in-place
+  //      without hunting for the config dir.
+  //   3. iso_data/mario/ under the project dir — legacy location, kept so
+  //      existing dev setups keep working.
+  // We pick the first .z64 whose size matches the expected US ROM size.
   std::vector<fs::path> search_dirs;
+  try {
+    fs::path user_cfg = file_util::get_user_config_dir();
+    if (!user_cfg.empty()) {
+      search_dirs.push_back(user_cfg / "mario");
+    }
+  } catch (...) {
+    // non-fatal; lower-priority dirs below may still find the ROM
+  }
   try {
     std::string exe_str = file_util::get_current_executable_path();
     if (!exe_str.empty()) {
@@ -174,7 +189,7 @@ bool LibSM64Manager::init_autodetect() {
   }
 
   if (picked.empty()) {
-    lg::warn("[libsm64] Auto-detect: no matching .z64 found next to gk or in iso_data/mario");
+    lg::warn("[libsm64] Auto-detect: no matching .z64 found in user config dir, next to gk, or in iso_data/mario");
 
     // Prompt the user to pick a .z64 ROM file
     char const* filter_patterns[] = {"*.z64", "*.Z64"};
@@ -194,10 +209,13 @@ bool LibSM64Manager::init_autodetect() {
       return false;
     }
 
-    // Copy the ROM to iso_data/mario/ so future launches find it automatically
+    // Copy the ROM to %APPDATA%/OpenGOAL/mario so future launches find it
+    // automatically.  This is the persistent location — it survives
+    // build-tree wipes, mod updates that nuke iso_data/, and reinstalls of
+    // the launcher, so once the user picks a ROM they never have to re-pick.
     try {
-      fs::path proj = file_util::get_jak_project_dir();
-      fs::path dest_dir = proj / "iso_data" / "mario";
+      fs::path user_cfg = file_util::get_user_config_dir();
+      fs::path dest_dir = user_cfg / "mario";
       fs::create_directories(dest_dir, ec);
       fs::path dest = dest_dir / selected_rom.filename();
       fs::copy_file(selected_rom, dest, fs::copy_options::overwrite_existing, ec);

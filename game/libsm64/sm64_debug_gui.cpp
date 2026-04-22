@@ -463,8 +463,10 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
     if (!detected.empty()) {
       ImGui::TextWrapped("Detected ROM: %s", detected.c_str());
     } else {
-      ImGui::TextDisabled("No ROM auto-detected — drop an SM64 US .z64 next to\n"
-                          "gk.exe or into iso_data/mario/, or use the override below.");
+      ImGui::TextDisabled("No ROM auto-detected — drop an SM64 US .z64 into\n"
+                          "%%APPDATA%%\\OpenGOAL\\mario\\ (preferred — survives\n"
+                          "updates), or next to gk.exe, or into iso_data/mario/.\n"
+                          "You can also use the override below.");
     }
     ImGui::InputText("ROM Path override", m_rom_path, sizeof(m_rom_path));
 

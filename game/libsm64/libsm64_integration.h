@@ -832,6 +832,17 @@ class LibSM64Manager {
   int m_post_glue_settle_frames = 0;
   static constexpr int POST_GLUE_SETTLE_DURATION = 30;  // ~1 second at 30Hz tick rate
 
+  // ---- Pole grab -----------------------------------------------------------
+  // GOAL writes *sm64-pole-grab-data* (x=1.0 active, y=pole X, z=pole Y, w=pole Z)
+  // when Mario touches a swingpole.  C++ pins Mario to that position each tick.
+  // On A-button press, we apply a directional jump, clear the flag in EE memory,
+  // and set m_pole_grab_release_pending so write_mario_bridge_data tidies up.
+  bool m_pole_grab_active = false;
+  math::Vector3f m_pole_grab_pos{0, 0, 0};  // Jak-unit lock position (X, Y, Z)
+  bool m_pole_grab_release_pending = false;  // cleared after write_mario_bridge_data writes 0.0
+  bool m_prev_button_a = false;             // for rising-edge detection of the A button
+  int16_t m_pole_anim_frame = 0;            // manually advanced each tick to keep IDLE_ON_POLE playing
+
   // ---- Music pause/resume state ----------------------------------------
   // The actual audio gating happens in SM64AudioPlayer::m_paused — when
   // true, its cubeb callback emits silence without ticking the N64 audio

@@ -33,6 +33,7 @@
 (define-extern *sm64-mario-attack-until* time-frame)
 (define-extern mario-sm64-music-enabled? (function symbol))
 (define-extern sm64-play-preview-sound (function string symbol))
+(define-extern *sm64-pole-grab-data* vector)
 
 ;; libsm64: forward-declare nav-enemy so we can type-guard the 'get-attack-count
 ;; branch below.  The real deftype lives in common-obs/nav-enemy-h.gc (game.gp
@@ -597,7 +598,23 @@
     (('play-anim) (go target-play-anim (the-as string (-> arg3 param 0)) (the-as handle arg1)))
     (('clone-anim) (go target-clone-anim (process->handle (the-as process (-> arg3 param 0)))))
     (('edge-grab) #f)
-    (('pole-grab) #f)
+    (('pole-grab)
+     ;; When Mario is active, let him grab the swingpole instead of blocking it.
+     ;; Set bridge data so C++ can lock Mario's position to the pole each tick.
+     ;; Jak's control flags are set so swingpole-active's loop stays satisfied.
+     ;; C++ clears *sm64-pole-grab-data*.x when A is pressed, triggering cleanup
+     ;; in mario.gc's idle loop (falling-edge detection on prev-pole-grabbing).
+     (cond
+       ((mario-sm64-music-enabled?)
+        (let ((pole (the-as swingpole arg0)))
+          (set! (-> *sm64-pole-grab-data* x) 1.0)
+          (set! (-> *sm64-pole-grab-data* y) (-> pole root trans x))
+          (set! (-> *sm64-pole-grab-data* z) (-> pole root trans y))
+          (set! (-> *sm64-pole-grab-data* w) (-> pole root trans z))
+          (set! (-> self control unknown-handle10) (process->handle arg0))
+          (logior! (-> self control root-prim prim-core action) (collide-action swingpole-active))
+          #t))
+       (else #f)))
     (('swim)
      (if (not (or (= (-> self control unknown-surface00 mode) 'swim)
                   (= (-> self control unknown-surface00 mode) 'dive)

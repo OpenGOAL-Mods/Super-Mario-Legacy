@@ -243,6 +243,11 @@
 ;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; GOAL writes: x = 1.0 while pole grab is active, y = pole center X (Jak units),
+;;              z = pole lock height Y (Jak units), w = pole center Z (Jak units).
+;;              C++ clears x to 0.0 on A-button jump to signal GOAL the grab ended.
+(define *sm64-pole-grab-data* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; Time-frame deadline used by the "Mario just killed an enemy" sound
 ;; hook in target-handler.gc's 'get-attack-count case.  Bumped ~0.5s
 ;; into the future by every call to `sm64-spawn-attack-tracker` — an
@@ -317,7 +322,8 @@
    (death-timer       int)
    (prev-jak-health   float)
    (prev-on-shell     symbol)
-   (shell-tracker-timer int))
+   (shell-tracker-timer int)
+   (prev-pole-grabbing symbol))
   (:state-methods
     idle))
 
@@ -367,6 +373,7 @@
     (set! (-> self prev-slide-kick) #f)
     (set! (-> self prev-jump-kick) #f)
     (set! (-> self prev-butt-slide) #f)
+    (set! (-> self prev-pole-grabbing) #f)
     ;; Start as #t so the initial health=0.0 (before C++ writes) doesn't
     ;; false-trigger the death chain.  Clears to #f once C++ reports health > 0.
     (set! (-> self mario-dead) #t)
@@ -504,7 +511,7 @@
               (+ (-> *sm64-mario-pos* y) (meters 0.3))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 30 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 80 'punch)))
               (when tracker
                 ;; Track just ahead of Mario as he slides forward.
                 (send-event (ppointer->process tracker) 'function
@@ -600,6 +607,23 @@
                     (update-transforms! (-> self root))
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-butt-slide) butt-sliding))
+
+      ;; ---- Pole grab: flag management ----
+      ;; Ensure edgegrab-possible is set on Jak's control so swingpole-stance can
+      ;; detect Mario approaching.  The swingpole proximity check requires this bit.
+      (when *target*
+        (logior! (-> *target* control root-prim prim-core action) (collide-action edgegrab-possible)))
+      ;; Detect falling edge of *sm64-pole-grab-data*.x:
+      ;;   C++ clears it to 0.0 after the A-button jump is applied, OR GOAL
+      ;;   clears it if the grab needs to be cancelled for another reason.
+      ;; Either way, clean up Jak's swingpole tracking flags so swingpole-active
+      ;; can exit its loop and return to stance.
+      (let ((pole-grabbing (> (-> *sm64-pole-grab-data* x) 0.5)))
+        (when (and (not pole-grabbing) (-> self prev-pole-grabbing) *target*)
+          (logclear! (-> *target* control root-prim prim-core action) (collide-action swingpole-active))
+          (set! (-> *target* control unknown-handle10) (the-as handle #f)))
+        (set! (-> self prev-pole-grabbing) pole-grabbing))
+
       ;; ---- Shell riding: racer-like behavior ----
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
         ;; Rising edge: just mounted shell

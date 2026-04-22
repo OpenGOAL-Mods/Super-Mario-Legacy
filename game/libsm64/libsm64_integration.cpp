@@ -1108,6 +1108,10 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   m_prev_button_b = m_cur_button_b;
   m_cur_button_b = input.button_b;
 
+  // Edge-detect the A (jump) button for pole-grab jump release.
+  bool pole_jump_just_pressed = input.button_a && !m_prev_button_a;
+  m_prev_button_a = input.button_a;
+
   SM64MarioInputs sm64_input{};
   sm64_input.camLookX = input.cam_look_x;
   sm64_input.camLookZ = input.cam_look_z;
@@ -1207,7 +1211,51 @@ void LibSM64Manager::tick(const MarioInputState& input) {
       sm64_state.position[1] = ly;
       sm64_state.position[2] = lz;
     }
-  }
+
+    // --- Pole grab: lock Mario to swingpole, release with a directional jump ---
+    // m_pole_grab_active / m_pole_grab_pos are updated by write_mario_bridge_data
+    // (runs after this tick) from *sm64-pole-grab-data* written by GOAL.
+    // On a rising A-button edge: apply jump velocity from stick+camera and release.
+    if (m_pole_grab_active) {
+      if (pole_jump_just_pressed) {
+        // Compute jump direction from stick + camera orientation.
+        float cam_angle = std::atan2f(input.cam_look_x, input.cam_look_z);
+        float sx = input.stick_x;
+        float sy = input.stick_y;
+        float stick_mag = std::sqrtf(sx * sx + sy * sy);
+        float move_angle = cam_angle;
+        if (stick_mag > 0.1f) {
+          // Rotate stick by camera yaw to get world-space direction.
+          // -sy because the engine's stick Y is positive-backward (inverted from SM64 convention).
+          move_angle = cam_angle + std::atan2f(-sx, -sy);
+        }
+        // Fixed horizontal speed regardless of how fast Mario approached.
+        float h_speed = (stick_mag > 0.1f) ? 25.0f : 0.0f;
+        float vy = 52.0f;  // pole jump upward velocity
+        float vx = h_speed * std::sinf(move_angle);
+        float vz = h_speed * std::cosf(move_angle);
+        // Set faceangle so Mario faces the jump direction, then zero forwardVel
+        // to clear any residual speed from before the grab, then apply world-space
+        // velocity last so it wins over any internal SM64 recalculation.
+        sm64_set_mario_faceangle(m_mario_id, move_angle);
+        sm64_set_mario_forward_velocity(m_mario_id, 0.0f);
+        sm64_set_mario_velocity(m_mario_id, vx, vy, vz);
+        m_pole_grab_active = false;
+        m_pole_grab_release_pending = true;  // write_mario_bridge_data will clear GOAL flag
+      } else {
+        // Lock: pin Mario to the pole position and zero velocity.
+        float lx = m_pole_grab_pos.x() * JAK_TO_SM64_SCALE;
+        float ly = m_pole_grab_pos.y() * JAK_TO_SM64_SCALE;
+        float lz = m_pole_grab_pos.z() * JAK_TO_SM64_SCALE;
+        sm64_set_mario_position(m_mario_id, lx, ly, lz);
+        sm64_set_mario_velocity(m_mario_id, 0.0f, 0.0f, 0.0f);
+        sm64_set_mario_forward_velocity(m_mario_id, 0.0f);
+        sm64_state.position[0] = lx;
+        sm64_state.position[1] = ly;
+        sm64_state.position[2] = lz;
+      }
+    }
+  }  // end std::scoped_lock(m_sm64_lock)
 
   // Copy results into our managed buffers (threadsafe)
   std::lock_guard<std::mutex> lock(m_geo_mutex);
@@ -2159,6 +2207,44 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
         float zero = 0.0f;
         std::memcpy(ee_mem + hit_ptr, &zero, 4);
         // Damage is now handled directly from GOAL via pc-sm64-damage-mario.
+      }
+    }
+  }
+
+  // ---- *sm64-pole-grab-data*: read pole grab state and update C++ members ----
+  // GOAL writes x=1.0 when Mario grabs a swingpole and stores the pole's world
+  // position in y/z/w.  C++ reads this every frame to pin Mario.  When the A
+  // button is pressed, tick() sets m_pole_grab_release_pending; we clear data[0]
+  // here so GOAL's mario.gc idle loop detects the falling edge and cleans up
+  // Jak's swingpole-active flag and unknown-handle10.
+  auto pole_sym = jak1::intern_from_c("*sm64-pole-grab-data*");
+  if (pole_sym.offset != 0) {
+    u32 pole_ptr = pole_sym->value;
+    if (pole_ptr != 0 && pole_ptr != false_val && pole_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      float data[4];
+      std::memcpy(data, ee_mem + pole_ptr, 16);
+      bool new_active = data[0] > 0.5f;
+      if (new_active) {
+        // Update the position we pin Mario to (Jak-unit world XYZ of the pole).
+        m_pole_grab_pos = math::Vector3f(data[1], data[2], data[3]);
+      }
+      // If a jump was processed in tick(), clear the GOAL flag so mario.gc
+      // detects the falling edge and clears Jak's swingpole tracking flags.
+      if (m_pole_grab_release_pending) {
+        data[0] = 0.0f;
+        std::memcpy(ee_mem + pole_ptr, data, 4);
+        m_pole_grab_release_pending = false;
+        m_pole_grab_active = false;
+      } else {
+        if (new_active && !m_pole_grab_active) {
+          // Rising edge: reset Mario's action and zero velocity so his previous
+          // state (running, falling, etc.) doesn't carry into the grab.
+          std::scoped_lock lock(m_sm64_lock);
+          sm64_set_mario_action(m_mario_id, 0x0C400201);  // ACT_IDLE
+          sm64_set_mario_velocity(m_mario_id, 0.0f, 0.0f, 0.0f);
+          sm64_set_mario_forward_velocity(m_mario_id, 0.0f);
+        }
+        m_pole_grab_active = new_active;
       }
     }
   }

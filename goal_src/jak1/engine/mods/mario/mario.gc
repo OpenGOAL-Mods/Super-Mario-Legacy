@@ -572,9 +572,13 @@
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-jump-kick) jump-kicking))
 
-      ;; ---- Butt-slide touch-tracker (continuous while active, like shell) ----
+      ;; ---- Butt-slide touch-tracker (rising-edge only, like ground-pound) ----
+      ;; og:preserve-this changed from continuous to rising-edge: one tracker fires when
+      ;; Mario first enters the butt-slide state. Continuous spawning (even rate-limited)
+      ;; causes bridge oscillation because the 8-tick tracker outlives the 5-tick 60fps frame,
+      ;; hammering set-vel-from-impact on every bridge spring point every frame.
       (let ((butt-sliding (> (-> *sm64-mario-velocity* w) 0.5)))
-        (when butt-sliding
+        (when (and butt-sliding (not (-> self prev-butt-slide)))
           (let ((slide-pos (new 'stack-no-clear 'vector))
                 (yaw (-> *sm64-mario-pos* w)))
             (set-vector! slide-pos
@@ -596,7 +600,6 @@
                     (update-transforms! (-> self root))
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-butt-slide) butt-sliding))
-
       ;; ---- Shell riding: racer-like behavior ----
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
         ;; Rising edge: just mounted shell

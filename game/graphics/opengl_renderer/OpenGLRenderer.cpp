@@ -1231,18 +1231,38 @@ void OpenGLRenderer::tick_mario_sm64() {
 
 void OpenGLRenderer::render_mario_sm64(ScopedProfilerNode& prof) {
   auto& mgr = sm64::LibSM64Manager::instance();
-  if (!mgr.enabled || !mgr.is_initialized() || !mgr.has_mario()) return;
+  // We're here for two things: drawing Mario's mesh (needs Mario spawned)
+  // and drawing the debug collision overlay (needs only libsm64 init +
+  // toggle on).  Split the early-outs so the overlay still works in a
+  // Mario-less session — useful for validating collision on bootup before
+  // you place Mario anywhere.
+  if (!mgr.enabled || !mgr.is_initialized()) return;
   if (!m_render_state.has_pc_data) return;
 
-  // Initialize MarioRenderer on first use
+  // Initialize renderers on first use.
   if (!m_mario_renderer.is_initialized()) {
     m_mario_renderer.init(m_render_state.shaders);
   }
+  if (!m_sm64_collision_renderer.is_initialized()) {
+    m_sm64_collision_renderer.init(m_render_state.shaders);
+  }
 
-  // Activate the Mario shader
+  // Activate the Mario shader.  Both renderers use it (the collision
+  // overlay leans on negative UVs to skip the texture sampler and use
+  // vertex colour directly, so it doesn't need its own shader).
   m_render_state.shaders[ShaderId::MARIO_SM64].activate();
 
-  m_mario_renderer.render(
+  if (mgr.has_mario()) {
+    m_mario_renderer.render(
+        m_render_state.camera_matrix[0].data(),
+        m_render_state.camera_hvdf_off.data(),
+        m_render_state.camera_pos.data(),
+        m_render_state.camera_fog.x());
+  }
+
+  // Collision debug overlay — internally no-ops when show_collision is off
+  // or the surface list is empty, so safe to call every frame.
+  m_sm64_collision_renderer.render(
       m_render_state.camera_matrix[0].data(),
       m_render_state.camera_hvdf_off.data(),
       m_render_state.camera_pos.data(),

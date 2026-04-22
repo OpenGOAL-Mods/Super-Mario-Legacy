@@ -122,6 +122,20 @@ struct MarioGeometry {
   uint16_t num_triangles = 0;
 };
 
+// POD snapshot of a single static collision triangle as it was submitted to
+// libsm64 via sm64_static_surfaces_load.  Positions are in SM64 units
+// (i.e. already scaled through JAK_TO_SM64_SCALE).  Used by the debug
+// collision renderer and the "Dump Surfaces" button; mirrors
+// `struct SM64Surface` from libsm64.h but without pulling that C header
+// into this C++ header (which would force every TU that includes this
+// to also include libsm64's header).
+struct CollisionTriSnapshot {
+  float verts[3][3];  // 3 vertices, xyz each, in SM64 units
+  int16_t type;        // SURFACE_* (surface_terrains.h)
+  int16_t force;
+  uint16_t terrain;    // TERRAIN_* (surface_terrains.h)
+};
+
 struct MarioState {
   math::Vector3f position{0, 0, 0};
   math::Vector3f velocity{0, 0, 0};
@@ -255,6 +269,21 @@ class LibSM64Manager {
   void load_surfaces(const std::vector<SM64Surface>& surfaces);
   void load_level_collision(const std::vector<tfrag3::CollisionMesh::Vertex>& vertices);
   int get_loaded_surface_count() const { return m_loaded_surface_count; }
+
+  // Grab a POD copy of every static collision triangle currently stored on
+  // the C++ side of libsm64 (i.e. everything passed to the last
+  // sm64_static_surfaces_load call — mind that with streaming enabled this
+  // is the ALL set, not the nearby subset libsm64 is actually using for
+  // queries).  Cheap to call but copies the whole list, so don't poll it.
+  // Thread-safe — takes m_sm64_lock briefly.  Used by the debug collision
+  // renderer and the "Dump Surfaces" button.
+  std::vector<CollisionTriSnapshot> snapshot_static_surfaces();
+
+  // Monotonically increasing counter bumped every time the static surface
+  // list is replaced (load_level_collision / load_surfaces / shutdown).
+  // Used by the collision renderer to skip re-uploading GPU buffers when
+  // nothing has changed.
+  uint64_t static_surfaces_version() const { return m_static_surfaces_version; }
 
   // Accessors (threadsafe via mutex)
   MarioGeometry get_geometry();
@@ -540,6 +569,56 @@ class LibSM64Manager {
   bool dynamic_actor_collision = true; // Walk process tree and mirror collide-meshes
   bool hide_jak_model = true;         // Skip drawing eichar-lod0 while Mario is active
   bool water_sync = true;             // Mirror Jak's water volume into libsm64 each tick
+  // When set, SM64CollisionRenderer draws the loaded static collision
+  // triangles as a translucent colored overlay (one colour per SURFACE_*
+  // type) plus a wireframe pass on top, so you can eyeball where Mario's
+  // view of the world differs from Jak's.  Off by default.
+  bool show_collision = false;
+
+  // Experimental collision-loader supplement.  libsm64 classifies surfaces
+  // purely by normal.y — `|ny| > 0.01` is a floor, `|ny| <= 0.01` is a
+  // wall (surface_collision.c:104 and 180).  Jak's pat-mode=WALL tris
+  // aren't always geometrically vertical, so many of them fall on the
+  // "floor" side of that cutoff and are invisible to
+  // find_wall_collisions.  At speed, Mario tunnels straight through
+  // them because each sub-step's XZ jumps past the tri's footprint
+  // entirely — no wall hit, no find_floor hit either.
+  //
+  // When this toggle is on:
+  //   - Degenerate (zero-area) tris are dropped so they don't NaN
+  //     libsm64's find_floor.
+  //   - For every pat-mode=WALL tri with `0.01 < |ny| <= wall_extrusion_ny_max`
+  //     we ADDITIONALLY emit a pair of perfectly-vertical triangles
+  //     forming a wall quad across the source tri's longest XZ edge and
+  //     Y range.  These quads have ny=0 exactly, so find_wall_collisions
+  //     picks them up and fast Mario bumps off them cleanly.  Winding
+  //     matches the source tri's outward XZ normal.
+  //   - Tris past the `wall_extrusion_ny_max` cutoff (geometrically more
+  //     like slopes than walls) are LEFT ALONE — extruding a 30-degree
+  //     ramp into a vertical quad creates a tall false wall that blocks
+  //     Mario from climbing slopes Jak considers walkable.
+  //   - The ORIGINAL tilted tri is always emitted with its normal
+  //     VERY_SLIPPERY + TERRAIN_SLIDE tagging, so find_floor continues
+  //     to pick it up and Mario slides on its surface exactly as he did
+  //     before.
+  //
+  // Auto-reload picks up the new value on flip / slider release, and a
+  // fresh stream also runs on every level transition / streaming window
+  // roll.  Default ON — the wall-extrusion supplement fixes the
+  // "tunnel through tilted walls at speed" case that's present in the
+  // legacy loader, and has been validated against the sandover wall
+  // geometry that first surfaced the bug.
+  bool test_new_collide_toggle = true;
+
+  // Upper bound on |normal.y| for the wall-extrusion supplement above.
+  // Tris with `|ny| > wall_extrusion_ny_max` are considered slopes, not
+  // walls, and skipped by the extruder.  Lower values = fewer extrusions
+  // (only the most vertical walls); higher = more (risk of false walls
+  // on mildly sloped surfaces).  Exposed as an ImGui slider so you can
+  // dial it live between collision reloads.  Default 0.30 ≈ 72° from
+  // horizontal: captures near-vertical walls while leaving genuine
+  // ramps alone.
+  float wall_extrusion_ny_max = 0.30f;
   // When set, update_actor_collision walks the tree and logs what it finds
   // but never calls into libsm64. Used to validate the walker in isolation
   // without risking crashes in libsm64 itself.
@@ -695,6 +774,10 @@ class LibSM64Manager {
   // All processed SM64Surface structs from the last load_level_collision call.
   // We keep these on our side and only feed a spatial subset to libsm64.
   std::vector<SM64Surface> m_all_static_surfaces;
+  // Version counter bumped every time m_all_static_surfaces is replaced.
+  // Read via static_surfaces_version(); lets SM64CollisionRenderer skip
+  // the GPU re-upload when nothing has changed.
+  uint64_t m_static_surfaces_version = 0;
   // Per-triangle XZ centroid in SM64 coords, parallel to m_all_static_surfaces.
   // Pre-computed once at load time to avoid recomputing every streaming pass.
   struct SurfaceCentroid { float x, z; };

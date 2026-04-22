@@ -984,6 +984,8 @@ void LibSM64Manager::shutdown() {
   m_surface_centroids.clear();
   m_stream_loaded = false;
   m_stream_loaded_count = 0;
+  // Bump so any renderer watching for changes drops its stale copy.
+  m_static_surfaces_version++;
   m_type_cache = {};
   m_is_process_drawable_cache.clear();
   m_is_collide_shape_cache.clear();
@@ -1692,6 +1694,28 @@ void LibSM64Manager::load_level_collision(
   surfaces.reserve(num_tris);
   size_t skipped_noentity = 0;
   size_t burning_tris = 0;
+  size_t skipped_degenerate = 0;
+  size_t extruded_wall_tris = 0;   // steep pat-mode=WALL tris replaced by vertical quads (counts source tris)
+
+  // libsm64's wall/floor classification threshold (surface_collision.c:104/180).
+  // Anything above this counts as a floor; at-or-below counts as a wall.
+  constexpr float kLibsm64WallNyCutoff = 0.01f;
+
+  // Push one SM64Surface built from three Jak-space positions.  Used by
+  // the single-tri emit at the bottom of the loop AND by the wall-
+  // extrusion path that emits two replacement tris per source wall.
+  auto push_jak_tri = [&](const float p[3][3], int16_t type, uint16_t terrain) {
+    SM64Surface s;
+    s.type = type;
+    s.force = 0;
+    s.terrain = terrain;
+    for (int v = 0; v < 3; v++) {
+      s.vertices[v][0] = static_cast<int32_t>(p[v][0] * JAK_TO_SM64_SCALE);
+      s.vertices[v][1] = static_cast<int32_t>(p[v][1] * JAK_TO_SM64_SCALE);
+      s.vertices[v][2] = static_cast<int32_t>(p[v][2] * JAK_TO_SM64_SCALE);
+    }
+    surfaces.push_back(s);
+  };
 
   for (size_t i = 0; i < num_tris; i++) {
     const auto& v0 = vertices[i * 3 + 0];
@@ -1704,15 +1728,57 @@ void LibSM64Manager::load_level_collision(
     SM64Surface surf;
     const uint32_t material = (v0.pat >> PAT_MATERIAL_SHIFT) & PAT_MATERIAL_MASK;
     const uint32_t pat_mode = (v0.pat >> PAT_MODE_SHIFT) & PAT_MODE_MASK;
-    if (material == PAT_MAT_HOTCOALS || material == PAT_MAT_LAVA) {
-      // Hot surface — SM64 will launch Mario with the butt-on-fire action.
+
+    // Pull the three Jak vertex positions once so both the normal test
+    // and the SM64-unit emit below can share them.
+    const auto& jv0 = vertices[i * 3 + 0];
+    const auto& jv1 = vertices[i * 3 + 1];
+    const auto& jv2 = vertices[i * 3 + 2];
+
+    // Compute the triangle normal (Jak units — only the SIGN and the
+    // normalised |ny| matter here, so no scale conversion needed).
+    // This is the same normal libsm64 will compute on its side, since
+    // integer truncation to SM64 units preserves the sign of ny for
+    // anything non-degenerate.
+    float ny_abs = 0.0f;
+    bool is_degenerate = false;
+    {
+      float e1x = jv1.x - jv0.x, e1y = jv1.y - jv0.y, e1z = jv1.z - jv0.z;
+      float e2x = jv2.x - jv0.x, e2y = jv2.y - jv0.y, e2z = jv2.z - jv0.z;
+      float nx = e1y * e2z - e1z * e2y;
+      float ny = e1z * e2x - e1x * e2z;
+      float nz = e1x * e2y - e1y * e2x;
+      float l = std::sqrt(nx * nx + ny * ny + nz * nz);
+      if (l <= 1e-3f) {
+        is_degenerate = true;
+      } else {
+        ny_abs = std::abs(ny) / l;
+      }
+    }
+
+    // New path: filter degenerate tris AND classify by geometry as well
+    // as pat-mode.  Without this, Jak-labelled walls that aren't actually
+    // vertical (~95 % of them) get tagged SURFACE_VERY_SLIPPERY but
+    // libsm64 sees them as steep floors, snapping Mario into the slide
+    // action whenever he touches one.
+    if (test_new_collide_toggle && is_degenerate) {
+      skipped_degenerate++;
+      continue;
+    }
+
+    const bool is_hot = (material == PAT_MAT_HOTCOALS || material == PAT_MAT_LAVA);
+
+    // ---- Emit the source tri with legacy classification ----------------
+    // The tagging here matches the pre-test_new_collide_toggle behaviour
+    // exactly — same VERY_SLIPPERY/NOT_SLIPPERY/SLIPPERY mapping driven by
+    // Jak pat-mode, same TERRAIN_SLIDE on walls.  This preserves Mario's
+    // existing "slide on a steep wall's surface" behaviour, since
+    // libsm64's find_floor will still pick this tri up when Mario's XZ
+    // lands on it.
+    if (is_hot) {
       surf.type = SURFACE_BURNING_TYPE;
       burning_tris++;
     } else if (g_no_slippery_mario) {
-      // Classify by Jak pat-mode so the vanilla SM64 slippery thresholds
-      // line up with Jak's geometry.  Walls get SURFACE_VERY_SLIPPERY so
-      // Mario slides off them, flat ground gets SURFACE_NOT_SLIPPERY so
-      // he sticks to it, and obstacles fall in between.
       switch (pat_mode) {
         case PAT_MODE_WALL:     surf.type = SURFACE_VERY_SLIPPERY; break;
         case PAT_MODE_GROUND:   surf.type = SURFACE_NOT_SLIPPERY;  break;
@@ -1723,8 +1789,6 @@ void LibSM64Manager::load_level_collision(
       surf.type = 0x0000;    // SURFACE_DEFAULT
     }
     surf.force = 0;
-    // Terrain tag — slippery-mode tags walls as SLIDE so Mario glances
-    // off them; otherwise keep the vanilla STONE tag.
     surf.terrain = (g_no_slippery_mario && pat_mode == PAT_MODE_WALL)
                        ? TERRAIN_SLIDE_TYPE
                        : TERRAIN_STONE_TYPE;
@@ -1737,6 +1801,75 @@ void LibSM64Manager::load_level_collision(
       surf.vertices[v][2] = static_cast<int32_t>(vert.z * JAK_TO_SM64_SCALE);
     }
     surfaces.push_back(surf);
+
+    // ---- Steep-wall extrusion (ADDITIONAL, only with test_new_collide_toggle)
+    // pat-mode=WALL tris whose normal isn't vertical enough for libsm64's
+    // find_wall_collisions (|ny|>0.01) are invisible to wall queries, so
+    // Mario tunnels through them at speed — each sub-step's XZ jumps
+    // past the footprint entirely and there's no wall hit.  To fix this
+    // *without* losing the legacy slide-on-surface behaviour, we ALSO
+    // emit a pair of perfectly-vertical triangles forming a wall quad
+    // over the source tri's longest XZ edge and Y range.  The quads have
+    // ny=0 exactly, so find_wall_collisions picks them up; the original
+    // tilted tri above still feeds find_floor, so Mario slides on it
+    // when his XZ lands there.  Winding is chosen so the quad's outward
+    // normal matches the source tri's outward XZ direction.
+    //
+    // The `|ny| <= wall_extrusion_ny_max` upper bound gates this off for
+    // anything too close to a slope — extruding a 30-degree ramp into a
+    // vertical quad would create a tall false wall.  Default cap of 0.30
+    // (~72° slope) is tunable via the ImGui slider.
+    if (test_new_collide_toggle && g_no_slippery_mario && !is_hot &&
+        pat_mode == PAT_MODE_WALL &&
+        ny_abs > kLibsm64WallNyCutoff && ny_abs <= wall_extrusion_ny_max) {
+      float d01sq = (jv1.x - jv0.x) * (jv1.x - jv0.x) + (jv1.z - jv0.z) * (jv1.z - jv0.z);
+      float d02sq = (jv2.x - jv0.x) * (jv2.x - jv0.x) + (jv2.z - jv0.z) * (jv2.z - jv0.z);
+      float d12sq = (jv2.x - jv1.x) * (jv2.x - jv1.x) + (jv2.z - jv1.z) * (jv2.z - jv1.z);
+      float ax, az, bx, bz;
+      if (d01sq >= d02sq && d01sq >= d12sq) {
+        ax = jv0.x; az = jv0.z; bx = jv1.x; bz = jv1.z;
+      } else if (d02sq >= d12sq) {
+        ax = jv0.x; az = jv0.z; bx = jv2.x; bz = jv2.z;
+      } else {
+        ax = jv1.x; az = jv1.z; bx = jv2.x; bz = jv2.z;
+      }
+
+      float y_min = std::min(std::min(jv0.y, jv1.y), jv2.y);
+      float y_max = std::max(std::max(jv0.y, jv1.y), jv2.y);
+
+      float e1x = jv1.x - jv0.x, e1y = jv1.y - jv0.y, e1z = jv1.z - jv0.z;
+      float e2x = jv2.x - jv0.x, e2y = jv2.y - jv0.y, e2z = jv2.z - jv0.z;
+      float src_nx = e1y * e2z - e1z * e2y;
+      float src_nz = e1x * e2y - e1y * e2x;
+      float cand_nx = -(bz - az);
+      float cand_nz = (bx - ax);
+      const bool flip = (src_nx * cand_nx + src_nz * cand_nz) < 0.0f;
+
+      // Vertical wall quad gets the same VERY_SLIPPERY + SLIDE tagging
+      // the source WALL tri already had.  Since the quad is geometrically
+      // vertical, libsm64 only queries it via find_wall_collisions, so
+      // the tag affects glance-off physics but not standing.
+      constexpr int16_t wall_type = SURFACE_VERY_SLIPPERY;
+      constexpr uint16_t wall_terrain = TERRAIN_SLIDE_TYPE;
+
+      float A[3] = {ax, y_min, az};
+      float B[3] = {bx, y_min, bz};
+      float C[3] = {bx, y_max, bz};
+      float D[3] = {ax, y_max, az};
+
+      if (!flip) {
+        float tri1[3][3] = {{A[0], A[1], A[2]}, {B[0], B[1], B[2]}, {C[0], C[1], C[2]}};
+        float tri2[3][3] = {{A[0], A[1], A[2]}, {C[0], C[1], C[2]}, {D[0], D[1], D[2]}};
+        push_jak_tri(tri1, wall_type, wall_terrain);
+        push_jak_tri(tri2, wall_type, wall_terrain);
+      } else {
+        float tri1[3][3] = {{A[0], A[1], A[2]}, {C[0], C[1], C[2]}, {B[0], B[1], B[2]}};
+        float tri2[3][3] = {{A[0], A[1], A[2]}, {D[0], D[1], D[2]}, {C[0], C[1], C[2]}};
+        push_jak_tri(tri1, wall_type, wall_terrain);
+        push_jak_tri(tri2, wall_type, wall_terrain);
+      }
+      extruded_wall_tris++;
+    }
   }
 
   if (surfaces.empty()) {
@@ -1758,6 +1891,8 @@ void LibSM64Manager::load_level_collision(
   // Reset streaming state so the next tick does an immediate reload around Mario.
   m_stream_loaded = false;
   m_stream_loaded_count = 0;
+  // Bump version so SM64CollisionRenderer / the dump button see the new set.
+  m_static_surfaces_version++;
 
   if (!collision_streaming) {
     // Streaming off — load everything at once (old behavior).
@@ -1770,8 +1905,32 @@ void LibSM64Manager::load_level_collision(
   }
 
   lg::info(
-      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} burning, streaming={})",
-      m_all_static_surfaces.size(), skipped_noentity, burning_tris, collision_streaming);
+      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} degenerate skipped, {} burning, {} source tris extruded into vertical wall quads, streaming={}, new_classify={})",
+      m_all_static_surfaces.size(), skipped_noentity, skipped_degenerate, burning_tris,
+      extruded_wall_tris, collision_streaming, test_new_collide_toggle);
+}
+
+std::vector<CollisionTriSnapshot> LibSM64Manager::snapshot_static_surfaces() {
+  // Hold m_sm64_lock while copying — load_level_collision takes the same
+  // lock while swapping m_all_static_surfaces, so this is the cheap way
+  // to avoid tearing.  The copy is linear in tri count; expected sizes
+  // are ~20–100k in a loaded level, which is still microseconds.
+  std::vector<CollisionTriSnapshot> out;
+  std::scoped_lock lock(m_sm64_lock);
+  out.reserve(m_all_static_surfaces.size());
+  for (const auto& s : m_all_static_surfaces) {
+    CollisionTriSnapshot t;
+    for (int v = 0; v < 3; v++) {
+      t.verts[v][0] = static_cast<float>(s.vertices[v][0]);
+      t.verts[v][1] = static_cast<float>(s.vertices[v][1]);
+      t.verts[v][2] = static_cast<float>(s.vertices[v][2]);
+    }
+    t.type = s.type;
+    t.force = s.force;
+    t.terrain = s.terrain;
+    out.push_back(t);
+  }
+  return out;
 }
 
 bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,

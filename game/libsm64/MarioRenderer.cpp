@@ -326,6 +326,9 @@ void MarioRenderer::render(const float* camera_matrix,
   glUniform4fv(glGetUniformLocation(program, "hvdf_offset"), 1, hvdf_offset);
   glUniform1f(glGetUniformLocation(program, "fog_constant"), fog_constant);
   glUniform1i(glGetUniformLocation(program, "tex_T0"), 0);
+  // Mario is opaque — the alpha uniform exists so SM64CollisionRenderer
+  // can fade its overlay, but Mario himself always wants 1.0.
+  glUniform1f(glGetUniformLocation(program, "alpha"), 1.0f);
 
   // Light direction (simple sun-like, normalized)
   float light_dir[3] = {0.5f, 0.8f, 0.3f};

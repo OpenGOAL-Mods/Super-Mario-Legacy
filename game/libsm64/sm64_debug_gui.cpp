@@ -5,9 +5,15 @@
 
 #include "sm64_debug_gui.h"
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 
 #include "common/log/log.h"
+#include "common/util/FileUtil.h"
 #include "game/graphics/opengl_renderer/loader/Loader.h"
 #include "game/libsm64/libsm64_integration.h"
 #include "game/runtime.h"
@@ -40,6 +46,104 @@ static size_t reload_level_collision_from_loader(LibSM64Manager& mgr,
   }
   mgr.load_level_collision(all_verts);
   return all_verts.size() / 3;
+}
+
+// Snapshot every loaded static surface and write it out as two files — a
+// .obj (loadable in Blender / MeshLab) and a .csv (grep-friendly sidecar
+// with per-triangle type/force/terrain).  Returns the absolute path of
+// the .obj that was written, or empty string if nothing was loaded.
+// Writes into the per-game misc dir (`%APPDATA%/OpenGOAL/jak1/misc/
+// sm64_collision_dumps/` on Windows) so multiple dumps accumulate and
+// survive build-tree wipes.
+static std::string dump_surfaces_to_files() {
+  auto tris = LibSM64Manager::instance().snapshot_static_surfaces();
+  if (tris.empty()) return {};
+
+  // Timestamp the filename so each press produces a unique pair.
+  std::time_t t = std::time(nullptr);
+  std::tm local{};
+#ifdef _WIN32
+  localtime_s(&local, &t);
+#else
+  localtime_r(&t, &local);
+#endif
+  char stamp[32];
+  std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+
+  // `file_util::get_user_misc_dir` returns a `ghc::filesystem::path`
+  // (third-party polyfill) which doesn't implicitly convert to
+  // `std::filesystem::path` on MSVC.  Convert through .string() so we
+  // stay in std::filesystem-land here — cheaper than pulling in the
+  // ghc polyfill header just for this.
+  namespace fs = std::filesystem;
+  fs::path dir = fs::path(file_util::get_user_misc_dir(g_game_version).string()) /
+                  "sm64_collision_dumps";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  if (ec) {
+    lg::error("[libsm64] Failed to create dump directory {}: {}", dir.string(), ec.message());
+    return {};
+  }
+
+  fs::path obj_path = dir / (std::string("sm64_collision_") + stamp + ".obj");
+  fs::path csv_path = dir / (std::string("sm64_collision_") + stamp + ".csv");
+
+  // ---- OBJ (geometry, loadable in Blender) -----------------------------
+  // Positions are in SM64 units — Blender's default is meters, so imported
+  // meshes will look huge.  Multiply by SM64_TO_JAK_SCALE (~81.92 at scale
+  // 50) to get Jak units, or just apply the Transform scale in the
+  // importer.  Faces are 3-indexed (OBJ is 1-based).  A comment above
+  // each `f` line carries the surface type/force/terrain so you can
+  // read the dump without the sidecar CSV.
+  {
+    std::ofstream obj(obj_path);
+    if (!obj) {
+      lg::error("[libsm64] Failed to open {} for writing", obj_path.string());
+      return {};
+    }
+    obj << "# SM64 Legacy collision dump\n";
+    obj << "# Generated: " << stamp << "\n";
+    obj << "# Triangle count: " << tris.size() << "\n";
+    obj << "# Units: SM64 (multiply positions by SM64_TO_JAK_SCALE="
+        << SM64_TO_JAK_SCALE << " for Jak units)\n";
+    obj << "o sm64_collision\n";
+    for (const auto& tri : tris) {
+      for (int v = 0; v < 3; v++) {
+        obj << "v " << tri.verts[v][0] << ' ' << tri.verts[v][1] << ' ' << tri.verts[v][2] << '\n';
+      }
+    }
+    size_t base = 1;  // OBJ indices are 1-based
+    for (size_t i = 0; i < tris.size(); i++, base += 3) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "# tri %zu type=0x%04X force=%d terrain=0x%04X\n",
+                    i, (unsigned)(uint16_t)tris[i].type, (int)tris[i].force,
+                    (unsigned)tris[i].terrain);
+      obj << buf;
+      obj << "f " << base << ' ' << (base + 1) << ' ' << (base + 2) << '\n';
+    }
+  }
+
+  // ---- CSV (grep-friendly metadata) -----------------------------------
+  {
+    std::ofstream csv(csv_path);
+    if (!csv) {
+      lg::error("[libsm64] Failed to open {} for writing", csv_path.string());
+      return obj_path.string();  // still return the OBJ; it wrote OK
+    }
+    csv << "tri,type,force,terrain,v0x,v0y,v0z,v1x,v1y,v1z,v2x,v2y,v2z\n";
+    for (size_t i = 0; i < tris.size(); i++) {
+      const auto& tri = tris[i];
+      csv << i << ','
+          << (int)tri.type << ',' << (int)tri.force << ',' << (unsigned)tri.terrain;
+      for (int v = 0; v < 3; v++) {
+        csv << ',' << tri.verts[v][0] << ',' << tri.verts[v][1] << ',' << tri.verts[v][2];
+      }
+      csv << '\n';
+    }
+  }
+
+  lg::info("[libsm64] Dumped {} collision triangles to {}", tris.size(), obj_path.string());
+  return obj_path.string();
 }
 
 // Spawn helper: tries to create Mario, and if the spawn fails (libsm64 returns
@@ -204,6 +308,64 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
     }
   }
 
+  // Experimental normal-aware collision classification.  See libsm64_integration.h
+  // for full rationale — tl;dr ~95 % of Jak-labelled walls aren't vertical enough
+  // for libsm64 to treat as walls, so tagging them VERY_SLIPPERY (the legacy
+  // no-slip behaviour) force-slides Mario constantly.  When this toggle is on
+  // we gate the VERY_SLIPPERY tag on the actual triangle normal and also
+  // drop degenerate zero-area tris.  Only applies to the next collision
+  // stream — reload by crossing a level transition or waiting for the
+  // streaming window around Mario to roll over.
+  if (ImGui::Checkbox("Test New Collide Toggle", &mgr.test_new_collide_toggle)) {
+    // Reload immediately so the new classification shows up without
+    // waiting for a level transition.
+    size_t tris = reload_level_collision_from_loader(mgr, loader);
+    if (tris > 0) {
+      lg::info("[libsm64] Test-new-collide toggle={} — reloaded {} triangles",
+               mgr.test_new_collide_toggle ? 1 : 0, tris);
+    }
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "EXPERIMENTAL collision-loader supplement.\n"
+        "For every pat-mode=WALL tri whose normal is in the configured\n"
+        "wall-extrusion window (0.01 < |ny| <= slider below), ADDITIONALLY\n"
+        "emits a pair of perfectly vertical triangles forming a wall\n"
+        "quad over the source tri's longest XZ edge and Y range.  Fixes\n"
+        "the tunneling-at-speed case (Mario's sub-step jumps past the\n"
+        "original tilted tri's footprint) while leaving the source tri\n"
+        "intact so find_floor still picks it up and Mario slides on its\n"
+        "surface as before.  Also drops degenerate (zero-area) tris that\n"
+        "can NaN libsm64's find_floor.\n"
+        "Flips auto-reload the collision so the change is immediate.\n"
+        "Pairs with 'No Slippery Mario' — no effect unless that's also on.");
+  }
+  ImGui::SliderFloat("Wall Extrusion Max |ny|", &mgr.wall_extrusion_ny_max, 0.01f, 1.0f,
+                     "%.3f");
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Upper bound on |normal.y| for the wall-extrusion supplement.\n"
+        "Tris with `0.01 < |ny| <= value` get replaced with vertical\n"
+        "wall quads; tris past this cutoff are treated as slopes and\n"
+        "left alone.\n"
+        "  0.05  — only walls within ~3° of perfectly vertical.\n"
+        "  0.30  — near-vertical walls up to ~72° from horizontal (default).\n"
+        "  1.00  — extrude everything Jak calls a wall (risks turning\n"
+        "          gentle slopes into tall invisible walls).\n"
+        "Release the slider to auto-reload collision with the new value.");
+  }
+  // Auto-reload when the user lets go of the slider so the new threshold
+  // actually shows up in-game without forcing them to cross a level
+  // boundary.  IsItemDeactivatedAfterEdit fires exactly once on mouse-
+  // release if the value changed during the drag.
+  if (ImGui::IsItemDeactivatedAfterEdit()) {
+    size_t tris = reload_level_collision_from_loader(mgr, loader);
+    if (tris > 0) {
+      lg::info("[libsm64] Wall-extrusion cap changed to {:.3f} — reloaded {} triangles",
+               mgr.wall_extrusion_ny_max, tris);
+    }
+  }
+
   // Cutscene bone tracker.  teleport_mario_to_jak reads
   // `(-> *target* node-list data N bone transform)` when this is >= 0,
   // else falls back to root.trans / root.quat.  Useful eichar indices:
@@ -354,6 +516,39 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
 
       if (mgr.get_loaded_surface_count() > 0) {
         ImGui::Text("SM64 surfaces loaded: %d", mgr.get_loaded_surface_count());
+      }
+
+      // Wireframe overlay + OBJ/CSV dump — both hang off the same snapshot of
+      // m_all_static_surfaces in the manager, so toggling the overlay and
+      // pressing Dump work even when Mario isn't spawned (as long as a level
+      // has been loaded and streamed once).
+      ImGui::Checkbox("Show Collision Overlay", &mgr.show_collision);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Draw every static collision triangle libsm64 currently knows about\n"
+            "as a coloured wireframe (one colour per SURFACE_* type).  Useful for\n"
+            "spotting mismatches between what Mario walks on and what Jak's\n"
+            "collision system exposes — if you see holes in the wireframe where\n"
+            "Jak has solid ground, that's the cause of 'Mario falls through' bugs.\n"
+            "No-op cost when unchecked.");
+      }
+      if (ImGui::Button("Dump Surfaces to File")) {
+        m_last_dump_path = dump_surfaces_to_files();
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("(?)");
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Write the same triangle set shown by 'Show Collision Overlay' to\n"
+            "a timestamped .obj + .csv pair under the user misc dir (on Windows:\n"
+            "%%APPDATA%%\\OpenGOAL\\jak1\\misc\\sm64_collision_dumps\\).\n"
+            "The .obj loads straight into Blender/MeshLab for eyeballing; the\n"
+            "sidecar .csv has one row per triangle with type/force/terrain for\n"
+            "grepping.  Positions are in SM64 units — multiply by "
+            "SM64_TO_JAK_SCALE\nfor Jak units.");
+      }
+      if (!m_last_dump_path.empty()) {
+        ImGui::TextWrapped("Last dump: %s", m_last_dump_path.c_str());
       }
 
       ImGui::Separator();

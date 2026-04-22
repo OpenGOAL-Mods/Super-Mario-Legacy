@@ -349,6 +349,7 @@ set(RUNTIME_SOURCE
         libsm64/libsm64_integration.cpp
         libsm64/MarioRenderer.cpp
         libsm64/sm64_audio.cpp
+        libsm64/sm64_collision_renderer.cpp
         libsm64/sm64_debug_gui.cpp
         )
 

@@ -6,6 +6,7 @@
  */
 
 #include <memory>
+#include <string>
 
 class Loader;
 
@@ -23,6 +24,10 @@ class SM64DebugGui {
   float m_spawn_pos[3] = {0.0f, 10.0f, 0.0f};
   float m_ground_y = 0.0f;
   float m_ground_extent = 500.0f;
+  // Last "Dump Surfaces" target, shown under the button so users can
+  // find the file without tailing the log.  Empty = not dumped yet (or
+  // the last attempt failed).
+  std::string m_last_dump_path;
 };
 
 }  // namespace sm64

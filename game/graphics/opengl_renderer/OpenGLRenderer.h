@@ -16,6 +16,7 @@
 #include "game/graphics/opengl_renderer/foreground/Merc2.h"
 #include "game/graphics/opengl_renderer/opengl_utils.h"
 #include "game/libsm64/MarioRenderer.h"
+#include "game/libsm64/sm64_collision_renderer.h"
 #include "game/libsm64/sm64_debug_gui.h"
 #include "game/tools/filter_menu/filter_menu.h"
 #include "game/tools/subtitle_editor/subtitle_editor.h"
@@ -135,6 +136,7 @@ class OpenGLRenderer {
   FullScreenDraw m_blackout_renderer;
   CollideMeshRenderer m_collide_renderer;
   sm64::MarioRenderer m_mario_renderer;
+  sm64::SM64CollisionRenderer m_sm64_collision_renderer;
   sm64::SM64DebugGui m_sm64_debug_gui;
   std::set<u64> m_sm64_last_level_ids;  // Track loaded levels for auto-sync collision
 

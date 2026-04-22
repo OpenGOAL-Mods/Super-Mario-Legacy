@@ -4,6 +4,11 @@ in vec3 frag_color;
 in vec2 frag_uv;
 
 uniform sampler2D tex_T0;
+// Output alpha multiplier.  MarioRenderer sets this to 1.0 so Mario stays
+// opaque; SM64CollisionRenderer drops it to ~0.35 for the filled pass of
+// the debug collision overlay so you can still see the world through it,
+// then raises it back to 1.0 for the wireframe pass on top.
+uniform float alpha;
 
 out vec4 out_color;
 
@@ -19,5 +24,5 @@ void main() {
     vec4 tex = texture(tex_T0, frag_uv);
     color = mix(frag_color, tex.rgb, tex.a);
   }
-  out_color = vec4(color, 1.0);
+  out_color = vec4(color, alpha);
 }

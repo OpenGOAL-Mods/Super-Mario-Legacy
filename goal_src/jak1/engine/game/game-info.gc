@@ -13,6 +13,13 @@
 (require "engine/debug/debug.gc")
 (require "engine/game/game-info-h.gc")
 
+;; libsm64: forward-declare Mario delete so we can call it during the
+;; save-load sequence in initialize! below.  The actual define-extern
+;; lives in mario.gc (game.gp line 2111), which loads after this file
+;; (1910), so we declare the symbol locally — runtime linking resolves
+;; to the C++ binding registered in kmachine.cpp.
+(define-extern pc-sm64-delete-mario (function none))
+
 ;; The game-info is the logic for pickups/lives/eco/tasks/collectables/check points/saved data
 ;; The *game-info* object constains the "game state", like how many lives you have etc.
 
@@ -239,6 +246,15 @@
        (process-spawn-function process
          (lambda ((arg0 symbol) (arg1 symbol) (arg2 continue-point) (arg3 game-save))
            (stop arg0)
+           ;; libsm64: delete Mario alongside Jak so the post-load
+           ;; respawn starts with a fresh Mario instance at the new
+           ;; continue point.  Without this, the old Mario instance
+           ;; keeps its pre-load position, and C++'s sync_jak_to_mario
+           ;; yanks the newly-loaded Jak back to Mario's stale pos the
+           ;; first frame after (start arg0 arg2) runs.  Auto-spawn in
+           ;; tick_mario_sm64 re-creates Mario at Jak's current trans
+           ;; once *target* is alive and at the continue-point position.
+           (pc-sm64-delete-mario)
            (reset-actors arg1)
            (set-continue! *game-info* arg2)
            (when arg3

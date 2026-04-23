@@ -416,10 +416,14 @@ void Merc2::handle_pc_model(const DmaTransfer& setup,
 
   // When Mario is active we hide Jak's player model so Mario isn't stuck
   // inside Jak. Toggle via the libsm64 debug window ("Hide Jak when Mario
-  // is active"). Skips before any bone/effect allocation.
+  // is active").  Also hide during the respawn-pending window (between
+  // pc-sm64-delete-mario and the next auto-spawn) so save-load /
+  // death-chain transitions don't briefly flash Jak's model before the
+  // new Mario appears.  Skips before any bone/effect allocation.
   {
     auto& sm64_mgr = sm64::LibSM64Manager::instance();
-    if (sm64_mgr.hide_jak_model && sm64_mgr.has_mario() &&
+    if (sm64_mgr.hide_jak_model &&
+        (sm64_mgr.has_mario() || sm64_mgr.respawn_pending()) &&
         strcmp(name, "eichar-lod0") == 0) {
       return;
     }

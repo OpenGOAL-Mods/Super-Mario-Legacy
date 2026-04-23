@@ -1041,7 +1041,13 @@ void OpenGLRenderer::tick_mario_sm64() {
   // Auto-spawn Mario at Jak's position if initialized but no Mario yet
   if (!mgr.has_mario()) {
     static int spawn_cooldown = 0;
-    if (spawn_cooldown > 0) {
+    // During the save-load / death-chain respawn window, skip the
+    // cooldown entirely so we retry every frame — the cooldown is
+    // meant for "maybe Jak hasn't been created yet" startup polling,
+    // but once we've explicitly deleted Mario we want him back as
+    // soon as *target* is alive again.
+    const bool respawn_urgent = mgr.respawn_pending();
+    if (!respawn_urgent && spawn_cooldown > 0) {
       spawn_cooldown--;
       return;
     }
@@ -1051,14 +1057,20 @@ void OpenGLRenderer::tick_mario_sm64() {
       int32_t id = mgr.create_mario(tpos.x(), tpos.y(), tpos.z());
       if (id >= 0) {
         mgr.set_mario_face_angle(tyaw);
+        mgr.set_respawn_pending(false);
+        spawn_cooldown = 0;
         lg::info("[sm64] Auto-spawned Mario at ({:.1f}, {:.1f}, {:.1f})",
                  tpos.x(), tpos.y(), tpos.z());
-      } else {
-        // No collision at spawn point — retry after ~2s
+      } else if (!respawn_urgent) {
+        // No collision at spawn point — retry after ~2s (for regular
+        // startup polling, not the urgent respawn path; during urgent
+        // we just keep retrying next frame — by the time *target* is
+        // at a continue-point trans the floor query should succeed).
         spawn_cooldown = 60;
       }
-    } else {
-      // *target* not available yet — retry after ~1s
+    } else if (!respawn_urgent) {
+      // *target* not available yet — retry after ~1s (again, only
+      // for non-urgent startup polling).
       spawn_cooldown = 30;
     }
     return;

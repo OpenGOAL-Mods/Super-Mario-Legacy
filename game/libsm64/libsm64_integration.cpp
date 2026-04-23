@@ -1020,6 +1020,9 @@ void LibSM64Manager::shutdown() {
     sm64_mario_delete(m_mario_id);
     m_mario_id = -1;
   }
+  // Clear respawn_pending on shutdown — a fresh init shouldn't inherit
+  // "Mario needs to come back" from the previous session.
+  m_respawn_pending = false;
 
   sm64_global_terminate();
   m_initialized = false;
@@ -2261,6 +2264,11 @@ u64 pc_sm64_delete_mario() {
     lg::info("[libsm64] Mario deleted from GOAL (death chain)");
     mgr.delete_mario(mgr.get_mario_id());
   }
+  // Flag that a respawn should follow immediately.  Keeps Merc2 hiding
+  // eichar-lod0 during the no-Mario window (so save-load doesn't flash
+  // Jak's model) and tells auto-spawn to skip the target-not-ready
+  // cooldown so Mario comes back the instant *target* is alive.
+  mgr.set_respawn_pending(true);
   return 0;
 }
 

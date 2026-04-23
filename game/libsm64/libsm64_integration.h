@@ -264,6 +264,16 @@ class LibSM64Manager {
   void delete_mario(int32_t mario_id);
   bool has_mario() const { return m_mario_id >= 0; }
   int32_t get_mario_id() const { return m_mario_id; }
+  // Set to true by pc-sm64-delete-mario; cleared when auto-spawn
+  // successfully re-creates Mario.  Used by:
+  //   - Merc2 (hide_jak_model path): keep Jak's model hidden in the
+  //     window between delete and respawn, so save-load doesn't briefly
+  //     flash Jak's eichar model before Mario comes back.
+  //   - tick_mario_sm64's auto-spawn: skip the 30-frame
+  //     "target-not-ready" cooldown so respawn fires as soon as *target*
+  //     is alive and at the continue-point trans.
+  bool respawn_pending() const { return m_respawn_pending; }
+  void set_respawn_pending(bool on) { m_respawn_pending = on; }
 
   // Per-frame tick
   void tick(const MarioInputState& input);
@@ -738,6 +748,9 @@ class LibSM64Manager {
   bool m_initialized = false;
   std::string m_last_rom_path;  // path of the ROM passed to the last successful init
   int32_t m_mario_id = -1;
+  // Set by pc-sm64-delete-mario; cleared by auto-spawn on success.  See
+  // the public respawn_pending() accessor docstring for what reads it.
+  bool m_respawn_pending = false;
   int m_loaded_surface_count = 0;
   int m_audio_volume = 100;  // latched value, also mirrored into m_audio on start
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)

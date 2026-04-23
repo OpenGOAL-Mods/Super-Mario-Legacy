@@ -1085,12 +1085,50 @@ void OpenGLRenderer::tick_mario_sm64() {
   // by read_target_flags, which is fine at 30 Hz for this decision.
   bool paused = mgr.is_game_paused(g_ee_main_mem);
   mgr.update_music_pause_state(paused);
-  if (paused && !mgr.target_in_movie) {
-    // No tick ran, so render_blend would oscillate 0.5↔1.0 across even frames,
-    // visibly stuttering Mario between prev and current positions.  Pin to 1.0
-    // (fully current tick) so he holds perfectly still while paused.
-    mgr.render_blend = 1.0f;
-    return;
+
+  // Match the ~0.6 s resume delay that Jak's pause-menu fade produces.
+  // *master-mode* flips back to 'game the moment the player presses Start,
+  // while the progress screen is still fading out — so without this hold
+  // Mario would start ticking instantly while Jak is still locked.
+  // During movies the pause gate is used for a different purpose, so we
+  // skip the hold logic entirely in that case and clear any stale state.
+  // Track whether the current pause was specifically from the 'progress
+  // screen (Start menu).  The 'pause mode (Select button) has no fade
+  // animation and resumes instantly, so we skip the hold delay for it.
+  bool in_progress = mgr.is_progress_screen_paused(g_ee_main_mem);
+  static bool s_was_paused = false;
+  static int  s_unpause_hold_ticks = 0;
+  if (!mgr.target_in_movie) {
+    if (paused) {
+      // Accumulate paused time and pin the renderer to the last good tick.
+      // Only arm the hold-delay if we're in the progress screen (which has
+      // a fade-out animation on resume).  Select-pause clears the flag so
+      // Mario resumes instantly when that menu closes.
+      if (in_progress) {
+        s_was_paused = true;
+      } else {
+        s_was_paused = false;
+      }
+      s_unpause_hold_ticks = 0;
+      mgr.render_blend = 1.0f;
+      return;
+    }
+    if (s_was_paused) {
+      // Edge: just transitioned progress-paused → unpaused.  Start hold
+      // countdown to match Jak's progress-screen fade duration.
+      s_was_paused = false;
+      s_unpause_hold_ticks = 18;
+    }
+    if (s_unpause_hold_ticks > 0) {
+      --s_unpause_hold_ticks;
+      mgr.render_blend = 1.0f;
+      return;
+    }
+  } else {
+    // Inside a movie: clear hold state so a pause-during-cutscene doesn't
+    // accidentally freeze Mario after the movie ends.
+    s_was_paused = false;
+    s_unpause_hold_ticks = 0;
   }
 
   // 1c. Read target state flags (grabbed / periscope)

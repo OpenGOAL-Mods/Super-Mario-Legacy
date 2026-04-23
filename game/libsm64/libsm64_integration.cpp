@@ -2487,6 +2487,22 @@ bool LibSM64Manager::is_game_paused(u8* ee_mem) {
   return master_mode_ptr != game_ptr;
 }
 
+bool LibSM64Manager::is_progress_screen_paused(u8* ee_mem) {
+  if (!ee_mem) return false;
+  u32 false_val = s7.offset;
+  if (false_val == 0) return false;
+
+  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
+  if (master_mode_sym.offset == 0) return false;
+  u32 master_mode_ptr = master_mode_sym->value;
+  if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
+
+  auto progress_sym = jak1::intern_from_c("progress");
+  if (progress_sym.offset == 0) return false;
+
+  return master_mode_ptr == progress_sym.offset;
+}
+
 bool LibSM64Manager::is_in_movie(u8* ee_mem) {
   if (!ee_mem) return false;
   u32 false_val = s7.offset;

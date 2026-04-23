@@ -347,6 +347,12 @@ class LibSM64Manager {
   // movie / freeze / …).
   bool is_game_paused(u8* ee_mem);
 
+  // Returns true when Jak's master-mode is specifically 'progress (the
+  // Start-button pause menu with the fade animation).  The 'pause mode
+  // (Select-button pause) returns false here — it has no fade, so no
+  // hold delay is needed on unpause.
+  bool is_progress_screen_paused(u8* ee_mem);
+
   // Returns true when Jak's master-mode is specifically 'movie.  Used by
   // the Mario pipeline to distinguish "skip everything" pause states
   // from cutscene movies where we want the pipeline to KEEP RUNNING so

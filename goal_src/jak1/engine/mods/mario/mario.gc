@@ -384,6 +384,26 @@
   :post ja-post)
 
 (defbehavior sm64-crab-shell-init sm64-crab-shell ()
+  ;; ------------------------------------------------------------------
+  ;; RETAIL VS DEBUG ART-GROUP LOAD PATH
+  ;; ------------------------------------------------------------------
+  ;; initialize-skeleton on a no-entity process falls through to
+  ;; (-> *level* level-default), then calls load-to-heap-by-name on
+  ;; level-default's art-group load-dir.  If the art-group isn't
+  ;; already in that load-dir's string-array, it calls
+  ;; art-group-load-check — and that function starts with
+  ;; `(when *debug-segment* ...)`, so in retail it just returns #f.
+  ;; Result: the crab renders fine in debug and silently becomes a
+  ;; process with no draw-control in retail (the art-error state).
+  ;;
+  ;; Fix: look up the already-loaded lurkercrab art-group from the
+  ;; currently loaded levels (where set-loaded-art registered it at
+  ;; level-load time) and stick a reference into level-default's
+  ;; load-dir before initialize-skeleton runs.  The cached lookup
+  ;; then succeeds in both debug and retail with no new disk I/O.
+  (let ((ag (art-group-get-by-name *level* "lurkercrab")))
+    (when ag
+      (set-loaded-art (-> *level* level-default art-group) ag)))
   (set! (-> self root) (new 'process 'trsqv))
   (set! (-> self root trans x) (-> *sm64-mario-pos* x))
   (set! (-> self root trans y) (-> *sm64-mario-pos* y))

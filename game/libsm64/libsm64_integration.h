@@ -862,6 +862,15 @@ class LibSM64Manager {
   //   Desired audio-paused = m_game_paused && !m_force_audio_unpaused.
   bool m_game_paused = false;
   bool m_force_audio_unpaused = false;
+  // Current background-music tracking.  Used by
+  // play_music_from_goal / play_music_forced_from_goal to short-circuit
+  // when GOAL asks for the same track that's already playing, so the
+  // song doesn't restart from the top every time the caller polls.  A
+  // seq id of 0 means "nothing currently playing".  The forced flag
+  // mirrors how the current track was started (forced=true means we're
+  // currently in m_force_audio_unpaused mode for this track).
+  uint8_t m_current_bg_music_seq = 0;
+  bool m_current_bg_music_forced = false;
 
   std::vector<uint8_t> m_texture_data;  // RGBA texture atlas
 

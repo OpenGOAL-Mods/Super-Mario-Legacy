@@ -52,6 +52,7 @@
     (('village2)     'inside-castle)
     (('swamp)        'bob-omb)
     (('sunken)       'water)
+    (('sunkenb)       'water)
     (('rolling)      'slide)
     (('ogre)         'boss)
     (('snow)         'snow)

@@ -1009,6 +1009,12 @@ void LibSM64Manager::shutdown() {
   m_is_collide_shape_cache.clear();
   m_yakow_type = 0;
   m_is_yakow_cache.clear();
+  // Drop cached BG music state so a fresh init (or re-init on ROM swap)
+  // doesn't think the previous session's track is still playing and
+  // short-circuit the next play_music_from_goal call.
+  m_current_bg_music_seq = 0;
+  m_current_bg_music_forced = false;
+  m_force_audio_unpaused = false;
 
   if (m_mario_id >= 0) {
     sm64_mario_delete(m_mario_id);
@@ -2280,10 +2286,32 @@ u64 pc_sm64_play_sound(u64 sound_bits) {
 void LibSM64Manager::play_music_from_goal(uint8_t seq_id) {
   if (!m_initialized) return;
   std::scoped_lock lock(m_sm64_lock);
+
+  // Short-circuit: this exact track is already playing in the same
+  // (non-forced) mode.  Skip the stop+start churn so calls from GOAL
+  // that fire every frame (e.g. an update-mario-music! tick that keeps
+  // asking for the level theme) don't restart the song from the top.
+  if (seq_id != 0 && seq_id == m_current_bg_music_seq && !m_current_bg_music_forced) {
+    return;
+  }
+
+  // Same track, just flipping out of forced-unpaused mode — keep the
+  // cursor alive and only update the pause behaviour.
+  if (seq_id != 0 && seq_id == m_current_bg_music_seq && m_current_bg_music_forced) {
+    m_current_bg_music_forced = false;
+    m_force_audio_unpaused = false;
+    if (m_audio) m_audio->set_paused(m_game_paused);
+    return;
+  }
+
+  // Different track (or a real start / stop-then-start).  Fall through
+  // to the full stop+play path.
   sm64_stop_background_music(sm64_get_current_background_music());
   if (seq_id != 0) {
     sm64_play_music(0, seq_id, 0);
   }
+  m_current_bg_music_seq = seq_id;
+  m_current_bg_music_forced = false;
   // Back to pause-responsive mode, and re-sync audio player to the current
   // game-pause state so if the player is paused right now (rare — GOAL
   // usually doesn't fire this call mid-pause) audio still mutes correctly.
@@ -2298,10 +2326,27 @@ void LibSM64Manager::play_music_from_goal(uint8_t seq_id) {
 void LibSM64Manager::play_music_forced_from_goal(uint8_t seq_id) {
   if (!m_initialized) return;
   std::scoped_lock lock(m_sm64_lock);
+
+  // Short-circuit: same track, already in forced-unpaused mode.
+  if (seq_id != 0 && seq_id == m_current_bg_music_seq && m_current_bg_music_forced) {
+    return;
+  }
+
+  // Same track, just flipping INTO forced-unpaused mode — keep playing
+  // and only flip the flag + un-mute.
+  if (seq_id != 0 && seq_id == m_current_bg_music_seq && !m_current_bg_music_forced) {
+    m_current_bg_music_forced = true;
+    m_force_audio_unpaused = true;
+    if (m_audio) m_audio->set_paused(false);
+    return;
+  }
+
   sm64_stop_background_music(sm64_get_current_background_music());
   if (seq_id != 0) {
     sm64_play_music(0, seq_id, 0);
   }
+  m_current_bg_music_seq = seq_id;
+  m_current_bg_music_forced = true;
   m_force_audio_unpaused = true;
   if (m_audio) m_audio->set_paused(false);  // immediately un-mute
 }
@@ -2309,7 +2354,18 @@ void LibSM64Manager::play_music_forced_from_goal(uint8_t seq_id) {
 void LibSM64Manager::stop_music_from_goal() {
   if (!m_initialized) return;
   std::scoped_lock lock(m_sm64_lock);
+  // Already stopped — nothing to do.
+  if (m_current_bg_music_seq == 0) {
+    // Still ensure pause mode is consistent with m_force_audio_unpaused
+    // being cleared, in case it somehow drifted.
+    m_force_audio_unpaused = false;
+    m_current_bg_music_forced = false;
+    if (m_audio) m_audio->set_paused(m_game_paused);
+    return;
+  }
   sm64_stop_background_music(sm64_get_current_background_music());
+  m_current_bg_music_seq = 0;
+  m_current_bg_music_forced = false;
   // Stopping music returns audio to the default pause-responsive mode.
   m_force_audio_unpaused = false;
   if (m_audio) m_audio->set_paused(m_game_paused);

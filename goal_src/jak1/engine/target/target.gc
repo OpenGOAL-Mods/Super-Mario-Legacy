@@ -82,6 +82,9 @@
 
 (defbehavior target-falling-trans target ((arg0 basic) (arg1 time-frame))
   (if (and (cpad-pressed? (-> self control unknown-cpad-info00 number) circle) (can-feet?)) (go target-attack-air #f))
+  ;; sm64 mod: yellow eco midair shot — flop is disabled so we detect square+yellow-eco here
+  ;; instead.  can-hands? #f checks yellow eco active + square pressed + attack cooldown.
+  (if (can-hands? #f) (go target-yellow-jump-blast))
   (when (= arg0 'target-eco-powerup)
     ;; og:preserve-this - High FPS Fix
     (if (and (recently-pressed? x)

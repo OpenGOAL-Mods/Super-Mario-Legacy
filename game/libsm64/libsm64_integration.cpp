@@ -5349,14 +5349,20 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
 
   if (!jak_in_glue_state) {
     if (m_in_launcher) {
-      // The GOAL glue state just ended. Start the post-glue settle period
-      // so Mario stays pinned to Jak while auto_sync_collision catches up
-      // with any level change that happened during the glue (e.g. continue
-      // points, warp gates).
-      lg::info("[libsm64] Glue state ended — starting {} frame settle",
-               POST_GLUE_SETTLE_DURATION);
+      // The GOAL glue state just ended.  Pick the settle duration based
+      // on the kind of glue — continue points stay in the same level so
+      // no collision reload is needed, and the long 30-frame pin shows
+      // as "Mario awkwardly matches Jak's movement" for about a second.
+      // Warp gates / launchers might cross levels, so those keep the
+      // full duration.
+      const int settle = (m_last_glue_kind == GlueKind::Continue)
+                             ? POST_CONTINUE_SETTLE_DURATION
+                             : POST_GLUE_SETTLE_DURATION;
+      lg::info("[libsm64] Glue state ended ({}) — starting {} frame settle",
+               m_last_glue_kind == GlueKind::Continue ? "continue" : "other",
+               settle);
       m_in_launcher = false;
-      m_post_glue_settle_frames = POST_GLUE_SETTLE_DURATION;
+      m_post_glue_settle_frames = settle;
     }
 
     // During post-glue settle: keep reading Jak's position so the
@@ -5380,11 +5386,19 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   // Still in a GOAL glue state — reset any running settle timer.
   m_post_glue_settle_frames = 0;
 
+  // Classify this glue so the falling edge picks the right settle.
+  // Only `target-continue` needs the short settle; the rest (warps,
+  // launch pads, high-jumps) stay on the conservative default.
+  m_last_glue_kind = (sym_continue && state_name == sym_continue)
+                         ? GlueKind::Continue
+                         : GlueKind::Other;
+
   // Jak is in a glue state — read Jak's position and store it.
   // The actual Mario position override happens inside tick() after
   // sm64_mario_tick, within the existing sm64_lock scope.
   if (!m_in_launcher) {
-    lg::info("[libsm64] Glue state detected — syncing Mario to Jak");
+    lg::info("[libsm64] Glue state detected ({}) — syncing Mario to Jak",
+             m_last_glue_kind == GlueKind::Continue ? "continue" : "other");
   }
   m_in_launcher = true;
 

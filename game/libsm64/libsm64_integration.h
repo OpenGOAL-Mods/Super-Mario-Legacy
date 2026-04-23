@@ -890,14 +890,31 @@ class LibSM64Manager {
   // update_target_ice for logging edges only — force_ice is flipped
   // unconditionally each frame because the setter is cheap.
   bool m_prev_on_ice = false;
-  // Post-glue settle: when a glue state (launcher, warp, continue) ends, keep
-  // Mario pinned to Jak's position for a few extra frames so that
-  // auto_sync_collision has time to detect the new level and reload collision
-  // surfaces. Without this, Mario falls through the ground on level changes
-  // triggered by continue points / warp gates because the collision reload
-  // hasn't happened yet when the glue releases.
+  // Tracks WHICH kind of glue state we were last in.  On the falling
+  // edge we pick the settle duration based on this:
+  //   - Continue (checkpoint respawn) stays in the same level, so the
+  //     collision reload never runs during settle — the whole settle
+  //     reads as "Mario stuck to Jak's movement awkwardly".  Use a
+  //     minimal settle just enough to smooth the single-frame position
+  //     handoff.
+  //   - Other (warp gates, launchers, high-jump pads) can cross levels
+  //     or teleport far enough to trigger an auto_sync_collision reload,
+  //     so keep the long settle.
+  enum class GlueKind { Continue, Other };
+  GlueKind m_last_glue_kind = GlueKind::Other;
+  // Post-glue settle: when a glue state ends, keep Mario pinned to Jak's
+  // position for a few extra frames so that auto_sync_collision has time
+  // to detect the new level and reload collision surfaces.  Without
+  // this, Mario falls through the ground on level changes triggered by
+  // warp gates because the collision reload hasn't happened yet when
+  // the glue releases.  Continue points use the much shorter duration
+  // below since they don't change levels.
   int m_post_glue_settle_frames = 0;
-  static constexpr int POST_GLUE_SETTLE_DURATION = 30;  // ~1 second at 30Hz tick rate
+  static constexpr int POST_GLUE_SETTLE_DURATION = 30;  // ~1 s @ 30Hz
+  // Short settle specifically for target-continue falling edges — just
+  // enough to cover the single-frame handoff as GOAL hands Mario back
+  // to free control, ~100ms.
+  static constexpr int POST_CONTINUE_SETTLE_DURATION = 3;
 
   // ---- Music pause/resume state ----------------------------------------
   // The actual audio gating happens in SM64AudioPlayer::m_paused — when

@@ -355,6 +355,13 @@
 (defstate sm64-crab-shell-idle (sm64-crab-shell)
   :trans
     (behavior ()
+      ;; Level-transition guard: level-get-target-inside returns #f while the
+      ;; current level is unloading (status is no longer 'active).  The draw-
+      ;; control holds a direct pointer into the level heap; if we keep running
+      ;; ja-post while the heap is being overwritten we crash.  Deactivating
+      ;; here runs before :post so the renderer never sees stale geometry.
+      (when (not (level-get-target-inside *level*))
+        (deactivate self))
       ;; Follow Mario's world position + face angle every frame.
       ;; *sm64-mario-pos* x/y/z = Jak-unit position, w = face angle in
       ;; GOAL rotation units (the bridge in write_mario_bridge_data
@@ -387,23 +394,19 @@
   ;; ------------------------------------------------------------------
   ;; RETAIL VS DEBUG ART-GROUP LOAD PATH
   ;; ------------------------------------------------------------------
-  ;; initialize-skeleton on a no-entity process falls through to
-  ;; (-> *level* level-default), then calls load-to-heap-by-name on
-  ;; level-default's art-group load-dir.  If the art-group isn't
-  ;; already in that load-dir's string-array, it calls
-  ;; art-group-load-check — and that function starts with
-  ;; `(when *debug-segment* ...)`, so in retail it just returns #f.
-  ;; Result: the crab renders fine in debug and silently becomes a
-  ;; process with no draw-control in retail (the art-error state).
+  ;; initialize-skeleton on a no-entity process uses level-default for
+  ;; art-group lookup.  In retail, art-group-load-check is a no-op
+  ;; (gated on *debug-segment*), so we must pre-populate level-default's
+  ;; load-dir with the already-loaded lurkercrab art-group.
   ;;
-  ;; Fix: look up the already-loaded lurkercrab art-group from the
-  ;; currently loaded levels (where set-loaded-art registered it at
-  ;; level-load time) and stick a reference into level-default's
-  ;; load-dir before initialize-skeleton runs.  The cached lookup
-  ;; then succeeds in both debug and retail with no new disk I/O.
-  (let ((ag (art-group-get-by-name *level* "lurkercrab")))
-    (when ag
-      (set-loaded-art (-> *level* level-default art-group) ag)))
+  ;; CRASH FIX: set-loaded-art permanently appends to level-default's
+  ;; string-array and art-group-array.  When the level unloads and its
+  ;; heap is overwritten by the next level, the stale pointer in
+  ;; level-default is dereferenced → crash.  Fix: save the array lengths
+  ;; before injecting, call initialize-skeleton (which caches its own
+  ;; direct art-group pointer inside the draw-control), then immediately
+  ;; restore the old lengths to evict the entry.  After init the
+  ;; draw-control no longer needs the level-default entry.
   (set! (-> self root) (new 'process 'trsqv))
   (set! (-> self root trans x) (-> *sm64-mario-pos* x))
   (set! (-> self root trans y) (-> *sm64-mario-pos* y))
@@ -414,7 +417,19 @@
   ;; multiplies through to the skeleton matrix each post, so the whole
   ;; shell shrinks uniformly — no tweaks needed in :trans.
   (set-vector! (-> self root scale) 0.65 0.45 0.65 1.0)
-  (initialize-skeleton self *lurkercrab-sg* '())
+  (let* ((lgd     (-> *level* level-default art-group))
+         (str-arr (-> lgd string-array))
+         (old-str-len (-> str-arr length))
+         (old-ag-len  (-> lgd art-group-array length))
+         (ag (art-group-get-by-name *level* "lurkercrab")))
+    (when ag
+      (set-loaded-art lgd ag))
+    (initialize-skeleton self *lurkercrab-sg* '())
+    ;; Evict the injected entry if set-loaded-art appended it
+    ;; (lengths only grow in the not-found path; found-in-place leaves them unchanged).
+    (when (> (-> str-arr length) old-str-len)
+      (set! (-> str-arr length) old-str-len)
+      (set! (-> lgd art-group-array length) old-ag-len)))
   (go sm64-crab-shell-idle))
 
 (defun spawn-sm64-crab-shell ()
@@ -707,6 +722,24 @@
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-butt-slide) butt-sliding))
       ;; ---- Shell riding: racer-like behavior ----
+      ;; Level-transition teardown: if no level is 'active and we still have a
+      ;; shell handle, clean everything up now.  Handles:
+      ;;   - riding the shell while a level change fires
+      ;;   - loading a save file while the shell is active
+      ;; The sm64-crab-shell process may already be deactivating itself via its
+      ;; own :trans guard, but we clean up here too so Jak's racer-action flag
+      ;; and camera are always restored regardless of process-tree ordering.
+      (when (!= (-> self shell-proc) (the-as handle #f))
+        (when (not (level-get-target-inside *level*))
+          (let ((shell (handle->process (-> self shell-proc))))
+            (when shell (deactivate shell)))
+          (when *target*
+            (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
+            (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
+            (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
+          (set! (-> self shell-proc) (the-as handle #f))
+          (set! (-> self prev-on-shell) #f)
+          (set! (-> self shell-tracker-timer) 0)))
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
         ;; Rising edge: just mounted shell
         (when (and on-shell (not (-> self prev-on-shell)) *target*)
@@ -776,8 +809,8 @@
                       (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-on-shell) on-shell))
 
-      ;; ---- L1+L3 button: put Mario on shell anywhere ----
-      ;; Hold L1 and press L3 to mount Mario on the shell
+      ;; ---- R1+L3 button: put Mario on shell anywhere ----
+      ;; Hold R1 and press L3 to mount Mario on the shell
       ;; only in levels that have a racer (misty, rolling, lavatube, firecanyon, ogre).
       ;; Only works in debug mode.
       (when (and *cheat-mode* (cpad-hold? 0 r1) (cpad-pressed? 0 l3))

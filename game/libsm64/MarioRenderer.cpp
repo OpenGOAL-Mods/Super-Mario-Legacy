@@ -341,11 +341,15 @@ void MarioRenderer::render(const float* camera_matrix,
   glDrawArrays(GL_TRIANGLES, 0, m_num_triangles * 3);
   glBindVertexArray(0);
 
-  // Draw shell if Mario is in a shell-riding action. render_shell() binds the
-  // shell's own texture so the dome shows the green pattern; belly and ring
-  // vertices carry negative UVs, causing the shader to use vertex colour.
+  // Draw the ROM-extracted koopa shell if Mario is in a shell-riding
+  // action AND the "use procedural shell" toggle is on.  Default OFF
+  // now that mario.gc spawns a GOAL sm64-crab-shell process (lurker-crab
+  // art) on mount — the GOAL version replaces this one in levels that
+  // have the crab art loaded (beach).  Left behind a toggle so the
+  // procedural shell is still available as a fallback on other levels
+  // / for debug.
   auto state = mgr.get_render_state();
-  if (state.action & kActFlagRidingShell) {
+  if ((state.action & kActFlagRidingShell) && mgr.render_procedural_shell) {
     render_shell(state);
   }
 

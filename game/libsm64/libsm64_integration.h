@@ -626,6 +626,13 @@ class LibSM64Manager {
   bool auto_sync_collision = true;    // Auto-reload static collision when levels change
   bool dynamic_actor_collision = true; // Walk process tree and mirror collide-meshes
   bool hide_jak_model = true;         // Skip drawing eichar-lod0 while Mario is active
+  // Render the ROM-extracted koopa-shell mesh (MarioRenderer::render_shell)
+  // when Mario's action has ACT_FLAG_RIDING_SHELL.  Default OFF now that
+  // mario.gc spawns a proper GOAL sm64-crab-shell process (lurker-crab
+  // art) on shell mount — that process handles the visual.  Flip on
+  // only if testing on a level that doesn't have the lurker-crab art
+  // loaded and you want Mario to still have SOMETHING under him.
+  bool render_procedural_shell = false;
   bool water_sync = true;             // Mirror Jak's water volume into libsm64 each tick
   // When set, SM64CollisionRenderer draws the loaded static collision
   // triangles as a translucent colored overlay (one colour per SURFACE_*

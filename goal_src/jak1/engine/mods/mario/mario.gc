@@ -355,13 +355,6 @@
 (defstate sm64-crab-shell-idle (sm64-crab-shell)
   :trans
     (behavior ()
-      ;; Level-transition guard: level-get-target-inside returns #f while the
-      ;; current level is unloading (status is no longer 'active).  The draw-
-      ;; control holds a direct pointer into the level heap; if we keep running
-      ;; ja-post while the heap is being overwritten we crash.  Deactivating
-      ;; here runs before :post so the renderer never sees stale geometry.
-      (when (not (level-get-target-inside *level*))
-        (deactivate self))
       ;; Follow Mario's world position + face angle every frame.
       ;; *sm64-mario-pos* x/y/z = Jak-unit position, w = face angle in
       ;; GOAL rotation units (the bridge in write_mario_bridge_data
@@ -722,24 +715,6 @@
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-butt-slide) butt-sliding))
       ;; ---- Shell riding: racer-like behavior ----
-      ;; Level-transition teardown: if no level is 'active and we still have a
-      ;; shell handle, clean everything up now.  Handles:
-      ;;   - riding the shell while a level change fires
-      ;;   - loading a save file while the shell is active
-      ;; The sm64-crab-shell process may already be deactivating itself via its
-      ;; own :trans guard, but we clean up here too so Jak's racer-action flag
-      ;; and camera are always restored regardless of process-tree ordering.
-      (when (!= (-> self shell-proc) (the-as handle #f))
-        (when (not (level-get-target-inside *level*))
-          (let ((shell (handle->process (-> self shell-proc))))
-            (when shell (deactivate shell)))
-          (when *target*
-            (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
-            (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-            (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
-          (set! (-> self shell-proc) (the-as handle #f))
-          (set! (-> self prev-on-shell) #f)
-          (set! (-> self shell-tracker-timer) 0)))
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
         ;; Rising edge: just mounted shell
         (when (and on-shell (not (-> self prev-on-shell)) *target*)

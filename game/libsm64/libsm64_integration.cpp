@@ -2132,8 +2132,9 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
       // x = punching/kicking (not dive/gp/slide-kick/jump-kick/butt-slide), y = ground pound impact, z = ground pound falling, w = diving
       constexpr uint32_t MARIO_PUNCHING = 0x00100000;
       constexpr uint32_t MARIO_KICKING  = 0x00200000;
+      constexpr uint32_t MARIO_TRIPPING = 0x00400000;  // set during crouch-kick (breakdance) hit frames
       bool is_punch_action = (state.action & ACT_FLAG_ATTACKING) != 0 && !is_diving && !is_gp && !is_slide_kick && !is_jump_kick && !is_butt_slide;
-      bool hit_flag_active = (state.flags & (MARIO_PUNCHING | MARIO_KICKING)) != 0;
+      bool hit_flag_active = (state.flags & (MARIO_PUNCHING | MARIO_KICKING | MARIO_TRIPPING)) != 0;
       static bool s_prev_hit_flag = false;
       bool is_attacking = is_punch_action && hit_flag_active && !s_prev_hit_flag;
       s_prev_hit_flag = is_punch_action && hit_flag_active;

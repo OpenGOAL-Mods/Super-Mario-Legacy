@@ -456,7 +456,7 @@
               (+ (-> *sm64-mario-pos* y) (meters 1.0))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self fist-pos (* (meters 1.8) atk-scale) 15 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self fist-pos (* (meters 1.7) atk-scale) 15 'punch)))
               (when tracker
                 ;; Give it a callback that tracks Mario's fist each frame.
                 (send-event (ppointer->process tracker) 'function

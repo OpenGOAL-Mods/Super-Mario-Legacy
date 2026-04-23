@@ -7,6 +7,11 @@
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
+// For jak1::find_symbol_from_c — used to read bridge globals like
+// *sm64-on-sunken-elevator-up* that GOAL-side code sets to coordinate
+// with libsm64.
+#include "game/kernel/jak1/kscheme.h"
+
 #include "game/graphics/opengl_renderer/BlitDisplays.h"
 #include "game/graphics/opengl_renderer/DepthCue.h"
 #include "game/graphics/opengl_renderer/DirectRenderer.h"
@@ -1214,7 +1219,21 @@ void OpenGLRenderer::tick_mario_sm64() {
   } else if (mgr.follow_mario && !launcher_active && !mgr.target_grabbed) {
     auto cur_state = mgr.get_state();
     uint32_t wedges = (static_cast<uint16_t>(cur_state.health) >> 8) & 0xF;
-    if (wedges > 0) {
+    // libsm64: sunken-elevator.gc's plat-button-move-upward sets
+    // *sm64-on-sunken-elevator-up* for the duration of the ride up.
+    // Syncing Jak to Mario while the elevator moves causes them to
+    // fight over the platform and stall halfway — skip the sync so
+    // they each ride up on their own.  Cleared on :exit of the
+    // upward-move state, so no stuck-on risk.
+    bool on_sunken_elev_up = false;
+    {
+      u32 false_val = offset_of_s7();
+      auto sym = jak1::find_symbol_from_c("*sm64-on-sunken-elevator-up*");
+      if (sym.offset != 0 && sym->value != false_val) {
+        on_sunken_elev_up = true;
+      }
+    }
+    if (wedges > 0 && !on_sunken_elev_up) {
       mgr.sync_jak_to_mario(g_ee_main_mem, 0);
     }
   }

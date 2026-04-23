@@ -1678,10 +1678,20 @@ void LibSM64Manager::load_level_collision(
   //   bits 3-5  = mode
   //   bits 6-11 = material (6 bits, values from the pat-material enum)
   //   bit 12    = nolineofsight
+  //   bits 14-19 = event (6 bits, values from the pat-event enum)
   //
   // Relevant pat-material values for hot surfaces:
   //   11 = hotcoals   (fire canyon warm rock, lavatube ledges)
   //   12 = lava       (actual magma in lavatube / firecanyon / citadel)
+  //
+  // Relevant pat-event values (pat-event enum in pat-h.gc):
+  //   0 = none         (normal collision)
+  //   1 = deadly
+  //   2 = endlessfall  ← invisible "you fell off the map" plane
+  //   3 = burn
+  //   4 = deadlyup
+  //   5 = burnup
+  //   6 = melt
   //
   // The per-triangle PAT lives on every CollisionMesh::Vertex (all 3 verts
   // of a tri share the same value) — we check vertex 0 per tri.
@@ -1690,6 +1700,9 @@ void LibSM64Manager::load_level_collision(
   constexpr uint32_t PAT_MATERIAL_MASK = 0x3F;
   constexpr uint32_t PAT_MAT_HOTCOALS = 11;
   constexpr uint32_t PAT_MAT_LAVA = 12;
+  constexpr uint32_t PAT_EVENT_SHIFT = 14;
+  constexpr uint32_t PAT_EVENT_MASK = 0x3F;
+  constexpr uint32_t PAT_EVT_ENDLESSFALL = 2;
 
   // SM64 surface type that triggers the classic "burn your butt" launch —
   // when Mario touches a floor with this type, his butt catches fire and
@@ -1719,6 +1732,7 @@ void LibSM64Manager::load_level_collision(
   size_t skipped_noentity = 0;
   size_t burning_tris = 0;
   size_t skipped_degenerate = 0;
+  size_t skipped_endlessfall = 0;  // pat-event=endlessfall planes — Mario falls through instead of standing on them
   size_t extruded_wall_tris = 0;   // steep pat-mode=WALL tris replaced by vertical quads (counts source tris)
 
   // libsm64's wall/floor classification threshold (surface_collision.c:104/180).
@@ -1746,6 +1760,20 @@ void LibSM64Manager::load_level_collision(
     if (v0.pat & PAT_NOENTITY_BIT) {
       // Camera-only collision — Mario ignores it, same as Jak does.
       skipped_noentity++;
+      continue;
+    }
+
+    // pat-event=endlessfall is the "you fell off the map" plane Jak uses
+    // to teleport the player back to the last continue point when they
+    // fall below the world.  In Jak's world these tris aren't walked on
+    // — the collide-handler fires the endlessfall event on touch — but
+    // libsm64 has no such event machinery, so any tri tagged endlessfall
+    // just becomes a regular floor Mario can stand on (visibly in the
+    // air, over the void).  Drop them from the SM64 collision set so
+    // find_floor never returns one and Mario falls through as intended.
+    const uint32_t pat_event = (v0.pat >> PAT_EVENT_SHIFT) & PAT_EVENT_MASK;
+    if (pat_event == PAT_EVT_ENDLESSFALL) {
+      skipped_endlessfall++;
       continue;
     }
 
@@ -1934,8 +1962,8 @@ void LibSM64Manager::load_level_collision(
   }
 
   lg::info(
-      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} degenerate skipped, {} burning, {} source tris extruded into vertical wall quads, streaming={}, new_classify={})",
-      m_all_static_surfaces.size(), skipped_noentity, skipped_degenerate, burning_tris,
+      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} endlessfall skipped, {} degenerate skipped, {} burning, {} source tris extruded into vertical wall quads, streaming={}, new_classify={})",
+      m_all_static_surfaces.size(), skipped_noentity, skipped_endlessfall, skipped_degenerate, burning_tris,
       extruded_wall_tris, collision_streaming, test_new_collide_toggle);
 }
 

@@ -71,7 +71,20 @@
   :enter
     (behavior ()
       (let ((t9-0 (-> (method-of-type plat-button plat-button-move-upward) enter))) (if t9-0 (t9-0)))
-      (set! (-> self play-at-top-going-up-camera?) #t))
+      (set! (-> self play-at-top-going-up-camera?) #t)
+      ;; libsm64: tell the C++ follow_mario sync to lay off while the
+      ;; elevator is going up.  Mario + Jak each ride the platform up
+      ;; independently — syncing Jak to Mario during the ride causes
+      ;; them to fight each other and the elevator stalls partway.
+      (set! *sm64-on-sunken-elevator-up* #t))
+  :exit
+    (behavior ()
+      ;; Parent plat-button-move-upward has its own :exit (plat-button.gc:181)
+      ;; so chain to it.  Clear the bridge flag whether we reached the top
+      ;; naturally (path-pos==0 → plat-button-at-end) or exited some other
+      ;; way, so the flag can never get stuck on.
+      (let ((t9-0 (-> (method-of-type plat-button plat-button-move-upward) exit))) (if t9-0 (t9-0)))
+      (set! *sm64-on-sunken-elevator-up* #f))
   :trans
     (behavior ()
       (let ((t9-0 (-> (method-of-type plat-button plat-button-move-upward) trans))) (if t9-0 (t9-0)))

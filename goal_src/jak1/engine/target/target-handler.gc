@@ -23,6 +23,14 @@
 ;; Used by the 'query 'mode handler to report 'racer so enemies like sharkey don't aggro.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; libsm64: "Jak is riding the sunken elevator upward" bridge.  Set to #t by
+;; sunken-elevator.gc on entering plat-button-move-upward and cleared on
+;; :exit (elevator reached the top or the state otherwise ended).  C++
+;; reads it in the follow_mario sync path and SKIPS sync_jak_to_mario
+;; while it's #t, so Mario and Jak each ride the elevator up
+;; independently — no tug-of-war that stalls the platform partway.
+(define *sm64-on-sunken-elevator-up* #f)
+
 ;; libsm64: "Mario just swung" window — bumped by sm64-spawn-attack-tracker
 ;; in mario.gc, read here in the 'get-attack-count case to decide whether
 ;; an enemy death should be attributed to Mario (and thus eligible for

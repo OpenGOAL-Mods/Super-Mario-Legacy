@@ -364,6 +364,48 @@ void extract_from_level(const ObjectFileDB& db,
   extract_art_groups_from_level(db, tex_db, bsp_header.texture_remap_table, dgo_name, level_data,
                                 art_group_data);
 
+  // libsm64 (Super Mario Legacy): mirror beach's lurker-crab art into
+  // every racer-enabled level so the GOAL `sm64-crab-shell` process
+  // (mario.gc) can render Mario's shell visual on mis/fic/lav/rol/ogr
+  // too.  Without this, those levels' .fr3 only contain their native
+  // merc models and `initialize-skeleton` against `*lurkercrab-sg*`
+  // silently fails to render anything.  We also add beach's texture
+  // set so the crab's texture lookups find their tiles.
+  {
+    static const std::set<std::string> kMirrorLurkerCrabInto = {
+        "MIS.DGO", "FIC.DGO", "LAV.DGO", "ROL.DGO", "OGR.DGO"};
+    if (kMirrorLurkerCrabInto.count(dgo_name)) {
+      // Pull beach's own texture set in first so the crab texture tiles
+      // resolve.  add_all_textures_from_level is dedup'd internally
+      // (it checks `textures_we_have` / `textures_we_have_id`), so
+      // layering another DGO's textures is safe.
+      add_all_textures_from_level(level_data, "BEA.DGO", tex_db);
+
+      // Find the lurker-crab art group in the DB (it was extracted
+      // from BEA.DGO at load time) and inject it.  Passing an empty
+      // tex_remap keeps the crab's texture IDs native — same pattern
+      // extract_common uses for ARTSPOOL.
+      const std::string kCrabAg = "lurkercrab-ag";
+      bool crab_found = false;
+      for (const auto& [src_dgo, src_files] : db.obj_files_by_dgo) {
+        for (const auto& file : src_files) {
+          if (file.name == kCrabAg) {
+            const auto& ag_file = db.lookup_record(file);
+            MercSwapInfo swap_info;
+            extract_merc(ag_file, tex_db, db.dts, {}, level_data, false, db.version(), swap_info);
+            extract_joint_group(ag_file, db.dts, db.version(), art_group_data);
+            crab_found = true;
+            break;
+          }
+        }
+        if (crab_found) break;
+      }
+      if (!crab_found) {
+        lg::warn("libsm64: lurkercrab-ag not found in DB while mirroring into {}", dgo_name);
+      }
+    }
+  }
+
   Serializer ser;
   level_data.serialize(ser);
   auto compressed =

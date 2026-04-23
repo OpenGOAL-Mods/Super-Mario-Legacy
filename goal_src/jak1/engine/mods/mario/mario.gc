@@ -695,14 +695,23 @@
           ;; Pull camera back and track faster for shell speed
           (set! (-> *camera* stringMaxLength) (meters 20))
           (set! (-> *camera* string-push-z) (meters 18))
-          ;; Spawn the visual crab-shell under Mario.  Gated on level ==
-          ;; 'beach because that's the only DGO we've wired lurkercrab
-          ;; art into — see bea.gd.  If Mario mounts the shell on any
-          ;; other level, we skip the spawn and fall back to the C++
-          ;; procedural koopa shell (MarioRenderer::render_shell).
+          ;; Spawn the visual crab-shell under Mario.  Gated on the set
+          ;; of DGOs we've wired the lurker-crab art into: bea (native)
+          ;; + mis / fic / lav / rol / ogr (added the 8-file racer prefix
+          ;; + lurkercrab.o / lurkercrab-ag.go / tpage-212..215 to each).
+          ;; Any other level falls through with no crab spawn and no
+          ;; visible shell — flip render_procedural_shell on the C++
+          ;; manager to bring back the ROM koopa shell as a fallback.
           (when *level*
             (let ((cur-lev (level-get-target-inside *level*)))
-              (when (and cur-lev (= (-> cur-lev name) 'beach))
+              (when (and cur-lev
+                         (let ((lev-name (-> cur-lev name)))
+                           (or (= lev-name 'beach)
+                               (= lev-name 'misty)
+                               (= lev-name 'firecanyon)
+                               (= lev-name 'lavatube)
+                               (= lev-name 'rolling)
+                               (= lev-name 'ogre))))
                 (let ((proc (spawn-sm64-crab-shell)))
                   (when proc
                     (set! (-> self shell-proc) (process->handle (ppointer->process proc)))))))))

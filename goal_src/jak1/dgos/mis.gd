@@ -1,5 +1,6 @@
 ("MIS.DGO"
- ("target-racer-h.o"
+ (;; libsm64: racer prefix — standard 8-file set every racer DGO opens with.
+  "target-racer-h.o"
   "racer-part.o"
   "racer.o"
   "target-racer.o"
@@ -7,6 +8,15 @@
   "collide-reaction-racer.o"
   "eichar-racer+0-ag.go"
   "tpage-1119.go"
+  ;; libsm64: lurker-crab code + art group so sm64-crab-shell (mario.gc)
+  ;; can render Mario's shell visual on this racer level.  Code binds
+  ;; *lurkercrab-sg* + def-art-elt slots; art-group carries the
+  ;; skeleton / joints / animations.  Beach's texture tiles are mirrored
+  ;; into this level's fr3 by extract_from_level (decompiler), so we
+  ;; skip the beach tpage-212..215 files here — they're 1.4 MB +
+  ;; ~700 KB combined and blow the per-level DGO heap if included.
+  "lurkercrab.o"
+  "lurkercrab-ag.go"
   "battlecontroller.o"
   "mistycannon.o"
   "babak-with-cannon.o"

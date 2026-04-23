@@ -504,7 +504,7 @@
               (+ (-> *sm64-mario-pos* y) (meters 0.3))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 30 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 80 'punch)))
               (when tracker
                 ;; Track just ahead of Mario as he slides forward.
                 (send-event (ppointer->process tracker) 'function

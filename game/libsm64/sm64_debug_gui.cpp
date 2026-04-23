@@ -365,6 +365,26 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
                mgr.wall_extrusion_ny_max, tris);
     }
   }
+  ImGui::SliderFloat("Wall Extrusion Height Cap", &mgr.wall_extrusion_height_cap, 0.0f, 4000.0f,
+                     "%.0f units");
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Max height (Jak units) of each extruded vertical wall quad.\n"
+        "The quad is Y-centered on the source tri and clamped to this\n"
+        "height, so large sloped tris don't produce tall invisible slabs.\n"
+        "  40   — tight (~half a Mario height); fewer invisible walls,\n"
+        "          but less ledge-grab coverage.\n"
+        "  120  — default (~1.5 Mario heights); good balance.\n"
+        "  400+ — near-uncapped; original behaviour.\n"
+        "Release the slider to auto-reload collision with the new value.");
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) {
+    size_t tris = reload_level_collision_from_loader(mgr, loader);
+    if (tris > 0) {
+      lg::info("[libsm64] Wall-extrusion height cap changed to {:.0f} — reloaded {} triangles",
+               mgr.wall_extrusion_height_cap, tris);
+    }
+  }
 
   // Cutscene bone tracker.  teleport_mario_to_jak reads
   // `(-> *target* node-list data N bone transform)` when this is >= 0,

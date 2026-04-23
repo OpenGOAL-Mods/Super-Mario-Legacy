@@ -1085,7 +1085,13 @@ void OpenGLRenderer::tick_mario_sm64() {
   // by read_target_flags, which is fine at 30 Hz for this decision.
   bool paused = mgr.is_game_paused(g_ee_main_mem);
   mgr.update_music_pause_state(paused);
-  if (paused && !mgr.target_in_movie) return;
+  if (paused && !mgr.target_in_movie) {
+    // No tick ran, so render_blend would oscillate 0.5↔1.0 across even frames,
+    // visibly stuttering Mario between prev and current positions.  Pin to 1.0
+    // (fully current tick) so he holds perfectly still while paused.
+    mgr.render_blend = 1.0f;
+    return;
+  }
 
   // 1c. Read target state flags (grabbed / periscope)
   mgr.read_target_flags(g_ee_main_mem);

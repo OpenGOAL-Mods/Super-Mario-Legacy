@@ -619,6 +619,13 @@ class LibSM64Manager {
   // horizontal: captures near-vertical walls while leaving genuine
   // ramps alone.
   float wall_extrusion_ny_max = 0.30f;
+  // Maximum height (Jak units) of each extruded vertical wall quad.
+  // The quad is Y-centered on the source tri's centroid and clamped to
+  // this height, so large sloped tris don't produce invisible wall slabs
+  // taller than one or two Mario heights.  Default 120 ≈ ~1.5 Mario
+  // heights at scale 50.  Tunable live via ImGui; takes effect on the
+  // next collision stream.
+  float wall_extrusion_height_cap = 3000.0f;
   // When set, update_actor_collision walks the tree and logs what it finds
   // but never calls into libsm64. Used to validate the walker in isolation
   // without risking crashes in libsm64 itself.

@@ -1852,8 +1852,13 @@ void LibSM64Manager::load_level_collision(
         ax = jv1.x; az = jv1.z; bx = jv2.x; bz = jv2.z;
       }
 
-      float y_min = std::min(std::min(jv0.y, jv1.y), jv2.y);
-      float y_max = std::max(std::max(jv0.y, jv1.y), jv2.y);
+      const float y_raw_min = std::min(std::min(jv0.y, jv1.y), jv2.y);
+      const float y_raw_max = std::max(std::max(jv0.y, jv1.y), jv2.y);
+      const float y_cen = (y_raw_min + y_raw_max) * 0.5f;
+      const float half_cap = std::min((y_raw_max - y_raw_min) * 0.5f,
+                                       wall_extrusion_height_cap * 0.5f);
+      const float y_min = y_cen - half_cap;
+      const float y_max = y_cen + half_cap;
 
       float e1x = jv1.x - jv0.x, e1y = jv1.y - jv0.y, e1z = jv1.z - jv0.z;
       float e2x = jv2.x - jv0.x, e2y = jv2.y - jv0.y, e2z = jv2.z - jv0.z;

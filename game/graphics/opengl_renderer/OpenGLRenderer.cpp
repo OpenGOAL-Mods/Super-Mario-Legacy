@@ -1256,10 +1256,12 @@ void OpenGLRenderer::tick_mario_sm64() {
   // 9. Zoomer shell
   auto t16 = Clock::now();
   mgr.update_zoomer_shell(g_ee_main_mem);
-  // Target-tube slide — piggybacks on the zoomer-shell timing bucket since
-  // both are cheap state-name polls; splitting them into their own bucket
-  // isn't worth the added noise in the profile table.
+  // Target-tube slide + target-ice skating — piggyback on the
+  // zoomer-shell timing bucket since they're all cheap state-name polls;
+  // splitting them into their own bucket isn't worth the added noise in
+  // the profile table.
   mgr.update_target_tube(g_ee_main_mem);
+  mgr.update_target_ice(g_ee_main_mem);
   auto t17 = Clock::now();
 
   // Accumulate timings (microseconds)

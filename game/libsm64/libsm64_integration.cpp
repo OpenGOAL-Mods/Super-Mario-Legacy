@@ -2500,6 +2500,32 @@ u64 pc_sm64_teleport_mario(u32 x_bits, u32 y_bits, u32 z_bits) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// GOAL-callable "shove Mario" (knockback only, no HP loss).  Registered as
+// "pc-sm64-shove-mario".  Takes the shove SOURCE point in Jak units (the
+// thing Mario should be knocked away from — e.g. the snow-bumper's root
+// trans) and forwards to sm64_mario_take_damage with damage=0, which
+// skips the hurtCounter math and the attacked-sound but still picks an
+// appropriate knockback action via fake_determine_knockback_action.
+// ---------------------------------------------------------------------------
+void LibSM64Manager::shove_mario_from_goal(float src_x, float src_y, float src_z) {
+  if (!m_initialized || m_mario_id < 0) return;
+  const float sm64_x = src_x * JAK_TO_SM64_SCALE;
+  const float sm64_y = src_y * JAK_TO_SM64_SCALE;
+  const float sm64_z = src_z * JAK_TO_SM64_SCALE;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_mario_take_damage(m_mario_id, /*damage=*/0, /*subtype=*/0, sm64_x, sm64_y, sm64_z);
+}
+
+u64 pc_sm64_shove_mario(u32 x_bits, u32 y_bits, u32 z_bits) {
+  float x, y, z;
+  memcpy(&x, &x_bits, 4);
+  memcpy(&y, &y_bits, 4);
+  memcpy(&z, &z_bits, 4);
+  LibSM64Manager::instance().shove_mario_from_goal(x, y, z);
+  return 0;
+}
+
 bool LibSM64Manager::read_target_transform(u8* ee_mem,
                                            math::Vector3f* out_pos,
                                            float* out_yaw_rad) {
@@ -5142,6 +5168,95 @@ void LibSM64Manager::update_target_tube(u8* ee_mem) {
   }
 
   m_prev_in_tube_slide = in_tube;
+}
+
+// --------------------------------------------------------------------------
+// Target-ice skating
+// --------------------------------------------------------------------------
+//
+// When Jak walks on the snow level's slippery ice, GOAL swaps him into
+// the target-ice-* family (target-ice-stance = standing still, slipping
+// imperceptibly; target-ice-walk = input-driven motion with reduced
+// grip).  Mario's side mirrors this by flipping sm64_set_force_ice,
+// which short-circuits mario_get_floor_class to VERY_SLIPPERY — exactly
+// what Cool, Cool Mountain / Snowman's Land tags their icy patches as.
+// SM64's walking-speed code then uses the low-friction branch in
+// update_walking_speed / apply_slope_decel and Mario coasts.
+//
+// Separate from force_slide on purpose: force_ice deliberately skips
+// the slide-speed scale so Mario gets vanilla SM64 ice friction rather
+// than the tube's slowed-down numbers.
+
+void LibSM64Manager::update_target_ice(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) {
+    m_prev_on_ice = false;
+    {
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_set_force_ice(0);
+    }
+    return;
+  }
+
+  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  // Read *target*'s state.name — same pattern as update_target_tube /
+  // update_launcher_glue.
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return;
+  u32 target_ptr = target_sym->value;
+  bool on_ice = false;
+  if (target_ptr != 0 && target_ptr != false_val) {
+    constexpr u32 STATE_RUNTIME_OFF = 52;
+    if (target_ptr + STATE_RUNTIME_OFF + 4 <= EE_MAIN_MEM_SIZE) {
+      u32 state_ptr;
+      std::memcpy(&state_ptr, ee_mem + target_ptr + STATE_RUNTIME_OFF, 4);
+      if (state_ptr != 0 && state_ptr != false_val && state_ptr < EE_MAIN_MEM_SIZE) {
+        if (state_ptr + 4 <= EE_MAIN_MEM_SIZE) {
+          u32 state_name;
+          std::memcpy(&state_name, ee_mem + state_ptr, 4);
+
+          auto sym_of = [](const char* name) -> u32 {
+            auto s = jak1::find_symbol_from_c(name);
+            return s.offset;
+          };
+          // Lazy lookup — symbols don't exist until target-ice.gc (snow
+          // DGO) is loaded, so sym_of returns 0 on other levels and the
+          // short-circuit keeps on_ice=false.
+          const u32 sym_ice_stance = sym_of("target-ice-stance");
+          const u32 sym_ice_walk   = sym_of("target-ice-walk");
+          on_ice =
+              (sym_ice_stance && state_name == sym_ice_stance) ||
+              (sym_ice_walk   && state_name == sym_ice_walk);
+        }
+      }
+    }
+  }
+
+  // GOAL bridge — for any GOAL-side consumers that want to react (music
+  // overrides, HUD, etc.).  C++'s own behaviour doesn't read it back.
+  auto bridge = jak1::find_symbol_from_c("*sm64-on-ice*");
+  if (bridge.offset != 0) {
+    const u32 desired = on_ice ? true_val : false_val;
+    if (bridge->value != desired) {
+      bridge->value = desired;
+    }
+  }
+
+  // Flip the libsm64 flag every frame.  Setter is a single int write
+  // under the lock — cheap enough to not bother edge-detecting.
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_force_ice(on_ice ? 1 : 0);
+  }
+
+  if (on_ice && !m_prev_on_ice) {
+    lg::info("[libsm64] target-ice: Mario floor-class → VERY_SLIPPERY (ice friction)");
+  } else if (!on_ice && m_prev_on_ice) {
+    lg::info("[libsm64] target-ice: Mario floor-class restored");
+  }
+  m_prev_on_ice = on_ice;
 }
 
 // --------------------------------------------------------------------------

@@ -236,6 +236,10 @@ u64 pc_sm64_stop_music();
 // packed into a u32, matching the existing pc-sm64-teleport-mario ABI.
 u64 pc_sm64_set_music_volume(u32 vol_bits);
 u64 pc_sm64_teleport_mario(u32 x, u32 y, u32 z);
+// Zero-damage knockback — Mario gets pushed away from (x, y, z) without
+// losing HP or playing the hurt sound.  Used by level actors (e.g.
+// snow-bumper) that shove Jak and want Mario to feel the same impact.
+u64 pc_sm64_shove_mario(u32 x, u32 y, u32 z);
 
 class LibSM64Manager {
  public:
@@ -406,6 +410,11 @@ class LibSM64Manager {
   // Jak's game pauses and resume the remembered track on unpause.
   void update_music_pause_state(bool is_paused);
   void teleport_mario_from_goal(float x, float y, float z);
+  // Zero-damage knockback.  (src_x, src_y, src_z) is the source of the
+  // shove in Jak units — Mario is knocked away from that direction by
+  // SM64's `fake_damage_knock_back` with damage=0 (no HP loss, no hurt
+  // sound).  Used by snow-bumper.gc to mirror Jak's shove onto Mario.
+  void shove_mario_from_goal(float src_x, float src_y, float src_z);
 
   // Teleport Mario to Jak's current position/rotation (used during cutscenes).
   void teleport_mario_to_jak(u8* ee_mem);
@@ -468,6 +477,18 @@ class LibSM64Manager {
   // call unconditionally each tick — gracefully no-ops if the GOAL symbols
   // aren't present yet (e.g. kernel loaded but target-handler not linked).
   void update_zoomer_shell(u8* ee_mem);
+
+  // Target-ice skating: reads *target*'s state name each frame and detects
+  // the target-ice-* family (target-ice-stance, target-ice-walk — snow
+  // level slippery walking).  While Jak is in either state, flips
+  // sm64_set_force_ice(1) so Mario's floor-class becomes VERY_SLIPPERY
+  // and native SM64 ice-friction walking (CCM / Snowman's Land feel)
+  // applies on whatever Jak geometry he's standing on.  Does NOT force
+  // butt-slide and does NOT apply the slide-speed scale — ice is just
+  // slippery walking, not sliding.  Writes the *sm64-on-ice* GOAL bridge
+  // symbol for any other GOAL-side consumers that want to react.  No-op
+  // when Mario isn't spawned or *target* isn't live.
+  void update_target_ice(u8* ee_mem);
 
   // Target-tube slide: reads *target*'s state name each frame and detects
   // the target-tube family (target-tube, target-tube-start,
@@ -863,6 +884,12 @@ class LibSM64Manager {
   // update_target_tube for edge detection — on the rising edge we force
   // Mario into ACT_STOMACH_SLIDE, on the falling edge we nudge him out.
   bool m_prev_in_tube_slide = false;
+
+  // ---- Target-ice skating state ----------------------------------------
+  // Last frame's value of "is Jak in a target-ice-* state?".  Used by
+  // update_target_ice for logging edges only — force_ice is flipped
+  // unconditionally each frame because the setter is cheap.
+  bool m_prev_on_ice = false;
   // Post-glue settle: when a glue state (launcher, warp, continue) ends, keep
   // Mario pinned to Jak's position for a few extra frames so that
   // auto_sync_collision has time to detect the new level and reload collision

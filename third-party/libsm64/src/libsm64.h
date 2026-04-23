@@ -264,6 +264,15 @@ extern SM64_LIB_FN void sm64_set_force_slide(int enabled);
 extern SM64_LIB_FN float g_libsm64_force_slide_speed_scale;
 extern SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale);
 
+// "Force ice" toggle (libsm64 fork extension).  Shares the
+// SURFACE_CLASS_VERY_SLIPPERY short-circuit in mario_get_floor_class with
+// g_libsm64_force_slide but does NOT apply the slide-speed scale — so
+// Mario skates at vanilla SM64 ice friction (no deceleration / coasting)
+// rather than the slowed-down tube slide speed.  Host sets this while
+// Jak is in a target-ice-* state (snow level slippery sections).
+extern SM64_LIB_FN int g_libsm64_force_ice;
+extern SM64_LIB_FN void sm64_set_force_ice(int enabled);
+
 // Pause / resume just the music + jingle sequence players, leaving the
 // SFX player running.  Useful for games like Jak where pressing Start
 // should freeze the BGM (so unpause resumes from the exact same bar)

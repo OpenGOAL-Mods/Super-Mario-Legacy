@@ -4,6 +4,13 @@
 (require "engine/common-obs/generic-obs.gc")
 (require "engine/game/task/task-control.gc")
 
+;; libsm64: mirror Jak's bumper shove onto Mario.  Registered in
+;; kmachine.cpp; takes the shove source position (the bumper's world
+;; location in Jak units) and fires sm64_mario_take_damage with
+;; damage=0, so Mario gets the knockback animation + pushback arc but
+;; no HP loss and no hurt sound.
+(define-extern pc-sm64-shove-mario (function float float float none))
+
 ;; DECOMP BEGINS
 
 (deftype snow-bumper (process-drawable)
@@ -106,8 +113,14 @@
       (vector-! s5-0 s3-1 (-> arg0 root trans)))
     (let ((f30-3 (vector-xz-length s5-0)))
       (vector-normalize! s5-0 1.0)
-      (if (send-event *target* 'shove #f (static-attack-info ((vector s5-0) (shove-up (meters 1)) (shove-back f30-3))))
-        (set-time! (-> this last-shoved-player-time)))))
+      (when (send-event *target* 'shove #f (static-attack-info ((vector s5-0) (shove-up (meters 1)) (shove-back f30-3))))
+        (set-time! (-> this last-shoved-player-time))
+        ;; libsm64: Jak took the shove — knock Mario away from the
+        ;; bumper too with damage=0 so he gets the same "booted off"
+        ;; reaction without losing a wedge.  Source is the bumper's
+        ;; world trans so fake_determine_knockback_action aims Mario
+        ;; in the outward direction.
+        (pc-sm64-shove-mario (-> this root trans x) (-> this root trans y) (-> this root trans z)))))
   (none))
 
 (defstate snow-bumper-active-far-idle (snow-bumper)

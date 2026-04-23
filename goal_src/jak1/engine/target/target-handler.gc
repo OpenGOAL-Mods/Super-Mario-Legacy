@@ -40,6 +40,15 @@
 ;; not-sliding state.
 (define *sm64-in-tube-slide* #f)
 
+;; libsm64: "Jak is in one of the target-ice-* states" bridge (snow level
+;; slippery walking — target-ice-stance / target-ice-walk).  Written by
+;; C++'s `update_target_ice` each frame.  When #t, C++ flips
+;; `g_libsm64_force_ice` in libsm64 so Mario's floor class becomes
+;; VERY_SLIPPERY on whatever tri he's standing on, giving him the CCM /
+;; Snowman's Land skating feel without touching slide-speed scaling or
+;; forcing butt-slide.  Cleared on the falling edge.
+(define *sm64-on-ice* #f)
+
 ;; libsm64: "Mario just swung" window — bumped by sm64-spawn-attack-tracker
 ;; in mario.gc, read here in the 'get-attack-count case to decide whether
 ;; an enemy death should be attributed to Mario (and thus eligible for

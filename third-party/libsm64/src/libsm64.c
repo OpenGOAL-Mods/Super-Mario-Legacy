@@ -155,6 +155,19 @@ SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale)
     g_libsm64_force_slide_speed_scale = scale;
 }
 
+// "Force Mario to treat whatever floor he's on as ice" toggle.  Shares the
+// SURFACE_CLASS_VERY_SLIPPERY short-circuit in mario_get_floor_class with
+// g_libsm64_force_slide, but does NOT apply the slide-speed scale — so
+// Mario skates with vanilla SM64 friction tuning (CCM / Snowman's Land
+// ice feel) rather than the slowed-down tube speeds.  Set by the host
+// while Jak is in a target-ice-* state.
+SM64_LIB_FN int g_libsm64_force_ice = 0;
+
+SM64_LIB_FN void sm64_set_force_ice(int enabled)
+{
+    g_libsm64_force_ice = enabled ? 1 : 0;
+}
+
 // Pause / resume only the music + jingle sequence players (0 = level BGM,
 // 1 = misc-music/jingle) without touching the SFX player (2).
 //

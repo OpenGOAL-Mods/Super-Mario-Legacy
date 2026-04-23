@@ -397,13 +397,18 @@ s32 mario_get_floor_class(struct MarioState *m) {
     s32 floorClass;
 
     // Libsm64 fork: host-driven "force this floor to be very slippery"
-    // override.  Set by the integration layer (e.g. during Jak's
-    // target-tube states) so whatever geometry Mario is standing on
-    // behaves like a Cool, Cool Mountain slide — native SM64 slide
-    // physics (butt-slide retention, steep-floor acceleration, etc.)
-    // take over without needing to re-tag individual collision tris.
+    // override.  Set by the integration layer while Mario should behave
+    // like he's on an SM64 very-slippery surface:
+    //   - g_libsm64_force_slide : Jak's target-tube states (tube slides).
+    //     Also enables the tube speed scale in update_sliding_angle.
+    //   - g_libsm64_force_ice   : Jak's target-ice-* states (snow level
+    //     slippery walking).  Class only — no slide-speed scaling, so
+    //     Mario gets vanilla CCM / Snowman's Land ice friction.
+    // Both route through the same floor-class return because the class
+    // is what downstream friction / slope / steep checks consume.
     extern int g_libsm64_force_slide;
-    if (g_libsm64_force_slide) {
+    extern int g_libsm64_force_ice;
+    if (g_libsm64_force_slide || g_libsm64_force_ice) {
         return SURFACE_CLASS_VERY_SLIPPERY;
     }
 

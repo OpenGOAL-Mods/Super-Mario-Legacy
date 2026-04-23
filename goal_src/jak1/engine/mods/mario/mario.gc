@@ -34,6 +34,14 @@
 ;; transitions and mute Jak's music while SM64 music is enabled.
 (define-extern update-mario-music! (function none))
 
+;; Forward-decl: the lurker-crab skelgroup lives in bea.dgo
+;; (levels/beach/lurkercrab.gc).  We reference it from sm64-crab-shell
+;; below so Mario's shell-ride shows the crab art.  The symbol only
+;; resolves to a real skelgroup while beach is loaded — the
+;; spawn-sm64-crab-shell helper gates on level name to keep
+;; initialize-skeleton from dereferencing an unbound art group.
+(define-extern *lurkercrab-sg* skeleton-group)
+
 ;; ---------------------------------------------------------------------------
 ;; sm64-music — friendly-name helpers.  Map a GOAL symbol to the SM64
 ;; sequence id it corresponds to (see third-party/libsm64/src/decomp/include/
@@ -317,9 +325,87 @@
    (death-timer       int)
    (prev-jak-health   float)
    (prev-on-shell     symbol)
-   (shell-tracker-timer int))
+   (shell-tracker-timer int)
+   ;; Handle to the spawned sm64-crab-shell visual (spawn-sm64-crab-shell).
+   ;; Non-0 while Mario is on the shell, (the-as handle 0) otherwise.
+   ;; We track it so the idle loop's shell-exit edge can deactivate the
+   ;; process — the shell's own :trans follows Mario via *sm64-mario-pos*
+   ;; and doesn't know when to die on its own.
+   (shell-proc        handle))
   (:state-methods
     idle))
+
+;; ---------------------------------------------------------------------------
+;; sm64-crab-shell — visual-only process-drawable spawned under Mario while
+;; he's riding the koopa-shell action.  Uses the lurker-crab skelgroup +
+;; peek animation (frame 30 = fully curled into the shell), positioned on
+;; top of *sm64-mario-pos* and oriented to *sm64-mario-pos*.w so the
+;; crab rotates to face Mario's direction of travel.
+;;
+;; Lives in ENGINE/GAME so the `:init` code is available to spawn from
+;; sm64-mario-col.  At runtime the skelgroup reference (*lurkercrab-sg*)
+;; is resolved by symbol lookup — if beach isn't loaded the art group
+;; is unbound and initialize-skeleton crashes, so the caller
+;; (spawn-sm64-crab-shell) gates on current level == 'beach.
+;; ---------------------------------------------------------------------------
+(deftype sm64-crab-shell (process-drawable)
+  ()
+  :heap-base #x100)
+
+(defstate sm64-crab-shell-idle (sm64-crab-shell)
+  :trans
+    (behavior ()
+      ;; Follow Mario's world position + face angle every frame.
+      ;; *sm64-mario-pos* x/y/z = Jak-unit position, w = face angle in
+      ;; GOAL rotation units (the bridge in write_mario_bridge_data
+      ;; converts radians → 65536-per-full-turn).  ja-post in :post
+      ;; below rebuilds the skeleton's world matrix from these
+      ;; trans/quat fields each frame.
+      (set! (-> self root trans x) (-> *sm64-mario-pos* x))
+      (set! (-> self root trans y) (-> *sm64-mario-pos* y))
+      (set! (-> self root trans z) (-> *sm64-mario-pos* z))
+      (set! (-> self root trans w) 1.0)
+      (quaternion-axis-angle! (-> self root quat) 0.0 1.0 0.0 (-> *sm64-mario-pos* w)))
+  :code
+    (behavior ()
+      ;; Pin peek-ja at frame 1 — the fully-hidden pose.  The peek
+      ;; animation is authored 1→60: frame 1 = crab retracted into
+      ;; the shell (no legs / eyes / body visible), frame 30 = halfway
+      ;; poked out (what we had before, wrong), frame 60 = fully
+      ;; emerged.  Frame 1 gives the clean "Mario riding a shell"
+      ;; silhouette we want.
+      (ja-channel-set! 1)
+      (ja :group! lurkercrab-peek-ja :num! (identity (ja-aframe 1.0 0)))
+      (loop (suspend)))
+  ;; ja-post is the right post for a process-drawable whose root is a
+  ;; plain trsqv.  `transform-post` casts root to collide-shape and calls
+  ;; update-transforms! on it — that crashes immediately when root is
+  ;; actually a trsqv.  ja-post just evaluates the joint skeleton.
+  :post ja-post)
+
+(defbehavior sm64-crab-shell-init sm64-crab-shell ()
+  (set! (-> self root) (new 'process 'trsqv))
+  (set! (-> self root trans x) (-> *sm64-mario-pos* x))
+  (set! (-> self root trans y) (-> *sm64-mario-pos* y))
+  (set! (-> self root trans z) (-> *sm64-mario-pos* z))
+  (set! (-> self root trans w) 1.0)
+  (quaternion-identity! (-> self root quat))
+  ;; 15% smaller than the lurker-crab default.  Scale on trsqv
+  ;; multiplies through to the skeleton matrix each post, so the whole
+  ;; shell shrinks uniformly — no tweaks needed in :trans.
+  (set-vector! (-> self root scale) 0.65 0.45 0.65 1.0)
+  (initialize-skeleton self *lurkercrab-sg* '())
+  (go sm64-crab-shell-idle))
+
+(defun spawn-sm64-crab-shell ()
+  "Spawn a visual sm64-crab-shell under Mario.  Returns the
+   pointer-to-process (for handle conversion by the caller) or #f.
+   ONLY safe to call while beach is loaded — *lurkercrab-sg* is
+   resolved at spawn time and an unbound art group will crash
+   initialize-skeleton."
+  (process-spawn sm64-crab-shell
+                 :init sm64-crab-shell-init
+                 :name "sm64-crab-shell"))
 
 ;; ---- Helper: spawn a touch-tracker, clear its collide-as, configure event --
 
@@ -608,13 +694,31 @@
           (set! (-> self shell-tracker-timer) 0)
           ;; Pull camera back and track faster for shell speed
           (set! (-> *camera* stringMaxLength) (meters 20))
-          (set! (-> *camera* string-push-z) (meters 18)))
+          (set! (-> *camera* string-push-z) (meters 18))
+          ;; Spawn the visual crab-shell under Mario.  Gated on level ==
+          ;; 'beach because that's the only DGO we've wired lurkercrab
+          ;; art into — see bea.gd.  If Mario mounts the shell on any
+          ;; other level, we skip the spawn and fall back to the C++
+          ;; procedural koopa shell (MarioRenderer::render_shell).
+          (when *level*
+            (let ((cur-lev (level-get-target-inside *level*)))
+              (when (and cur-lev (= (-> cur-lev name) 'beach))
+                (let ((proc (spawn-sm64-crab-shell)))
+                  (when proc
+                    (set! (-> self shell-proc) (process->handle (ppointer->process proc)))))))))
         ;; Falling edge: just dismounted shell
         (when (and (not on-shell) (-> self prev-on-shell) *target*)
           (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
           ;; Restore default camera
           (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
+          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z))
+          ;; Despawn the visual crab-shell (if one was spawned).  Handle
+          ;; lookup is null-safe — if the process already died (e.g.
+          ;; level unload) handle->process returns #f and the deactivate
+          ;; call is skipped.
+          (let ((shell (handle->process (-> self shell-proc))))
+            (when shell (deactivate shell)))
+          (set! (-> self shell-proc) (the-as handle #f)))
         ;; While on shell: spawn a touch-tracker every frame with 'racer attack
         ;; 12-frame duration with per-frame spawn ensures continuous coverage at any shell speed
         (when (and on-shell *target*)
@@ -654,6 +758,7 @@
                          (= (-> cur-level name) 'rolling)
                          (= (-> cur-level name) 'lavatube)
                          (= (-> cur-level name) 'firecanyon)
+                         (= (-> cur-level name) 'beach)
                          (= (-> cur-level name) 'ogre)))
             (set! *sm64-skip-zoomer* #t)
             (set! *sm64-zoomer-requested* #t))))

@@ -1,5 +1,18 @@
 ("BEA.DGO"
- ("mistycannon.o"
+ (;; libsm64: racer (A-grav zoomer) infrastructure — same 8-file prefix
+  ;; every other racer-enabled DGO (mis/fic/lav/rol/ogr) opens with.
+  ;; Lets the zoomer-shell hookup in mario.gc fire on beach too so we
+  ;; can test Mario's koopa-shell state without having to be in a
+  ;; racer-native level.
+  "target-racer-h.o"
+  "racer-part.o"
+  "racer.o"
+  "target-racer.o"
+  "racer-states.o"
+  "collide-reaction-racer.o"
+  "eichar-racer+0-ag.go"
+  "tpage-1119.go"
+  "mistycannon.o"
   "babak-with-cannon.o"
   "air-h.o"
   "air.o"

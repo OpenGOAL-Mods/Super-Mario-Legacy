@@ -2426,6 +2426,24 @@ void LibSM64Manager::update_music_pause_state(bool is_paused) {
     std::scoped_lock lock(m_sm64_lock);
     sm64_set_music_paused(want_audio_paused ? 1 : 0);
   }
+
+  // Credits / ending loop maintenance.  Some ROM sequences are
+  // non-looping by design (seqId 0x1A = credits, 0x20 = ending), so
+  // when we map them to a Jak level (e.g. `beach` → 'credits in
+  // mario-music.gc) the track plays once and goes silent.  Poll the
+  // level sequence player every frame; if we think a track should be
+  // playing (`m_current_bg_music_seq != 0`) but libsm64 reports the
+  // player has shut itself off, re-queue the same seq so the track
+  // restarts from the top — an artificial loop.  Skip while paused
+  // because the player is intentionally disabled then (and enabled
+  // would come back naturally on unpause via the saved state in
+  // sm64_set_music_paused).
+  if (m_current_bg_music_seq != 0 && !want_audio_paused) {
+    std::scoped_lock lock(m_sm64_lock);
+    if (!sm64_bg_music_is_active()) {
+      sm64_play_music(0, m_current_bg_music_seq, 0);
+    }
+  }
 }
 
 u64 pc_sm64_play_music(u64 seq_id) {

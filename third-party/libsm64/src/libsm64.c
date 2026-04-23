@@ -172,6 +172,24 @@ static void pause_helper_release_all_notes(struct SequencePlayer *seqPlayer)
     }
 }
 
+// Returns 1 if the level-background sequence player (SEQ_PLAYER_LEVEL) is
+// either actively running OR frozen by our pause helper; returns 0 once
+// the sequence has run off the end of a non-looping track (e.g. the
+// ending/credits ROM sequence 0x1A).  The integration layer polls this
+// each tick to detect end-of-non-looping-track and re-queue the same
+// seq for an artificial loop.
+SM64_LIB_FN int sm64_bg_music_is_active(void)
+{
+    if (s_music_is_paused) {
+        // sm64_set_music_paused zeroed enabled to freeze the cursor, but
+        // conceptually we're still mid-track — report active so the
+        // integration layer doesn't interpret pause as end-of-track and
+        // spam play_music.
+        return 1;
+    }
+    return gSequencePlayers[SEQ_PLAYER_LEVEL].enabled != FALSE ? 1 : 0;
+}
+
 SM64_LIB_FN void sm64_set_music_paused(int paused)
 {
     if (paused && !s_music_is_paused) {

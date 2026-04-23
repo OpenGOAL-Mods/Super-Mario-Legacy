@@ -256,6 +256,13 @@ extern SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled);
 // was saved (so a genuinely-stopped track stays stopped).
 extern SM64_LIB_FN void sm64_set_music_paused(int paused);
 
+// Returns 1 if the background-music sequence player (SEQ_PLAYER_LEVEL, id 0)
+// is currently producing audio (or is frozen mid-track by sm64_set_music_paused),
+// 0 once the sequence has run past its end.  Non-looping ROM sequences like
+// the credits track (0x1A) naturally flip this to 0 at the end; host code can
+// poll and re-queue to fake a loop.
+extern SM64_LIB_FN int sm64_bg_music_is_active(void);
+
 // ---- Fake held-object API (libsm64 fork extension) ----------------------
 // Forces Mario into a light-object hold state without needing a real SM64
 // Object. Plants a zero-initialized sentinel into heldObj/usedObj and kicks

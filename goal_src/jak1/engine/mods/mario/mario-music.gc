@@ -173,7 +173,15 @@
        (when *level*
          (let* ((cur-lev     (-> (level-get-target-inside *level*) name))
                 (on-fs?      (mario-music-on-file-select? cur-lev))
-                (track       (if on-fs? 'file-select (mario-music-for-level cur-lev)))
+                ;; While Jak is riding a tube (target-tube family of
+                ;; states — see target-tube.gc), force the 'slide track
+                ;; regardless of level.  C++'s update_target_tube keeps
+                ;; *sm64-in-tube-slide* flipped to #t for the duration of
+                ;; the ride; mario.gc also forces Mario into
+                ;; ACT_STOMACH_SLIDE on the rising edge.
+                (track       (cond (*sm64-in-tube-slide* 'slide)
+                                   (on-fs?               'file-select)
+                                   (else                 (mario-music-for-level cur-lev))))
                 ;; Use the "forced" call whenever master-mode is outside
                 ;; 'game — both the level-is-forced set AND the
                 ;; load-game overlay, where the player sits in the menu

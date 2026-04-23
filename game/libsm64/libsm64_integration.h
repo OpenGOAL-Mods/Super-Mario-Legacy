@@ -469,6 +469,27 @@ class LibSM64Manager {
   // aren't present yet (e.g. kernel loaded but target-handler not linked).
   void update_zoomer_shell(u8* ee_mem);
 
+  // Target-tube slide: reads *target*'s state name each frame and detects
+  // the target-tube family (target-tube, target-tube-start,
+  // target-tube-jump, target-tube-hit — the Sunken sliding-tube rides).
+  // While in the family:
+  //   - sm64_set_force_slide(1) flips libsm64's floor-class check so
+  //     mario_get_floor_class returns VERY_SLIPPERY for whatever Jak
+  //     tube tri Mario lands on.  Native SM64 slide physics then handle
+  //     everything — acceleration, jumps-and-land-back, steep-slope
+  //     retention — same as Cool, Cool Mountain / Princess's Secret
+  //     Slide.  Mario is NOT glued to Jak.
+  //   - On the rising edge, ACT_BUTT_SLIDE is set once so the slide
+  //     starts immediately rather than requiring Mario to walk off a
+  //     ledge first.
+  //   - The *sm64-in-tube-slide* GOAL bridge is written so
+  //     update-mario-music! swaps the level's track for 'slide.
+  // On the falling edge, slide-force goes off, the music reverts, and
+  // if Mario is still coasting on a butt/stomach-slide action he's
+  // nudged into ACT_FREEFALL so he stands up cleanly at the bottom.
+  // No-op if Mario isn't spawned or *target* isn't live.
+  void update_target_tube(u8* ee_mem);
+
   // Edge-detect Jak's target-clone-anim state (fuel-cell pickup / blue
   // eco door / bridge cutscenes) and snapshot Mario's full sim state at
   // the rising edge.  When the cutscene ends, restore position + velocity
@@ -836,6 +857,12 @@ class LibSM64Manager {
   // within the existing sm64_lock scope, avoiding external sm64 API calls.
   bool m_in_launcher = false;
   math::Vector3f m_launcher_target_jak{0, 0, 0};  // Jak-unit position to glue to
+
+  // ---- Target-tube slide state ----------------------------------------
+  // Last frame's value of "is Jak in a target-tube-* state?".  Used by
+  // update_target_tube for edge detection — on the rising edge we force
+  // Mario into ACT_STOMACH_SLIDE, on the falling edge we nudge him out.
+  bool m_prev_in_tube_slide = false;
   // Post-glue settle: when a glue state (launcher, warp, continue) ends, keep
   // Mario pinned to Jak's position for a few extra frames so that
   // auto_sync_collision has time to detect the new level and reload collision

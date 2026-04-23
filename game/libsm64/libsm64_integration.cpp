@@ -5007,6 +5007,144 @@ void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
 }
 
 // --------------------------------------------------------------------------
+// Target-tube slide
+// --------------------------------------------------------------------------
+//
+// When Jak rides one of the Sunken-Temple transparent tubes he enters the
+// target-tube-* family:
+//   target-tube-start — entering the tube
+//   target-tube       — sliding through it
+//   target-tube-jump  — jumping off it (still counts as "on the tube")
+//   target-tube-hit   — damaged while sliding
+// target-tube-death (Jak died mid-slide) is deliberately excluded so the
+// slide ends when Jak dies.
+//
+// Mario's side mirrors this: on the rising edge we force him into
+// ACT_BUTT_SLIDE (the sit-down pose used on Cool, Cool Mountain's slide
+// and Princess's Secret Slide) so he visually matches Jak's slide
+// posture.  A GOAL bridge symbol
+// `*sm64-in-tube-slide*` tracks the current state so mario-music.gc can
+// swap the track for 'slide (SM64's slide theme) while Jak is riding.
+// Both are cleared on the falling edge so the previous level track and
+// Mario's normal action resume.
+
+void LibSM64Manager::update_target_tube(u8* ee_mem) {
+  if (!m_initialized || m_mario_id < 0 || !ee_mem) {
+    m_prev_in_tube_slide = false;
+    return;
+  }
+
+  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 false_val = s7.offset;
+  if (false_val == 0) return;
+
+  // Read *target*'s state.name — same pattern as update_launcher_glue.
+  auto target_sym = jak1::intern_from_c("*target*");
+  if (target_sym.offset == 0) return;
+  u32 target_ptr = target_sym->value;
+  bool in_tube = false;
+  if (target_ptr != 0 && target_ptr != false_val) {
+    constexpr u32 STATE_RUNTIME_OFF = 52;  // process.state, basic-deref offset
+    if (target_ptr + STATE_RUNTIME_OFF + 4 <= EE_MAIN_MEM_SIZE) {
+      u32 state_ptr;
+      std::memcpy(&state_ptr, ee_mem + target_ptr + STATE_RUNTIME_OFF, 4);
+      if (state_ptr != 0 && state_ptr != false_val && state_ptr < EE_MAIN_MEM_SIZE) {
+        // stack-frame.name is the first field — symbol at offset 0.
+        if (state_ptr + 4 <= EE_MAIN_MEM_SIZE) {
+          u32 state_name;
+          std::memcpy(&state_name, ee_mem + state_ptr, 4);
+
+          auto sym_of = [](const char* name) -> u32 {
+            auto s = jak1::find_symbol_from_c(name);
+            return s.offset;
+          };
+          // Resolved lazily each tick — cheap hash-table reads; the syms
+          // might not exist until sunken's DGO is loaded, in which case
+          // sym_of returns 0 and the compare short-circuits to false.
+          const u32 sym_tube       = sym_of("target-tube");
+          const u32 sym_tube_start = sym_of("target-tube-start");
+          const u32 sym_tube_jump  = sym_of("target-tube-jump");
+          const u32 sym_tube_hit   = sym_of("target-tube-hit");
+          in_tube =
+              (sym_tube       && state_name == sym_tube)       ||
+              (sym_tube_start && state_name == sym_tube_start) ||
+              (sym_tube_jump  && state_name == sym_tube_jump)  ||
+              (sym_tube_hit   && state_name == sym_tube_hit);
+        }
+      }
+    }
+  }
+
+  // Push current state to the GOAL bridge symbol so update-mario-music!
+  // can see it without re-reading *target*.  find_symbol_from_c returns
+  // offset=0 until target-handler.gc is linked — harmless, just skip.
+  auto bridge = jak1::find_symbol_from_c("*sm64-in-tube-slide*");
+  if (bridge.offset != 0) {
+    const u32 desired = in_tube ? true_val : false_val;
+    if (bridge->value != desired) {
+      bridge->value = desired;
+    }
+  }
+
+  constexpr uint32_t kActButtSlide              = 0x00840452;  // sm64.h ACT_BUTT_SLIDE
+
+  // Flip the libsm64-side "treat every floor as very slippery" global.
+  // This mirrors the SM64 slide level treatment: mario_get_floor_class
+  // returns SURFACE_CLASS_VERY_SLIPPERY, mario_floor_is_slippery /
+  // _is_slope / _is_steep all follow, and Mario's native slide physics
+  // handle acceleration, transitions, jump-and-land-back-in-slide, etc.
+  // We don't glue Mario to Jak — they slide independently through the
+  // same tube geometry, matching vanilla SM64 behaviour on slide levels
+  // (Mario's speed is set by ramp angle + gravity, not by coupling to
+  // another actor).
+  {
+    std::scoped_lock lock(m_sm64_lock);
+    sm64_set_force_slide(in_tube ? 1 : 0);
+  }
+
+  // Rising edge: put Mario into ACT_BUTT_SLIDE so he starts the slide
+  // immediately rather than walking onto the slope first.  Once in the
+  // slide action, SM64's native logic keeps him there (jumps transition
+  // to butt-slide-air and land back in butt-slide because the floor is
+  // force-slippery), so per-frame re-forcing isn't needed.  Skipped if
+  // he's already in a butt/stomach-slide variant.
+  constexpr uint32_t kActFlagButtOrStomachSlide = 0x00400000;
+  if (in_tube && !m_prev_in_tube_slide) {
+    uint32_t current_action = 0;
+    {
+      std::lock_guard<std::mutex> g(m_geo_mutex);
+      current_action = m_state.action;
+    }
+    if ((current_action & kActFlagButtOrStomachSlide) == 0) {
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_set_mario_action(m_mario_id, kActButtSlide);
+      lg::info("[libsm64] target-tube: Mario → ACT_BUTT_SLIDE (force_slide on)");
+    }
+  }
+
+  // Falling edge: slide-force goes off via the setter above.  If Mario is
+  // still coasting in a butt/stomach-slide action on what is now
+  // non-slippery ground, nudge him into freefall so he stands up at the
+  // bottom instead of sliding to a stop on a flat patch and looking
+  // awkward.
+  if (!in_tube && m_prev_in_tube_slide) {
+    uint32_t current_action = 0;
+    {
+      std::lock_guard<std::mutex> g(m_geo_mutex);
+      current_action = m_state.action;
+    }
+    if ((current_action & kActFlagButtOrStomachSlide) != 0) {
+      constexpr uint32_t kActFreefall = 0x0100088C;  // ACT_FREEFALL
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_set_mario_action(m_mario_id, kActFreefall);
+      lg::info("[libsm64] target-tube: Mario exited slide → ACT_FREEFALL");
+    }
+  }
+
+  m_prev_in_tube_slide = in_tube;
+}
+
+// --------------------------------------------------------------------------
 // GOAL-state glue (launchers, warp gates, continue points)
 // --------------------------------------------------------------------------
 //

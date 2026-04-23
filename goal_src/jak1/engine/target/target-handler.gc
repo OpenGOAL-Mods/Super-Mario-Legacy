@@ -31,6 +31,15 @@
 ;; independently — no tug-of-war that stalls the platform partway.
 (define *sm64-on-sunken-elevator-up* #f)
 
+;; libsm64: "Jak is in one of the target-tube-* states" bridge.  Written by
+;; C++'s `update_target_tube` every frame (it reads *target*'s state name
+;; and sets this to #t whenever Jak is sliding on a tube).  GOAL reads it
+;; in `update-mario-music!` to force the 'slide track while Jak is in a
+;; tube.  C++ also uses its own cached edge of this flag to put Mario
+;; into ACT_STOMACH_SLIDE on the rising edge.  Initial #f is the
+;; not-sliding state.
+(define *sm64-in-tube-slide* #f)
+
 ;; libsm64: "Mario just swung" window — bumped by sm64-spawn-attack-tracker
 ;; in mario.gc, read here in the 'get-attack-count case to decide whether
 ;; an enemy death should be attributed to Mario (and thus eligible for

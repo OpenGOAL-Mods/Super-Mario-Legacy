@@ -396,6 +396,17 @@ void mario_set_forward_vel(struct MarioState *m, f32 forwardVel) {
 s32 mario_get_floor_class(struct MarioState *m) {
     s32 floorClass;
 
+    // Libsm64 fork: host-driven "force this floor to be very slippery"
+    // override.  Set by the integration layer (e.g. during Jak's
+    // target-tube states) so whatever geometry Mario is standing on
+    // behaves like a Cool, Cool Mountain slide — native SM64 slide
+    // physics (butt-slide retention, steep-floor acceleration, etc.)
+    // take over without needing to re-tag individual collision tris.
+    extern int g_libsm64_force_slide;
+    if (g_libsm64_force_slide) {
+        return SURFACE_CLASS_VERY_SLIPPERY;
+    }
+
     // The slide terrain type defaults to slide slipperiness.
     // This doesn't matter too much since normally the slide terrain
     // is checked for anyways.

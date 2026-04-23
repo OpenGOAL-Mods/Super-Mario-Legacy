@@ -124,6 +124,37 @@ SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled)
     g_libsm64_no_slippery_mario = enabled ? 1 : 0;
 }
 
+// "Force Mario to treat whatever floor he's on as very slippery" toggle.
+// Read by mario.c's mario_get_floor_class to short-circuit to
+// SURFACE_CLASS_VERY_SLIPPERY regardless of the underlying surface type.
+// Set by the host while Mario should be on a slide — e.g. during Jak's
+// target-tube family of states, where we want SM64's native slide
+// physics to take over the Jak geometry without having to re-tag the
+// collision tris themselves.
+SM64_LIB_FN int g_libsm64_force_slide = 0;
+
+SM64_LIB_FN void sm64_set_force_slide(int enabled)
+{
+    g_libsm64_force_slide = enabled ? 1 : 0;
+}
+
+// Multiplier applied to slide acceleration and the top-speed cap inside
+// mario_actions_moving.c's update_sliding_angle when
+// g_libsm64_force_slide is on.  1.0 = vanilla SM64 slide speed (~100
+// SM64u/frame cap, ~10 accel on very-slippery).  0.25 quarters both,
+// matching the host's current "Jak tube feels too fast" tuning.  Set to
+// 1.0 when force-slide toggles off so any subsequent non-forced slides
+// (should Mario ever trigger a genuine TERRAIN_SLIDE tri) still feel
+// vanilla.
+SM64_LIB_FN float g_libsm64_force_slide_speed_scale = 0.5f;
+
+SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale)
+{
+    if (scale < 0.01f) scale = 0.01f;
+    if (scale > 4.0f)  scale = 4.0f;
+    g_libsm64_force_slide_speed_scale = scale;
+}
+
 // Pause / resume only the music + jingle sequence players (0 = level BGM,
 // 1 = misc-music/jingle) without touching the SFX player (2).
 //

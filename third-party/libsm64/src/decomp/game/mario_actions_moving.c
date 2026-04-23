@@ -164,6 +164,19 @@ void update_sliding_angle(struct MarioState *m, f32 accel, f32 lossFactor) {
     s32 newFacingDYaw;
     s16 facingDYaw;
 
+    // libsm64 fork: while the host has force_slide enabled (e.g. Jak's
+    // target-tube family), scale acceleration down so the steeper-than-
+    // SM64-typical Jak tubes don't send Mario rocketing off the end at
+    // unmanageable speeds.  The top-speed cap below is scaled by the
+    // same factor for consistency.
+    extern int g_libsm64_force_slide;
+    extern float g_libsm64_force_slide_speed_scale;
+    f32 slide_scale = 1.0f;
+    if (g_libsm64_force_slide) {
+        slide_scale = g_libsm64_force_slide_speed_scale;
+        accel *= slide_scale;
+    }
+
     struct SM64SurfaceCollisionData *floor = m->floor;
     s16 slopeAngle = atan2s(floor->normal.z, floor->normal.x);
     f32 steepness = sqrtf(floor->normal.x * floor->normal.x + floor->normal.z * floor->normal.z);
@@ -210,9 +223,12 @@ void update_sliding_angle(struct MarioState *m, f32 accel, f32 lossFactor) {
 
     //! Speed is capped a frame late (butt slide HSG)
     m->forwardVel = sqrtf(m->slideVelX * m->slideVelX + m->slideVelZ * m->slideVelZ);
-    if (m->forwardVel > 100.0f) {
-        m->slideVelX = m->slideVelX * 100.0f / m->forwardVel;
-        m->slideVelZ = m->slideVelZ * 100.0f / m->forwardVel;
+    // libsm64 fork: cap scales with slide_scale when force_slide is on.
+    // Vanilla cap is 100 SM64u/frame (HSG speed); 0.25 scale = 25 SM64u/frame.
+    f32 slide_cap = 100.0f * slide_scale;
+    if (m->forwardVel > slide_cap) {
+        m->slideVelX = m->slideVelX * slide_cap / m->forwardVel;
+        m->slideVelZ = m->slideVelZ * slide_cap / m->forwardVel;
     }
 
     if (newFacingDYaw < -0x4000 || newFacingDYaw > 0x4000) {

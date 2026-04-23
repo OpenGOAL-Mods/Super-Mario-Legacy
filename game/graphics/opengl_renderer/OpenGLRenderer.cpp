@@ -1219,12 +1219,12 @@ void OpenGLRenderer::tick_mario_sm64() {
   } else if (mgr.follow_mario && !launcher_active && !mgr.target_grabbed) {
     auto cur_state = mgr.get_state();
     uint32_t wedges = (static_cast<uint16_t>(cur_state.health) >> 8) & 0xF;
-    // libsm64: sunken-elevator.gc's plat-button-move-upward sets
-    // *sm64-on-sunken-elevator-up* for the duration of the ride up.
-    // Syncing Jak to Mario while the elevator moves causes them to
-    // fight over the platform and stall halfway — skip the sync so
-    // they each ride up on their own.  Cleared on :exit of the
-    // upward-move state, so no stuck-on risk.
+    // libsm64: skip Mario→Jak sync during sunken-elevator upward ride.
+    // Both need to reach the top independently; syncing stalls it.  The
+    // target-tube slide DOESN'T skip anymore — Mario slides on his own
+    // via SM64's native slide physics (driven by sm64_set_force_slide),
+    // and we still want follow_mario to keep the camera on him by
+    // tugging Jak along.
     bool on_sunken_elev_up = false;
     {
       u32 false_val = offset_of_s7();
@@ -1256,6 +1256,10 @@ void OpenGLRenderer::tick_mario_sm64() {
   // 9. Zoomer shell
   auto t16 = Clock::now();
   mgr.update_zoomer_shell(g_ee_main_mem);
+  // Target-tube slide — piggybacks on the zoomer-shell timing bucket since
+  // both are cheap state-name polls; splitting them into their own bucket
+  // isn't worth the added noise in the profile table.
+  mgr.update_target_tube(g_ee_main_mem);
   auto t17 = Clock::now();
 
   // Accumulate timings (microseconds)

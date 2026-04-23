@@ -247,6 +247,23 @@ extern SM64_LIB_FN void sm64_set_mario_scale(float scale);
 extern SM64_LIB_FN int g_libsm64_no_slippery_mario;
 extern SM64_LIB_FN void sm64_set_no_slippery_mario(int enabled);
 
+// "Force slide" toggle (libsm64 fork extension).  When 1, mario_get_floor_class
+// short-circuits to SURFACE_CLASS_VERY_SLIPPERY for whatever floor Mario
+// is on, which propagates into mario_floor_is_slippery / _is_slope /
+// _is_steep and lets native SM64 slide physics run on ordinary host
+// geometry.  Host sets this during slide-like states (e.g. Jak's
+// target-tube) so the belly / butt-slide actions behave like Cool, Cool
+// Mountain instead of stopping on the first flat patch.
+extern SM64_LIB_FN int g_libsm64_force_slide;
+extern SM64_LIB_FN void sm64_set_force_slide(int enabled);
+
+// Scale applied to slide acceleration and the top-speed cap while
+// g_libsm64_force_slide is on.  Default 0.25 (quarter speed) so Jak-scale
+// tubes don't send Mario rocketing off the geometry.  Clamped to
+// [0.01, 4.0].  1.0 restores vanilla SM64 slide tuning.
+extern SM64_LIB_FN float g_libsm64_force_slide_speed_scale;
+extern SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale);
+
 // Pause / resume just the music + jingle sequence players, leaving the
 // SFX player running.  Useful for games like Jak where pressing Start
 // should freeze the BGM (so unpause resumes from the exact same bar)

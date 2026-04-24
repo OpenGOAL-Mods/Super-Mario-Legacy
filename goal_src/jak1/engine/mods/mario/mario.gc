@@ -476,19 +476,6 @@
 
 (defstate idle (sm64-mario-col)
   :virtual #t
-  :exit (behavior ()
-    ;; Runs when this process is deactivated for ANY reason:
-    ;; level transition, file load, game reset.  Kill the crab-shell
-    ;; here so MERC never renders it against a heap that's being
-    ;; overwritten.  Also clear Jak's racer action / camera so they
-    ;; don't persist into the next level or the reloaded game.
-    (kill-by-name "sm64-crab-shell" *active-pool*)
-    (when *target*
-      (logclear! (-> *target* control root-prim prim-core action) (collide-action racer)))
-    ;; (when *camera*
-    ;;   (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-    ;;   (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
-      )
   :code (behavior ()
     (set! (-> self prev-attacking) #f)
     (set! (-> self prev-ground-pound) #f)

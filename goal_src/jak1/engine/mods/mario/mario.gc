@@ -355,14 +355,12 @@
 (defstate sm64-crab-shell-idle (sm64-crab-shell)
   :trans
     (behavior ()
-      ;; Level-transition guard: deactivate before ja-post can read
-      ;; stale geometry from the unloading level's heap.
-      ;; level-get-target-inside returns #f the instant the old level
-      ;; goes inactive — before sunken/next level writes over the heap.
-      ;; (deactivate self) uses return-from-thread so :post is skipped.
-      (when (not (level-get-target-inside *level*))
-        (deactivate self))
       ;; Follow Mario's world position + face angle every frame.
+      ;; *sm64-mario-pos* x/y/z = Jak-unit position, w = face angle in
+      ;; GOAL rotation units (the bridge in write_mario_bridge_data
+      ;; converts radians → 65536-per-full-turn).  ja-post in :post
+      ;; below rebuilds the skeleton's world matrix from these
+      ;; trans/quat fields each frame.
       (set! (-> self root trans x) (-> *sm64-mario-pos* x))
       (set! (-> self root trans y) (-> *sm64-mario-pos* y))
       (set! (-> self root trans z) (-> *sm64-mario-pos* z))
@@ -476,19 +474,6 @@
 
 (defstate idle (sm64-mario-col)
   :virtual #t
-  :exit (behavior ()
-    ;; Runs when this process is deactivated for ANY reason:
-    ;; level transition, file load, game reset.  Kill the crab-shell
-    ;; here so MERC never renders it against a heap that's being
-    ;; overwritten.  Also clear Jak's racer action / camera so they
-    ;; don't persist into the next level or the reloaded game.
-    (kill-by-name "sm64-crab-shell" *active-pool*)
-    (when *target*
-      (logclear! (-> *target* control root-prim prim-core action) (collide-action racer)))
-    ;; (when *camera*
-    ;;   (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-    ;;   (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
-      )
   :code (behavior ()
     (set! (-> self prev-attacking) #f)
     (set! (-> self prev-ground-pound) #f)
@@ -730,17 +715,6 @@
                     (not (time-elapsed? (-> self state-time) (-> self duration)))))))))
         (set! (-> self prev-butt-slide) butt-sliding))
       ;; ---- Shell riding: racer-like behavior ----
-      ;; Level-transition cleanup: if shell-proc is set but no level is
-      ;; active, clear our internal state.  target-handler already killed
-      ;; the shell process and cleared the racer flag, but shell-proc /
-      ;; prev-on-shell still need to be reset so the next rising edge
-      ;; doesn't try to re-spawn in the new level before C++ clears
-      ;; *sm64-mario-on-shell*.
-      (when (!= (-> self shell-proc) (the-as handle #f))
-        (when (not (level-get-target-inside *level*))
-          (set! (-> self shell-proc) (the-as handle #f))
-          (set! (-> self prev-on-shell) #f)
-          (set! (-> self shell-tracker-timer) 0)))
       (let ((on-shell (> (-> *sm64-mario-on-shell* x) 0.5)))
         ;; Rising edge: just mounted shell
         (when (and on-shell (not (-> self prev-on-shell)) *target*)

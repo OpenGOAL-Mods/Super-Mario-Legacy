@@ -341,13 +341,18 @@ void MarioRenderer::render(const float* camera_matrix,
   glDrawArrays(GL_TRIANGLES, 0, m_num_triangles * 3);
   glBindVertexArray(0);
 
-  // Draw shell if Mario is in a shell-riding action. render_shell() binds the
-  // shell's own texture so the dome shows the green pattern; belly and ring
-  // vertices carry negative UVs, causing the shader to use vertex colour.
+  // Shell visual is now handled GOAL-side by the sm64-crab-shell process
+  // (mario.gc) — a subtype of the global lurkercrab type.  Leaving the
+  // procedural-shell path available here but disabled by default so we
+  // don't stack two overlapping shells on Mario.  Re-enable by setting
+  // the block to run (or by re-exposing the bool on LibSM64Manager) if
+  // you want to test the ROM-extracted koopa shell as a fallback.
+#if 0
   auto state = mgr.get_render_state();
   if (state.action & kActFlagRidingShell) {
     render_shell(state);
   }
+#endif
 
   glBindTexture(GL_TEXTURE_2D, 0);
 }

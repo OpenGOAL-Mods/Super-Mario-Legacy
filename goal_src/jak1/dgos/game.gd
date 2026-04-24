@@ -346,6 +346,17 @@
   "ropebridge.o"
   "ticky.o"
   "hud-classes-pc.o" ;; added
+  ;; mario mod: keep lurker-crab stuff loaded so Mario's shell-ride
+  ;; visual is always available, no matter which level is current.
+  ;; Same pattern as OpenGOAL-Mods/OG-FlutFlut-Legacy uses for
+  ;; flutflut: promote the code + art-group into GAME.CGO so they
+  ;; stick around for the whole play session.  Textures come from
+  ;; whichever level currently holds the tpage-212..215 pages —
+  ;; beach has them natively, and the other racer-family levels
+  ;; (mis/fic/lav/rol/ogr) can receive them via the decompiler
+  ;; extract-mirror step when we wire the shell visual back up.
+  "lurkercrab.o"
+  "lurkercrab-ag.go"
   "mario-settings.o" ;; mario mod
   "mario.o"
   "mario-music.o" ;; mario mod

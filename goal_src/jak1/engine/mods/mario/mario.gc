@@ -8,6 +8,10 @@
 (bundles "ENGINE.CGO" "GAME.CGO")
 (require "engine/common-obs/process-drawable.gc")
 (require "engine/common-obs/generic-obs.gc")
+;; Pull in the lurkercrab type declaration so we can deftype
+;; sm64-crab-shell as a subtype.  The lurkercrab .o itself is
+;; promoted into GAME.CGO (see game.gd) so it's always linked.
+(require "levels/beach/lurkercrab.gc")
 
 ;; ---------------------------------------------------------------------------
 ;; C++ damage function — registered via make_function_symbol_from_c in kmachine.
@@ -33,6 +37,12 @@
 ;; sm64-mario-col's idle loop calls it every tick to track level
 ;; transitions and mute Jak's music while SM64 music is enabled.
 (define-extern update-mario-music! (function none))
+
+;; The lurker-crab skelgroup is global now (see game.gd — `lurkercrab.o`
+;; and `lurkercrab-ag.go` are promoted into GAME.CGO following the
+;; FlutFlut Legacy pattern).  Forward-decl so the sm64-crab-shell
+;; subtype below can reference the symbol at compile time.
+(define-extern *lurkercrab-sg* skeleton-group)
 
 ;; ---------------------------------------------------------------------------
 ;; sm64-music — friendly-name helpers.  Map a GOAL symbol to the SM64
@@ -317,9 +327,156 @@
    (death-timer       int)
    (prev-jak-health   float)
    (prev-on-shell     symbol)
-   (shell-tracker-timer int))
+   (shell-tracker-timer int)
+   ;; Handle to the spawned sm64-crab-shell visual (see
+   ;; spawn-sm64-crab-shell below).  Non-zero while Mario is on the
+   ;; shell, (the-as handle 0) otherwise.  Shell follows Mario via
+   ;; its own :trans; the falling edge in our idle loop deactivates it.
+   (shell-proc        handle))
   (:state-methods
     idle))
+
+;; ---------------------------------------------------------------------------
+;; sm64-crab-shell — Mario's shell-ride visual.
+;;
+;; Subtype of `lurkercrab` (global actor since game.gd promotion — see
+;; comment at top of this file).  We inherit every slot + method the
+;; real crab has, but override the init + state machine so the process
+;; never touches nav-mesh, navigation, or collision AI — none of which
+;; exist outside a proper level with a nav-mesh.
+;;
+;; How it stays crash-free:
+;;   - `sm64-crab-shell-init` replicates the collide-shape allocation
+;;     from `lurkercrab`'s init-from-entity! (needed because the
+;;     `collide-info` field is typed collide-shape-moving in the parent
+;;     deftype and transform-post casts to it) but SKIPS
+;;     `init-defaults!`.  init-defaults! is where `(new 'process
+;;     'nav-control ...)` gets created, which is what crashes when the
+;;     level has no nav-mesh.
+;;   - `sm64-crab-shell-idle` is a custom state that never transitions
+;;     to any nav-enemy state.  Neck joint, pursuit, patrol, notice,
+;;     attack — all dead code for us.
+;;   - The process name is "sm64-crab-shell" so game-info.gc's
+;;     initialize! teleport path can clean us up via kill-by-name
+;;     before the old level unloads.
+;; ---------------------------------------------------------------------------
+
+(deftype sm64-crab-shell (lurkercrab)
+  ())
+
+(defstate sm64-crab-shell-idle (sm64-crab-shell)
+  :trans (behavior ()
+    ;; Self-terminate on any invariant break.  Mario off the shell,
+    ;; target gone mid-teleport, level gone — all reasons to bail so
+    ;; we don't keep a dangling process around references freed memory.
+    (cond
+      ((not *target*)
+       (deactivate self))
+      ((< (-> *sm64-mario-on-shell* x) 0.5)
+       (deactivate self))
+      ((not *level*)
+       (deactivate self))
+      (else
+       ;; Pin the shell's world transform to Mario every frame.
+       ;; *sm64-mario-pos* is refreshed by write_mario_bridge_data
+       ;; (libsm64_integration.cpp) on each SM64 tick — x/y/z are in
+       ;; Jak units, w is face angle in GOAL rotation units (65536
+       ;; per full turn, same as quaternion-axis-angle! expects).
+       (let ((root (-> self collide-info)))
+         (when root
+           (set! (-> root trans x) (-> *sm64-mario-pos* x))
+           (set! (-> root trans y) (-> *sm64-mario-pos* y))
+           (set! (-> root trans z) (-> *sm64-mario-pos* z))
+           (set! (-> root trans w) 1.0)
+           (quaternion-axis-angle! (-> root quat)
+                                   0.0 1.0 0.0
+                                   (-> *sm64-mario-pos* w)))))))
+  :code (behavior ()
+    ;; Pin peek-ja at frame 1 — fully-retracted pose so the crab reads
+    ;; as a closed shell.  The lurkercrab idle-anim is frame-0 of the
+    ;; walk cycle which shows legs/eyes, not what we want.
+    (ja-channel-set! 1)
+    (ja :group! lurkercrab-peek-ja :num! (identity (ja-aframe 1.0 0)))
+    (loop (suspend)))
+  ;; transform-post = ja-post (skeleton) + update-transforms! on the
+  ;; collide-shape root.  We have a collide-shape-moving (inherited
+  ;; from nav-enemy's root type), so this is the correct post.
+  :post transform-post)
+
+(defbehavior sm64-crab-shell-init sm64-crab-shell ()
+  "Minimal init for the shell visual.  Does what
+   `lurkercrab::init-from-entity!` does MINUS:
+     - init-defaults! (creates nav-control — needs nav-mesh)
+     - process-drawable-from-entity! (needs an entity)
+     - particles (group-lurkercrab-slide — cosmetic, skip)
+     - the final `(go nav-enemy-idle)` (we go to our own state)
+
+   Entity-less by design: initialize-skeleton's no-entity fallback
+   uses `(-> *level* level-default art-group)` as the art-group
+   load-dir.  lurkercrab-ag is in GAME.CGO (see game.gd), which on
+   boot registers into level-default via joint.gc's art-group
+   login — so the load-to-heap-by-name lookup hits the cached entry
+   without ever re-loading from disk.  This avoids the
+   cross-teleport art-group reload loop that was pushing the global
+   heap into type-table territory and zeroing/scribbling random
+   types (font-context, etc).
+
+   `collide-with` and `collide-as` are 0 so the shell is invisible
+   to Jak's and enemies' collision systems.  Render-only."
+  (let ((cshape (new 'process 'collide-shape-moving self (collide-list-enum usually-hit-by-player))))
+    (set! (-> cshape dynam) (copy *standard-dynamics* 'process))
+    (set! (-> cshape reaction) default-collision-reaction)
+    (set! (-> cshape no-reaction)
+          (the-as (function collide-shape-moving collide-shape-intersect vector vector none) nothing))
+    (let ((prim (new 'process 'collide-shape-prim-sphere cshape (the-as uint 0))))
+      (set! (-> prim prim-core collide-as) (the-as collide-kind 0))
+      (set! (-> prim collide-with)          (the-as collide-kind 0))
+      (set-vector! (-> prim local-sphere) 0.0 0.0 0.0 2048.0)
+      (set-root-prim! cshape prim))
+    (set! (-> cshape nav-radius) 0.0)
+    (backup-collide-with-as cshape)
+    (set! (-> self collide-info) cshape))
+  ;; Start pinned to Mario (idle :trans keeps us there every frame after).
+  (set! (-> self collide-info trans x) (-> *sm64-mario-pos* x))
+  (set! (-> self collide-info trans y) (-> *sm64-mario-pos* y))
+  (set! (-> self collide-info trans z) (-> *sm64-mario-pos* z))
+  (set! (-> self collide-info trans w) 1.0)
+  (quaternion-identity! (-> self collide-info quat))
+  ;; 15% smaller than the natural lurker-crab.
+  (set-vector! (-> self collide-info scale) 0.65 0.45 0.65 1.0)
+  ;; Merc skeleton load — uses level-default's art-group load-dir
+  ;; (lurkercrab-ag is cached there from GAME.CGO boot, see docstring).
+  (initialize-skeleton self *lurkercrab-sg* '())
+  (update-transforms! (-> self collide-info))
+  (set-vector! (-> self root scale) 0.65 0.45 0.65 1.0)
+  (go sm64-crab-shell-idle))
+
+(defmethod deactivate ((this sm64-crab-shell))
+  "Belt-and-suspenders cleanup on shell teardown.  Hides the draw
+   control and clears the skeleton BEFORE chaining to the parent
+   lurkercrab / process-drawable deactivate so any render-thread
+   dispatch that's mid-frame skips our entry via the `hidden` gate
+   in dma-add-process-drawable / drawable.gc:448.  Without this,
+   a teleport sequence that kills us while firecanyon is unloading
+   can race the render thread into reading our draw's stale
+   texture / merc references."
+  (when (-> this draw)
+    (logior! (-> this draw status) (draw-status hidden no-anim no-skeleton-update)))
+  ;; Chain to parent — lurkercrab inherits process-drawable's
+  ;; deactivate (no override), which cleans particles / sound and
+  ;; calls process's deactivate (which runs process-disconnect).
+  ((method-of-type process-drawable deactivate) this)
+  (none))
+
+(defun spawn-sm64-crab-shell ()
+  "Spawn a sm64-crab-shell process near Mario.  Entity-less —
+   initialize-skeleton falls through to level-default which has
+   lurkercrab-ag cached from GAME.CGO's boot-time art-group login.
+   No art-group reload per spawn, so rapid remount/teleport cycles
+   don't accumulate allocations in the global heap."
+  (process-spawn sm64-crab-shell
+                 :init sm64-crab-shell-init
+                 :name "sm64-crab-shell"))
 
 ;; ---- Helper: spawn a touch-tracker, clear its collide-as, configure event --
 
@@ -608,13 +765,28 @@
           (set! (-> self shell-tracker-timer) 0)
           ;; Pull camera back and track faster for shell speed
           (set! (-> *camera* stringMaxLength) (meters 20))
-          (set! (-> *camera* string-push-z) (meters 18)))
+          (set! (-> *camera* string-push-z) (meters 18))
+          ;; Spawn the visual crab shell under Mario.  spawn-sm64-crab-shell
+          ;; handles the entity-borrow / art-resolution internally; if the
+          ;; current level has no borrowable entity (unusual — happens
+          ;; during some teleport windows) it returns #f and we just live
+          ;; without a visual for this mount.
+          (let ((proc (spawn-sm64-crab-shell)))
+            (when proc
+              (set! (-> self shell-proc) (process->handle (ppointer->process proc))))))
         ;; Falling edge: just dismounted shell
         (when (and (not on-shell) (-> self prev-on-shell) *target*)
           (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
           ;; Restore default camera
           (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
+          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z))
+          ;; Deactivate the visual crab shell if we spawned one.
+          ;; handle->process returns #f for already-dead processes (e.g. the
+          ;; shell self-terminated from its :trans invariant checks), so
+          ;; the deactivate is skipped cleanly.
+          (let ((shell (handle->process (-> self shell-proc))))
+            (when shell (deactivate shell)))
+          (set! (-> self shell-proc) (the-as handle #f)))
         ;; While on shell: spawn a touch-tracker every frame with 'racer attack
         ;; 12-frame duration with per-frame spawn ensures continuous coverage at any shell speed
         (when (and on-shell *target*)
@@ -780,6 +952,7 @@
   (set! (-> self prev-jak-health) 0.0)
   (set! (-> self prev-on-shell) #f)
   (set! (-> self shell-tracker-timer) 0)
+  (set! (-> self shell-proc) (the-as handle #f))
   (go-virtual idle))
 
 (defun sm64-mario-col-start ()
@@ -799,3 +972,87 @@
 
 ;; Auto-start on load.
 (sm64-mario-col-start)
+
+;; ---------------------------------------------------------------------------
+;; crab-test — smoke test for the global lurker-crab actor.
+;;
+;; Flow: spawn a background process that waits 6 seconds, then spawns a
+;; real `lurkercrab` near Mario but OUTSIDE its notice-distance so the
+;; crab's nav-enemy AI doesn't immediately acquire Jak/Mario as a target.
+;;
+;; Why 40m: `*lurkercrab-nav-enemy-info*` (lurkercrab.gc) has
+;; `:notice-distance (meters 25)` — crabs wake and charge when Jak is
+;; within 25m.  We place at +40m in X so the crab spawns in patrol-idle
+;; and stays there until we approach.
+;;
+;; Art-group + code come from GAME.CGO (see game.gd — `lurkercrab.o` +
+;; `lurkercrab-ag.go` are promoted globally).  Textures (tpage-212..215)
+;; are NOT global yet — beach has them natively; other levels will show
+;; untextured merc geo if you run this test there.  That's fine for a
+;; "does the type exist / spawn / init-from-entity! succeed" smoke test.
+;;
+;; We piggy-back on an arbitrary live entity from the current level so
+;; `init-from-entity!` → `process-drawable-from-entity!` → the art-group
+;; level lookup inside `initialize-skeleton` all use the real
+;; current-level path instead of falling through to level-default
+;; (which was the bug that caused file-stream type corruption earlier).
+;; The entity slot is cleared after init so our eventual deactivate
+;; doesn't invoke entity-deactivate-handler on the borrowed actor.
+;; ---------------------------------------------------------------------------
+
+(defun crab-test-find-entity ()
+  "Return any live entity-actor from the currently loaded level, or #f."
+  (when *level*
+    (let ((lev (level-get-target-inside *level*)))
+      (when (and lev
+                 (= (-> lev status) 'active)
+                 (-> lev bsp)
+                 (-> lev bsp level)
+                 (-> lev bsp level entity)
+                 (> (-> lev bsp level entity length) 0))
+        (-> lev bsp level entity data 0 entity)))))
+
+(defun crab-test ()
+  "Wait 6s, then spawn a lurker crab ~40m from Mario (outside notice-distance).
+   Logs to stdout so you can watch the sequence in the console."
+  (process-spawn-function process
+    (lambda :behavior process ()
+      (format 0 "[crab-test] driver started, waiting 6s~%")
+      (let ((t0 (current-time)))
+        (while (not (time-elapsed? t0 (seconds 6.0)))
+          (suspend)))
+      (let ((ent (crab-test-find-entity)))
+        (cond
+          ((not ent)
+           (format 0 "[crab-test] no live level entity to borrow — abort~%"))
+          (else
+           (format 0 "[crab-test] spawning lurker crab near Mario (+40m X)~%")
+           (process-spawn lurkercrab
+             :init
+             (lambda :behavior lurkercrab ((borrowed entity-actor))
+               ;; Wire the borrowed entity so initialize-skeleton walks
+               ;; the current level's art-group load-dir (not
+               ;; level-default).
+               (set! (-> self entity) borrowed)
+               (init-from-entity! self borrowed)
+               ;; init-from-entity! just placed the crab at the borrowed
+               ;; entity's world trans — reposition to Mario + offset
+               ;; so it stands near-but-not-on top of Jak/Mario.  Using
+               ;; collide-info trans because lurkercrab's root is a
+               ;; collide-shape-moving (set up by init-from-entity!).
+               (when (and (-> self collide-info) *sm64-mario-pos*)
+                 (set! (-> self collide-info trans x)
+                       (+ (-> *sm64-mario-pos* x) (meters 40)))
+                 (set! (-> self collide-info trans y) (-> *sm64-mario-pos* y))
+                 (set! (-> self collide-info trans z) (-> *sm64-mario-pos* z))
+                 (set! (-> self collide-info trans w) 1.0))
+               ;; Unhook the borrowed entity so our deactivate doesn't
+               ;; touch the real actor's entity record.
+               (set! (-> self entity) (the-as entity-actor #f))
+               (none))
+             :name "crab-test"
+             ent))))
+      (none))
+    :name "crab-test-driver"
+    :from *4k-dead-pool*)
+  (none))

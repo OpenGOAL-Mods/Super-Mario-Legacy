@@ -255,6 +255,14 @@
            ;; tick_mario_sm64 re-creates Mario at Jak's current trans
            ;; once *target* is alive and at the continue-point position.
            (pc-sm64-delete-mario)
+           ;; libsm64: tear down the sm64-crab-shell visual + any
+           ;; touch-trackers BEFORE the old level unloads.  The shell
+           ;; (now a subtype of the global lurkercrab type) uses the
+           ;; standard process-drawable deactivate path — no custom
+           ;; cleanup hack — so kill-by-name is enough.  Must run
+           ;; while the shell's art-group level is still loaded.
+           (kill-by-name "sm64-crab-shell" *active-pool*)
+           (kill-by-name "touch-tracker" *active-pool*)
            (reset-actors arg1)
            (set-continue! *game-info* arg2)
            (when arg3

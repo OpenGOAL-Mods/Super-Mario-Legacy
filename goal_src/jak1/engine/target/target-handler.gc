@@ -94,6 +94,9 @@
      (kill-by-name "sm64-crab-shell" *active-pool*)
      ;; Clear racer action in case sm64-mario-col hasn't run cleanup yet.
      (logclear! (-> self control root-prim prim-core action) (collide-action racer))
+     ;; (when *camera*
+     ;;   (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
+     ;;   (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
      #f)
     (('level-enter)
      (let ((v1-21 (level-get *level* (the-as symbol (-> arg3 param 0)))))

@@ -37,6 +37,8 @@ MarioRenderer::~MarioRenderer() {
   if (m_vbo_uv) glDeleteBuffers(1, &m_vbo_uv);
   if (m_texture) glDeleteTextures(1, &m_texture);
 
+  destroy_corpse_meshes();
+
   if (m_shell_vao) glDeleteVertexArrays(1, &m_shell_vao);
   if (m_shell_vbo_position) glDeleteBuffers(1, &m_shell_vbo_position);
   if (m_shell_vbo_normal) glDeleteBuffers(1, &m_shell_vbo_normal);
@@ -120,6 +122,10 @@ void MarioRenderer::init(ShaderLibrary& shaders) {
 
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
+
+  // Corpse meshes are allocated lazily in rebuild_corpse_meshes() — one
+  // VAO + 4 VBOs per captured death, sized exactly for that corpse's tri
+  // count.  No pre-allocation here.
 
   // ---- Shell VAO and VBOs (from ROM-extracted mesh) -----------------------
   build_shell_local_mesh();
@@ -239,6 +245,79 @@ void MarioRenderer::update_geometry(const MarioGeometry& geo) {
   glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
+void MarioRenderer::destroy_corpse_meshes() {
+  for (auto& m : m_corpse_meshes) {
+    if (m.vao) glDeleteVertexArrays(1, &m.vao);
+    if (m.vbo_position) glDeleteBuffers(1, &m.vbo_position);
+    if (m.vbo_normal) glDeleteBuffers(1, &m.vbo_normal);
+    if (m.vbo_color) glDeleteBuffers(1, &m.vbo_color);
+    if (m.vbo_uv) glDeleteBuffers(1, &m.vbo_uv);
+  }
+  m_corpse_meshes.clear();
+}
+
+void MarioRenderer::rebuild_corpse_meshes(const std::vector<MarioGeometry>& corpses) {
+  // Full rebuild: cheap because corpse capture is rare (one per Mario death)
+  // and each corpse only takes a few KB of GPU memory.  Preserves nothing
+  // from the previous mesh list — capture/clear semantics are bumpy enough
+  // that incremental sync would only complicate things without measurable
+  // gain.
+  destroy_corpse_meshes();
+  m_corpse_meshes.reserve(corpses.size());
+
+  for (const auto& geo : corpses) {
+    if (geo.num_triangles == 0) continue;
+
+    CorpseMesh m;
+    m.num_triangles = geo.num_triangles;
+    int num_verts = m.num_triangles * 3;
+
+    glGenVertexArrays(1, &m.vao);
+    glGenBuffers(1, &m.vbo_position);
+    glGenBuffers(1, &m.vbo_normal);
+    glGenBuffers(1, &m.vbo_color);
+    glGenBuffers(1, &m.vbo_uv);
+
+    glBindVertexArray(m.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo_position);
+    glBufferData(GL_ARRAY_BUFFER, num_verts * 3 * sizeof(float), geo.position.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo_normal);
+    glBufferData(GL_ARRAY_BUFFER, num_verts * 3 * sizeof(float), geo.normal.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo_color);
+    glBufferData(GL_ARRAY_BUFFER, num_verts * 3 * sizeof(float), geo.color.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo_uv);
+    glBufferData(GL_ARRAY_BUFFER, num_verts * 2 * sizeof(float), geo.uv.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    m_corpse_meshes.push_back(m);
+  }
+
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glBindVertexArray(0);
+}
+
+void MarioRenderer::render_corpses() {
+  // Same shader / texture / uniforms as the live Mario — caller (render())
+  // has already set them up.  Just swap VAO per corpse and draw.
+  for (const auto& m : m_corpse_meshes) {
+    if (m.num_triangles == 0) continue;
+    glBindVertexArray(m.vao);
+    glDrawArrays(GL_TRIANGLES, 0, m.num_triangles * 3);
+  }
+  glBindVertexArray(0);
+}
+
 void MarioRenderer::render_shell(const MarioState& state) {
   if (m_shell_tri_count == 0) return;
 
@@ -294,26 +373,52 @@ void MarioRenderer::render(const float* camera_matrix,
                             const float* camera_pos,
                             float fog_constant) {
   auto& mgr = LibSM64Manager::instance();
-  if (!mgr.is_initialized() || !mgr.has_mario() || !m_initialized) return;
+  if (!mgr.is_initialized() || !m_initialized) return;
 
   // Hide Mario while Jak is dying / being eaten by the lurker shark / playing
   // the death animation.  Without this Mario stays visible (still riding the
   // shell), floating in mid-air during the cutscene.  read_target_flags
   // populates target_dying from the *sm64-jak-dying* GOAL symbol; the flag
   // clears once Jak's `dying` state-flag drops on respawn, at which point
-  // the existing teleport gate snaps Mario back to Jak's checkpoint.
+  // the existing teleport gate snaps Mario back to Jak's checkpoint.  We
+  // bail BEFORE the corpse render too so an in-progress shark-grab doesn't
+  // leak Mario's last-frame geometry through the corpse path.
   if (mgr.target_dying) return;
+
+  const bool draw_live = mgr.has_mario();
+  const size_t corpse_count = mgr.corpse_count();
+  const bool draw_corpses = corpse_count > 0;
+  if (!draw_live && !draw_corpses) return;
 
   // Upload texture on first render
   if (!m_texture_uploaded) {
     upload_texture();
   }
 
-  // Get latest geometry from the SM64 tick
-  auto geo = mgr.get_geometry();
-  if (geo.num_triangles == 0) return;
+  // Sync the corpse mesh list with the manager's snapshot only when the
+  // version changes (capture / clear).  Full rebuild is fine — corpse capture
+  // is rare and each corpse is a few KB.
+  uint64_t cv = mgr.corpse_version();
+  if (cv != m_corpse_uploaded_version) {
+    if (corpse_count > 0) {
+      auto corpses = mgr.get_mario_corpses();
+      rebuild_corpse_meshes(corpses);
+    } else {
+      destroy_corpse_meshes();
+    }
+    m_corpse_uploaded_version = cv;
+  }
 
-  update_geometry(geo);
+  // Get latest geometry from the SM64 tick (skip if no live Mario — corpses
+  // can still render below).
+  MarioGeometry geo;
+  if (draw_live) {
+    geo = mgr.get_geometry();
+    if (geo.num_triangles == 0 && !draw_corpses) return;
+    if (geo.num_triangles > 0) {
+      update_geometry(geo);
+    }
+  }
 
   // Set up GL state
   glEnable(GL_DEPTH_TEST);
@@ -344,10 +449,20 @@ void MarioRenderer::render(const float* camera_matrix,
   light_dir[0] /= len; light_dir[1] /= len; light_dir[2] /= len;
   glUniform3fv(glGetUniformLocation(program, "light_dir"), 1, light_dir);
 
-  // Draw Mario
-  glBindVertexArray(m_vao);
-  glDrawArrays(GL_TRIANGLES, 0, m_num_triangles * 3);
-  glBindVertexArray(0);
+  // Draw Mario (skip when there's no live Mario — only the corpse should
+  // appear during the brief no-Mario window between delete + auto-respawn,
+  // or for as long as the user keeps a corpse around with no live Mario).
+  if (draw_live && m_num_triangles > 0) {
+    glBindVertexArray(m_vao);
+    glDrawArrays(GL_TRIANGLES, 0, m_num_triangles * 3);
+    glBindVertexArray(0);
+  }
+
+  // Draw all corpses (frozen meshes at each death location).  Same shader /
+  // texture / uniforms as the live Mario, so we just swap VAO per corpse.
+  if (draw_corpses) {
+    render_corpses();
+  }
 
   // Shell visual is now handled GOAL-side by the sm64-crab-shell process
   // (mario.gc) — a subtype of the global lurkercrab type.  Leaving the

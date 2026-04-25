@@ -71,7 +71,18 @@
             :slider-step-size 1.0
             :on-confirm (lambda ()
                           (commit-to-file *mario-settings*)))
-       ;; [2] BACK
+       ;; [2] CLEAR ALL CORPSES — pressing X wipes every saved death-pose
+       ;; mesh.  Lives only in RAM (libsm64 manager's vector + the renderer's
+       ;; per-corpse VAOs), nothing is persisted to disk so there's no
+       ;; commit-to-file step.  The generic on-confirm fallback we added to
+       ;; progress.gc's button dispatch is what calls this lambda.
+       (new 'static 'game-option
+            :option-type (game-option-type button)
+            :name (text-id mario-opts-clear-corpses)
+            :scale #t
+            :on-confirm (lambda ()
+                          (pc-sm64-clear-mario-corpse)))
+       ;; [3] BACK
        (new 'static 'game-option
             :option-type (game-option-type button)
             :name (text-id back)

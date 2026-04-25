@@ -2557,7 +2557,16 @@
                  (((text-id speedrun-hub1-100)) (progress-fast-save-and-start-speedrun (speedrun-category hub1-100)))
                  (((text-id speedrun-hub2-100)) (progress-fast-save-and-start-speedrun (speedrun-category hub2-100)))
                  (((text-id speedrun-hub3-100)) (progress-fast-save-and-start-speedrun (speedrun-category hub3-100)))
-                 (((text-id speedrun-all-cutscenes)) (progress-fast-save-and-start-speedrun (speedrun-category all-cutscenes))))
+                 (((text-id speedrun-all-cutscenes)) (progress-fast-save-and-start-speedrun (speedrun-category all-cutscenes)))
+                 ;; mario mod: generic fallback for custom button options that
+                 ;; carry an :on-confirm callback (e.g. CLEAR ALL CORPSES in
+                 ;; the Mario Options submenu).  Vanilla button dispatch is
+                 ;; pure name-matching above; this lets new submenus declare
+                 ;; their action via on-confirm without touching this case.
+                 (else
+                   (when (nonzero? (-> options (-> obj option-index) on-confirm))
+                     (sound-play "select-option")
+                     ((-> options (-> obj option-index) on-confirm)))))
                (commit-to-file *pc-settings*)
                ;; other behaviors are hardcoded elsewhere because screw you.
                )

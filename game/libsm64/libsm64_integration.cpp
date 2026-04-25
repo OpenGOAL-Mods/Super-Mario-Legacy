@@ -2280,6 +2280,62 @@ u64 pc_sm64_delete_mario() {
 }
 
 // ---------------------------------------------------------------------------
+// Mario "corpses" — append-only list of frozen mesh snapshots, one per death.
+// Persist across level transitions / save-load.  Renderer rebuilds its GPU
+// meshes when corpse_version() changes (capture or clear).
+// ---------------------------------------------------------------------------
+void LibSM64Manager::capture_mario_corpse() {
+  // Copy the latest geometry under the geo lock so we don't tear a half-
+  // updated frame.  The geometry is in world space (libsm64 transforms it
+  // during sm64_mario_tick), so the corpse renders correctly without any
+  // per-frame transform — it just sits exactly where Mario was when this
+  // call fired.
+  MarioGeometry snapshot;
+  {
+    std::lock_guard<std::mutex> g(m_geo_mutex);
+    snapshot = m_geometry;
+  }
+  if (snapshot.num_triangles == 0) {
+    lg::warn("[libsm64] capture_mario_corpse: live geometry empty, skipping");
+    return;
+  }
+  size_t new_count = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_corpse_mutex);
+    m_corpse_geometries.push_back(std::move(snapshot));
+    new_count = m_corpse_geometries.size();
+  }
+  m_corpse_count.store(new_count, std::memory_order_release);
+  m_corpse_version.fetch_add(1, std::memory_order_release);
+  lg::info("[libsm64] Captured Mario corpse #{}", new_count);
+}
+
+void LibSM64Manager::clear_mario_corpses() {
+  {
+    std::lock_guard<std::mutex> lock(m_corpse_mutex);
+    m_corpse_geometries.clear();
+    m_corpse_geometries.shrink_to_fit();
+  }
+  m_corpse_count.store(0, std::memory_order_release);
+  m_corpse_version.fetch_add(1, std::memory_order_release);
+}
+
+std::vector<MarioGeometry> LibSM64Manager::get_mario_corpses() {
+  std::lock_guard<std::mutex> lock(m_corpse_mutex);
+  return m_corpse_geometries;  // copy
+}
+
+u64 pc_sm64_capture_mario_corpse() {
+  LibSM64Manager::instance().capture_mario_corpse();
+  return 0;
+}
+
+u64 pc_sm64_clear_mario_corpse() {
+  LibSM64Manager::instance().clear_mario_corpses();
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // GOAL-callable star dance: registered as "pc-sm64-star-dance-mario".
 // ---------------------------------------------------------------------------
 void LibSM64Manager::star_dance_mario_from_goal(float face_angle_rad) {

@@ -556,6 +556,8 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-heal-mario", (void*)sm64::pc_sm64_heal_mario);
   make_function_symbol_from_c("pc-sm64-full-heal-mario", (void*)sm64::pc_sm64_full_heal_mario);
   make_function_symbol_from_c("pc-sm64-star-dance-mario", (void*)sm64::pc_sm64_star_dance_mario);
+  make_function_symbol_from_c("pc-sm64-capture-mario-corpse", (void*)sm64::pc_sm64_capture_mario_corpse);
+  make_function_symbol_from_c("pc-sm64-clear-mario-corpse", (void*)sm64::pc_sm64_clear_mario_corpse);
   make_function_symbol_from_c("pc-sm64-play-sound", (void*)sm64::pc_sm64_play_sound);
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);
   make_function_symbol_from_c("pc-sm64-play-music-forced", (void*)sm64::pc_sm64_play_music_forced);

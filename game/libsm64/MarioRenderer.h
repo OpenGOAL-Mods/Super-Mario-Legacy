@@ -36,6 +36,12 @@ class MarioRenderer {
  private:
   void upload_texture();
   void update_geometry(const MarioGeometry& geo);
+  // Rebuilds the per-corpse GPU meshes from the manager's latest snapshot.
+  // Gated by corpse_version() so this only runs on capture / clear, not
+  // every frame.
+  void rebuild_corpse_meshes(const std::vector<MarioGeometry>& corpses);
+  void destroy_corpse_meshes();
+  void render_corpses();
 
   // Shell rendering helpers.
   void build_shell_local_mesh();
@@ -53,6 +59,25 @@ class MarioRenderer {
   GLuint m_texture = 0;
 
   uint16_t m_num_triangles = 0;
+
+  // One CorpseMesh per captured death — same vertex layout as the live Mario,
+  // separate VAO so we can draw the static dead bodies alongside the live
+  // (auto-respawned) Mario.  Allocated lazily on capture; destroyed wholesale
+  // on clear.  Each mesh's buffers are sized exactly for that corpse's
+  // triangle count so we don't pay GEO_MAX_TRIANGLES per corpse.
+  struct CorpseMesh {
+    GLuint vao = 0;
+    GLuint vbo_position = 0;
+    GLuint vbo_normal = 0;
+    GLuint vbo_color = 0;
+    GLuint vbo_uv = 0;
+    uint16_t num_triangles = 0;
+  };
+  std::vector<CorpseMesh> m_corpse_meshes;
+  // Last corpse_version we synced.  When the manager bumps its version we
+  // rebuild m_corpse_meshes from its current list; otherwise the static
+  // buffers stay put.
+  uint64_t m_corpse_uploaded_version = 0;
 
   // Shell mesh GL objects (separate VAO so we can draw independently)
   GLuint m_shell_vao = 0;

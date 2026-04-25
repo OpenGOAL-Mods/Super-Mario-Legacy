@@ -228,6 +228,8 @@ u64 pc_sm64_delete_mario();
 u64 pc_sm64_heal_mario();
 u64 pc_sm64_full_heal_mario();
 u64 pc_sm64_star_dance_mario(u32 face_angle_bits);
+u64 pc_sm64_capture_mario_corpse();
+u64 pc_sm64_clear_mario_corpse();
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_play_music_forced(u64 seq_id);
@@ -306,6 +308,24 @@ class LibSM64Manager {
   // For use by the renderer only — gameplay code should use get_state().
   MarioState get_render_state();
   GroundPoundHitbox get_ground_pound_hitbox();
+
+  // Mario "corpses" — frozen snapshots of Mario's mesh captured at each death
+  // and accumulated forever.  Each capture appends a new corpse; corpses
+  // persist across level transitions and save-load.  Geometry is stored in
+  // world space (libsm64 transforms before exporting), so each corpse renders
+  // as static geometry at the exact spot Mario died — note that means a
+  // corpse from one level will render at the same world coords if the player
+  // teleports to a different level (the user signed up for that explicitly).
+  // Threadsafe via m_corpse_mutex.
+  void capture_mario_corpse();
+  void clear_mario_corpses();
+  size_t corpse_count() const { return m_corpse_count.load(); }
+  // Snapshot copy of the full corpse list.  Renderer uses this to (re)build
+  // its per-corpse GL meshes when corpse_version() changes.
+  std::vector<MarioGeometry> get_mario_corpses();
+  // Monotonic version bumped on every capture / clear so the renderer can
+  // gate its (re)upload behind a single integer compare.
+  uint64_t corpse_version() const { return m_corpse_version; }
 
   // Audio volume (0..100). Applied on the cubeb worker thread, lock-free.
   void set_audio_volume(int volume);
@@ -979,6 +999,14 @@ class LibSM64Manager {
   // Previous tick's geometry and state, used for render-side interpolation.
   MarioGeometry m_prev_geometry;
   MarioState m_prev_state;
+
+  // Append-only list of frozen Mario meshes captured by capture_mario_corpse()
+  // — see the public API comment for the lifecycle.  Stored in WORLD space
+  // because libsm64 hands us geometry that's already transformed.
+  std::mutex m_corpse_mutex;
+  std::vector<MarioGeometry> m_corpse_geometries;
+  std::atomic<size_t> m_corpse_count{0};
+  std::atomic<uint64_t> m_corpse_version{0};
   GroundPoundHitbox m_gp_hitbox;
   uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
   // Last frame's "is Mario submerged in a lava water-vol" flag. Used by

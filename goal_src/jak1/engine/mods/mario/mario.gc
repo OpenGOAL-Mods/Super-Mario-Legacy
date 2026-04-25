@@ -21,6 +21,14 @@
 (define-extern pc-sm64-heal-mario (function none))
 (define-extern pc-sm64-full-heal-mario (function none))
 (define-extern pc-sm64-star-dance-mario (function none))
+;; Corpse: snapshot Mario's current mesh in world space and stash it in C++
+;; so the dead body keeps rendering at the death location after Mario is
+;; deleted + auto-respawned at Jak's checkpoint.  Capture APPENDS to a list
+;; — every death leaves a corpse, all of them persist (across level changes
+;; and save-load alike).  Clear wipes the entire list (debug / admin only —
+;; not wired into normal gameplay).
+(define-extern pc-sm64-capture-mario-corpse (function none))
+(define-extern pc-sm64-clear-mario-corpse (function none))
 (define-extern pc-sm64-play-sound (function int none))
 (define-extern pc-sm64-play-music (function int none))
 ;; Variant that plays even while Jak's game is paused (title screen, menus).
@@ -558,7 +566,15 @@
                      (not (logtest? (-> *target* state-flags) (state-flags dying))))
                 ;; Safety cap: force delete after ~20 seconds
                 (> (-> self death-timer) 600))
-          (format #t "[sm64] Jak respawned — deleting Mario for fresh spawn.~%")
+          (format #t "[sm64] Jak respawned — capturing corpse + deleting Mario for fresh spawn.~%")
+          ;; Snapshot Mario's mesh in world space BEFORE the delete so the
+          ;; dead body persists at the death location while auto-spawn brings
+          ;; a fresh Mario back at Jak's checkpoint.  Corpse renders as static
+          ;; geometry until clear / replace / level change.  Capturing this
+          ;; late (instead of on the death rising edge) means the snapshot is
+          ;; Mario's final dying-pose, which is the natural "left for dead"
+          ;; look — flopped over, eyes shut, etc.
+          (pc-sm64-capture-mario-corpse)
           (pc-sm64-delete-mario)
           (set! (-> self death-timer) 0)))
 

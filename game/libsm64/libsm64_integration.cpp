@@ -2605,21 +2605,32 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   target_periscope = false;
   target_clone_anim = false;
   target_in_movie = false;
+  target_dying = false;
   if (!ee_mem) return;
   u32 false_val = s7.offset;
   if (false_val == 0) return;
+  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
 
   auto sym = jak1::intern_from_c("*sm64-target-flags*");
-  if (sym.offset == 0) return;
-  u32 ptr = sym->value;
-  if (ptr == 0 || ptr == false_val || ptr + 16 > EE_MAIN_MEM_SIZE) return;
+  if (sym.offset != 0) {
+    u32 ptr = sym->value;
+    if (ptr != 0 && ptr != false_val && ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      float data[4];
+      std::memcpy(data, ee_mem + ptr, 16);
+      target_grabbed = data[0] > 0.5f;
+      target_periscope = data[1] > 0.5f;
+      target_clone_anim = data[2] > 0.5f;
+      target_in_movie = data[3] > 0.5f;
+    }
+  }
 
-  float data[4];
-  std::memcpy(data, ee_mem + ptr, 16);
-  target_grabbed = data[0] > 0.5f;
-  target_periscope = data[1] > 0.5f;
-  target_clone_anim = data[2] > 0.5f;
-  target_in_movie = data[3] > 0.5f;
+  // *sm64-jak-dying* is a plain symbol holding #t/#f — a separate channel from
+  // the float-flags vector so it's robust to the vector being zero-initialized
+  // before mario.gc's watcher loop has run for the first time.
+  auto dying_sym = jak1::find_symbol_from_c("*sm64-jak-dying*");
+  if (dying_sym.offset != 0) {
+    target_dying = (dying_sym->value == true_val);
+  }
 }
 
 bool LibSM64Manager::is_game_paused(u8* ee_mem) {

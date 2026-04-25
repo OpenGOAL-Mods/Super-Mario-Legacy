@@ -296,6 +296,14 @@ void MarioRenderer::render(const float* camera_matrix,
   auto& mgr = LibSM64Manager::instance();
   if (!mgr.is_initialized() || !mgr.has_mario() || !m_initialized) return;
 
+  // Hide Mario while Jak is dying / being eaten by the lurker shark / playing
+  // the death animation.  Without this Mario stays visible (still riding the
+  // shell), floating in mid-air during the cutscene.  read_target_flags
+  // populates target_dying from the *sm64-jak-dying* GOAL symbol; the flag
+  // clears once Jak's `dying` state-flag drops on respawn, at which point
+  // the existing teleport gate snaps Mario back to Jak's checkpoint.
+  if (mgr.target_dying) return;
+
   // Upload texture on first render
   if (!m_texture_uploaded) {
     upload_texture();

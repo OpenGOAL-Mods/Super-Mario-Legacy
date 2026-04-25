@@ -439,6 +439,7 @@ class LibSM64Manager {
   bool target_periscope = false;  // periscope specifically
   bool target_clone_anim = false; // blue eco doors/bridges — grabbed but don't teleport
   bool target_in_movie = false;   // (movie?) — scene-player / cutscene movies active
+  bool target_dying = false;      // Jak in target-death / shark-grab — hide Mario render
 
   // Yakow grab: walks the Jak process tree each tick, finds yakow actors,
   // and lets Mario pick one up with the grab button (punch) when standing

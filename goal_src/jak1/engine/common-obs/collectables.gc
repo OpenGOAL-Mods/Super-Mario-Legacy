@@ -8,7 +8,7 @@
 (require "engine/common-obs/collectables-part.gc")
 (require "engine/entity/entity.gc")
 (declare-type vent process-drawable)
-(define-extern pc-sm64-star-dance-mario (function none))
+(define-extern pc-sm64-star-dance-mario (function float none))
 
 (declare-type eco eco-collectable)
 
@@ -969,7 +969,19 @@
     (behavior ((arg0 object) (arg1 handle))
       (local-vars (sv-96 res-tag))
       (sound-play "pu-powercell")
-      (pc-sm64-star-dance-mario)
+      ;; Face the camera during the star dance.  Without this, Mario
+      ;; plays the celebration in whatever direction his physics yaw
+      ;; happened to be at pickup time (often sideways or away from
+      ;; the camera).  Compute the Mario→camera xz-direction in
+      ;; radians and forward it to libsm64's set_mario_faceangle —
+      ;; same convention as read_target_transform's quaternion yaw
+      ;; extraction (atan2(dx, dz), 0 = +Z hemisphere).
+      (let* ((cam-pos (math-camera-pos))
+             (mario-pos (target-pos 0))
+             (dx (- (-> cam-pos x) (-> mario-pos x)))
+             (dz (- (-> cam-pos z) (-> mario-pos z)))
+             (yaw-rad (atan dx dz)))
+        (pc-sm64-star-dance-mario yaw-rad))
       (clear-collide-with-as (-> self root))
       (logclear! (-> self mask) (process-mask actor-pause))
       (logclear! (-> self draw status) (draw-status hidden))

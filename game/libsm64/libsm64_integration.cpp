@@ -2282,12 +2282,21 @@ u64 pc_sm64_delete_mario() {
 // ---------------------------------------------------------------------------
 // GOAL-callable star dance: registered as "pc-sm64-star-dance-mario".
 // ---------------------------------------------------------------------------
-void LibSM64Manager::star_dance_mario_from_goal() {
+void LibSM64Manager::star_dance_mario_from_goal(float face_angle_rad) {
   if (!m_initialized || m_mario_id < 0) return;
   {
     std::scoped_lock lock(m_sm64_lock);
     // ACT_STAR_DANCE_NO_EXIT — plays the celebration animation without exiting the level.
     sm64_set_mario_action(m_mario_id, 0x00001307);
+    // Pin Mario's facing yaw so the dance plays toward the camera.  GOAL
+    // computes the angle from Mario→camera and passes it in radians; we
+    // forward to libsm64's faceangle setter (same convention used by
+    // teleport_mario_to_jak / read_target_transform — radians,
+    // 0 = facing the +Z hemisphere of Jak/SM64-shared world space).
+    // Pass NaN from GOAL to leave the angle untouched (legacy behavior).
+    if (std::isfinite(face_angle_rad)) {
+      sm64_set_mario_faceangle(m_mario_id, face_angle_rad);
+    }
     // SOUND_MENU_STAR_SOUND — the iconic star jingle.
     // SOUND_ARG_LOAD(7, 0, 0x1E, 0xFF, 8) = 0x701EFF81
     sm64_play_sound_global(0x701EFF81);
@@ -2298,8 +2307,11 @@ void LibSM64Manager::star_dance_mario_from_goal() {
   m_star_dance_timer = 0;
 }
 
-u64 pc_sm64_star_dance_mario() {
-  LibSM64Manager::instance().star_dance_mario_from_goal();
+u64 pc_sm64_star_dance_mario(u32 face_angle_bits) {
+  // GOAL passes the float-encoded face angle in an integer register slot.
+  float yaw;
+  std::memcpy(&yaw, &face_angle_bits, 4);
+  LibSM64Manager::instance().star_dance_mario_from_goal(yaw);
   return 0;
 }
 

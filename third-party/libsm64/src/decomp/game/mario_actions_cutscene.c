@@ -671,7 +671,13 @@ void general_star_dance_handler(struct MarioState *m, s32 isInWater) {
 }
 
 s32 act_star_dance(struct MarioState *m) {
-    m->faceAngle[1] = m->area->camera->yaw;
+    // mario mod: vanilla does `m->faceAngle[1] = m->area->camera->yaw;` here,
+    // but in libsm64 the camera struct yaw is driven from `inputs->camLookX/Z`
+    // which can be stale or zeroed during Jak's cell-pickup cutscene (no live
+    // tfrag bucket pass = no camera_pos update on the C++ side). We instead
+    // let the host (libsm64_integration) set faceAngle directly each tick via
+    // sm64_set_mario_faceangle, using the live GOAL-side camera position. So
+    // we just preserve whatever faceAngle was last set.
     set_mario_animation(m, m->actionState == 2 ? MARIO_ANIM_RETURN_FROM_STAR_DANCE
                                                : MARIO_ANIM_STAR_DANCE);
     general_star_dance_handler(m, 0);
@@ -683,7 +689,7 @@ s32 act_star_dance(struct MarioState *m) {
 }
 
 s32 act_star_dance_water(struct MarioState *m) {
-    m->faceAngle[1] = m->area->camera->yaw;
+    // mario mod: see comment in act_star_dance.
     set_mario_animation(m, m->actionState == 2 ? MARIO_ANIM_RETURN_FROM_WATER_STAR_DANCE
                                                : MARIO_ANIM_WATER_STAR_DANCE);
     vec3f_copy(m->marioObj->header.gfx.pos, m->pos);

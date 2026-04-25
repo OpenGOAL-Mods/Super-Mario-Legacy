@@ -227,7 +227,7 @@ u64 pc_sm64_damage_mario();
 u64 pc_sm64_delete_mario();
 u64 pc_sm64_heal_mario();
 u64 pc_sm64_full_heal_mario();
-u64 pc_sm64_star_dance_mario();
+u64 pc_sm64_star_dance_mario(u32 face_angle_bits);
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_play_music_forced(u64 seq_id);
@@ -404,7 +404,7 @@ class LibSM64Manager {
   void damage_mario_from_goal();
   void heal_mario_from_goal();
   void full_heal_mario_from_goal();
-  void star_dance_mario_from_goal();
+  void star_dance_mario_from_goal(float face_angle_rad);
   void play_sound_from_goal(int32_t sound_bits);
   void play_music_from_goal(uint8_t seq_id);
   // Same as play_music_from_goal but flips the "force unpaused" flag so the

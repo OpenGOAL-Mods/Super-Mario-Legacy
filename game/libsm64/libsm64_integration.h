@@ -855,6 +855,20 @@ class LibSM64Manager {
   // While non-zero, update_yakow_grab rewrites this process's trans each
   // frame to glue it to Mario's hand.
   u32 m_grabbed_yakow_ee = 0;
+  // Entity-actor EE pointer of the held yakow.  Captured at grab time and
+  // used to RE-BIND across level reloads: when a level streams out and
+  // back in, the yakow's process is destroyed and a fresh one spawns at
+  // a different process EE address, but the entity-actor record (in the
+  // entity-pool, not the level heap) keeps the same address.  Each frame
+  // we cross-reference candidate yakows by entity to find the new home.
+  u32 m_grabbed_yakow_entity = 0;
+  // Consecutive frames where the held yakow's type-tag check failed AND
+  // we couldn't find a matching entity rebind candidate.  Used as a grace
+  // window before we actually release — a yakow can briefly look "wrong"
+  // (mid-deactivate, mid-respawn, transient type-tag overwrite) and the
+  // legitimate frames in that window hold through it.  Reset to 0 on
+  // every successful check or rebind.
+  int m_yakow_missing_frames = 0;
   // Edge-detect state for the grab/throw button (button_b, which the input
   // layer maps to Square). Updated from MarioInputState each tick() so
   // update_yakow_grab can detect a single-frame press vs a hold.

@@ -3344,6 +3344,12 @@ constexpr u32 CSPACE_BONE_OFF = 16;             // structure field, no -4 adjust
 // process-tree.brother is at GOAL :offset 16 -> runtime 12
 constexpr u32 PTREE_BROTHER_OFF = 12;
 constexpr u32 PTREE_CHILD_OFF = 16;
+// Offset of `entity` (entity-actor) field in the `process` struct.
+// process inherits from process-tree (28 bytes: name/mask/parent/brother/
+// child/ppointer/self), then process adds pool/status/pid/main-thread/
+// top-thread (5 * 4 bytes = 20 more bytes) before `entity`.  See
+// gkernel-h.gc deftype process.
+constexpr u32 PROCESS_ENTITY_OFF = 48;
 
 // Limits, tunable
 constexpr int MAX_PROCESS_TREE_NODES = 4096;     // safety cap on DFS
@@ -4721,6 +4727,7 @@ namespace {
 
 struct YakowRecord {
   u32 ee_addr;                 // process-drawable basic ptr
+  u32 entity_addr;             // entity-actor pointer (stable across level reloads)
   float trans_jak[3];          // world position in Jak units
 };
 
@@ -4805,8 +4812,16 @@ void collect_yakows(u8* ee_mem, u32 mem_size, u32 false_val, u32 active_pool_sym
     float trans[4];
     if (!read_vec4(ee_mem, root + CSHAPE_TRANS_OFF, mem_size, trans)) continue;
 
+    // Read process->entity (used for cross-level rebind).  0 / #f / out-of-
+    // range is fine — we just won't be able to rebind to this yakow if the
+    // current grab needs to.
+    u32 entity_addr = 0;
+    read_u32(ee_mem, node + PROCESS_ENTITY_OFF, mem_size, entity_addr);
+    if (entity_addr == false_val) entity_addr = 0;
+
     YakowRecord r;
     r.ee_addr = node;
+    r.entity_addr = entity_addr;
     r.trans_jak[0] = trans[0];
     r.trans_jak[1] = trans[1];
     r.trans_jak[2] = trans[2];
@@ -4886,29 +4901,113 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
       still_holding = sm64_mario_is_holding_fake(m_mario_id);
     }
     if (!still_holding) {
-      lg::info("[libsm64] yakow grab: SM64 released fake held object — freeing yakow 0x{:X}",
-               m_grabbed_yakow_ee);
+      // Log the action so we can see WHY libsm64 released — e.g.
+      // 0x0080088A (ACT_THROWING), 0x10880C0 (ACT_BACKWARD_AIR_KB),
+      // 0x008008A8 (ACT_PLACING_DOWN), or any drop_and_set_mario_action
+      // path.  See third-party/libsm64/src/decomp/include/sm64.h for the
+      // ACT_* table.
+      lg::info("[libsm64] yakow grab: SM64 released fake held object — freeing yakow 0x{:X} "
+               "(mario action=0x{:08X})",
+               m_grabbed_yakow_ee, state.action);
       m_grabbed_yakow_ee = 0;
       return;
     }
 
-    // Is the held yakow process still alive (i.e. still in our discovered list)?
-    bool still_alive = false;
+    // Verify the held yakow is still a valid yakow process at the stored EE
+    // address, with a grace window before actually releasing.  An OpenGOAL
+    // process can briefly look "not a yakow" mid-transition:
+    //   - deactivate moves it between pools and may overwrite type-tag bits
+    //   - dead-pool reuse can leave a frame with a partially-initialized type
+    //   - inter-state init code can transiently null fields
+    // Releasing on the first failed frame chases ghosts; we accumulate
+    // m_yakow_missing_frames and only release once the failure has held
+    // for kYakowGraceFrames consecutive frames.  Reset to 0 on any
+    // successful check.
+    // 8 seconds at the 30Hz Mario tick rate (update_yakow_grab is gated to
+    // tick frames by the OpenGLRenderer pipeline early-return).
+    constexpr int kYakowGraceFrames = 240;
+    using namespace ac;
+    bool still_yakow = false;
+    if (valid_basic_ptr(m_grabbed_yakow_ee, EE_MAIN_MEM_SIZE)) {
+      u32 t = 0;
+      if (read_basic_type(ee_mem, m_grabbed_yakow_ee, EE_MAIN_MEM_SIZE, t) &&
+          t != m_grabbed_yakow_ee &&
+          valid_basic_ptr(t, EE_MAIN_MEM_SIZE) &&
+          type_is_descendant(ee_mem, EE_MAIN_MEM_SIZE, t, m_yakow_type, m_is_yakow_cache)) {
+        still_yakow = true;
+      }
+    }
+    if (still_yakow) {
+      m_yakow_missing_frames = 0;
+    } else {
+      // Try to rebind: a level reload destroys the yakow process and
+      // spawns a fresh one at a new EE address, but the entity-actor
+      // record (in *entity-pool*, NOT the level heap) keeps the same
+      // address.  If we captured an entity at grab time, look for any
+      // currently-live yakow whose entity matches and re-bind to it.
+      u32 rebound_ee = 0;
+      if (m_grabbed_yakow_entity != 0) {
+        for (const auto& r : yakows) {
+          if (r.entity_addr == m_grabbed_yakow_entity && r.ee_addr != m_grabbed_yakow_ee) {
+            rebound_ee = r.ee_addr;
+            break;
+          }
+        }
+      }
+      if (rebound_ee != 0) {
+        lg::info("[libsm64] yakow grab: rebinding 0x{:X} -> 0x{:X} via entity 0x{:X} "
+                 "(level reload, mario action=0x{:08X})",
+                 m_grabbed_yakow_ee, rebound_ee, m_grabbed_yakow_entity, state.action);
+        m_grabbed_yakow_ee = rebound_ee;
+        m_yakow_missing_frames = 0;
+        // Fall through to the trans-write below — we now have a valid
+        // yakow at the new address.
+      } else {
+        m_yakow_missing_frames++;
+        if (m_yakow_missing_frames >= kYakowGraceFrames) {
+          lg::info("[libsm64] yakow grab: held yakow 0x{:X} not a yakow for {} frames — releasing "
+                   "(entity=0x{:X}, mario action=0x{:08X}, {} other yakows in active-pool)",
+                   m_grabbed_yakow_ee, m_yakow_missing_frames, m_grabbed_yakow_entity,
+                   state.action, yakows.size());
+          {
+            std::scoped_lock lock(m_sm64_lock);
+            sm64_mario_end_fake_hold(m_mario_id);
+          }
+          m_grabbed_yakow_ee = 0;
+          m_grabbed_yakow_entity = 0;
+          m_yakow_missing_frames = 0;
+          return;
+        }
+        // During the grace window, skip the trans-write below — the bytes at
+        // that EE address aren't a yakow right now, so writing the trans
+        // field would corrupt whatever process IS occupying the slot.
+        // Throttle the log: first frame and then every second (30 ticks)
+        // so a held grace window is one or two lines, not 240.
+        if (m_yakow_missing_frames == 1 || (m_yakow_missing_frames % 30) == 0) {
+          lg::info("[libsm64] yakow grab: held yakow 0x{:X} type-tag mismatch ({}/{}), "
+                   "no entity rebind found, skipping trans-write",
+                   m_grabbed_yakow_ee, m_yakow_missing_frames, kYakowGraceFrames);
+        }
+        return;
+      }
+    }
+    // Bonus diagnostic: log if the held yakow is alive at its address but
+    // was NOT found in the active-pool walk.  Means it's been deactivated /
+    // moved between pools — we keep holding either way.  Throttled.
+    bool in_active_pool = false;
     for (const auto& r : yakows) {
       if (r.ee_addr == m_grabbed_yakow_ee) {
-        still_alive = true;
+        in_active_pool = true;
         break;
       }
     }
-    if (!still_alive) {
-      lg::info("[libsm64] yakow grab: held yakow 0x{:X} no longer in process tree — releasing",
-               m_grabbed_yakow_ee);
-      {
-        std::scoped_lock lock(m_sm64_lock);
-        sm64_mario_end_fake_hold(m_mario_id);
+    if (!in_active_pool) {
+      static int s_offpool_log_throttle = 0;
+      if ((s_offpool_log_throttle++ % 30) == 0) {
+        lg::info("[libsm64] yakow grab: held yakow 0x{:X} alive but not in *active-pool* walk "
+                 "(mario action=0x{:08X}) — keeping hold",
+                 m_grabbed_yakow_ee, state.action);
       }
-      m_grabbed_yakow_ee = 0;
-      return;
     }
 
     // Glue the yakow to Mario's hand. Hold position is mario_pos + forward *
@@ -4925,8 +5024,9 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
     if (!write_yakow_trans(ee_mem, EE_MAIN_MEM_SIZE, false_val, m_grabbed_yakow_ee,
                             hold_x, hold_y, hold_z)) {
       // Write failed (stale ptr, etc) — release.
-      lg::warn("[libsm64] yakow grab: write_yakow_trans failed for 0x{:X} — releasing",
-               m_grabbed_yakow_ee);
+      lg::warn("[libsm64] yakow grab: write_yakow_trans failed for 0x{:X} — releasing "
+               "(mario action=0x{:08X})",
+               m_grabbed_yakow_ee, state.action);
       {
         std::scoped_lock lock(m_sm64_lock);
         sm64_mario_end_fake_hold(m_mario_id);
@@ -4956,6 +5056,7 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
   const float radius_jak = yakow_grab_radius_sm64 * SM64_TO_JAK_SCALE;
   const float radius_sq_jak = radius_jak * radius_jak;
   u32 best_ee = 0;
+  u32 best_entity = 0;
   float best_d2 = radius_sq_jak;
   for (const auto& r : yakows) {
     float dx = r.trans_jak[0] - state.position.x();
@@ -4965,18 +5066,21 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
     if (d2 < best_d2) {
       best_d2 = d2;
       best_ee = r.ee_addr;
+      best_entity = r.entity_addr;
     }
   }
   if (best_ee == 0) return;
 
   // Commit the grab.
-  lg::info("[libsm64] yakow grab: grabbing yakow 0x{:X} at dist {:.0f} Jak units",
-           best_ee, std::sqrt(best_d2));
+  lg::info("[libsm64] yakow grab: grabbing yakow 0x{:X} (entity=0x{:X}) at dist {:.0f} Jak units",
+           best_ee, best_entity, std::sqrt(best_d2));
   {
     std::scoped_lock lock(m_sm64_lock);
     sm64_mario_begin_fake_hold(m_mario_id);
   }
   m_grabbed_yakow_ee = best_ee;
+  m_grabbed_yakow_entity = best_entity;
+  m_yakow_missing_frames = 0;
 }
 
 void LibSM64Manager::clear_yakow_grab() {
@@ -4987,6 +5091,8 @@ void LibSM64Manager::clear_yakow_grab() {
     }
     m_grabbed_yakow_ee = 0;
   }
+  m_grabbed_yakow_entity = 0;
+  m_yakow_missing_frames = 0;
 }
 
 // --------------------------------------------------------------------------

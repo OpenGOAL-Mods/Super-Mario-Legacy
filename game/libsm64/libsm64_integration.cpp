@@ -2336,6 +2336,41 @@ u64 pc_sm64_clear_mario_corpse() {
 }
 
 // ---------------------------------------------------------------------------
+// Mario red-fabric color presets — debug-only toy.  The shader detects
+// Mario's red hat/sleeve vertex color and replaces it with u_tint; this
+// table is the single source of truth for u_tint per preset.  Values are
+// LITERAL output colors (not multipliers) — pick what you want the hat to
+// look like.  Preset 0 = vanilla red so "Red" leaves Mario unchanged.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr std::array<std::array<float, 3>, 5> kMarioColorPresets = {{
+    {{1.0f, 0.0f, 0.0f}},   // 0 = red (vanilla)
+    {{1.0f, 1.0f, 0.0f}},   // 1 = yellow
+    {{0.0f, 1.0f, 0.0f}},   // 2 = green
+    {{0.6f, 0.0f, 1.0f}},   // 3 = purple
+    {{1.0f, 0.5f, 0.7f}},   // 4 = pink
+}};
+}  // namespace
+
+void LibSM64Manager::set_mario_color_preset(int preset) {
+  if (preset < 0 || preset >= static_cast<int>(kMarioColorPresets.size())) {
+    preset = 0;
+  }
+  m_mario_color_preset.store(preset, std::memory_order_release);
+}
+
+std::array<float, 3> LibSM64Manager::get_mario_tint() const {
+  int p = m_mario_color_preset.load(std::memory_order_acquire);
+  if (p < 0 || p >= static_cast<int>(kMarioColorPresets.size())) p = 0;
+  return kMarioColorPresets[p];
+}
+
+u64 pc_sm64_set_mario_color(u32 preset) {
+  LibSM64Manager::instance().set_mario_color_preset(static_cast<int>(preset));
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // GOAL-callable star dance: registered as "pc-sm64-star-dance-mario".
 // ---------------------------------------------------------------------------
 void LibSM64Manager::star_dance_mario_from_goal(float face_angle_rad) {

@@ -107,10 +107,27 @@
 ;; so the root menu object is already live when this code executes — we
 ;; just push one more submenu onto it.
 ;; ---------------------------------------------------------------------------
+;; Color preset setter — kmachine.cpp registers pc-sm64-set-mario-color.
+;; Recolors Mario's red fabric (hat + shirt sleeves) only; everything else
+;; stays vanilla.  Preset table (mirrors libsm64_integration.cpp's
+;; kMarioColorPresets):
+;;   0 = red (vanilla)
+;;   1 = yellow
+;;   2 = green
+;;   3 = purple
+;;   4 = pink
+(define-extern pc-sm64-set-mario-color (function int none))
+
 (when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
   (debug-menu-append-item
     (-> *debug-menu-context* root-menu)
     (debug-menu-make-from-template
       *debug-menu-context*
       '(menu "Mario"
-             (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))))))
+             (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))
+             (menu "Colors"
+                   (function "Red"     #f ,(lambda () (pc-sm64-set-mario-color 0) (none)))
+                   (function "Yellow"  #f ,(lambda () (pc-sm64-set-mario-color 1) (none)))
+                   (function "Green"   #f ,(lambda () (pc-sm64-set-mario-color 2) (none)))
+                   (function "Purple"  #f ,(lambda () (pc-sm64-set-mario-color 3) (none)))
+                   (function "Pink"    #f ,(lambda () (pc-sm64-set-mario-color 4) (none))))))))

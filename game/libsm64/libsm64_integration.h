@@ -230,6 +230,7 @@ u64 pc_sm64_full_heal_mario();
 u64 pc_sm64_star_dance_mario(u32 face_angle_bits);
 u64 pc_sm64_capture_mario_corpse();
 u64 pc_sm64_clear_mario_corpse();
+u64 pc_sm64_set_mario_color(u32 preset);
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_play_music_forced(u64 seq_id);
@@ -330,6 +331,18 @@ class LibSM64Manager {
   // Audio volume (0..100). Applied on the cubeb worker thread, lock-free.
   void set_audio_volume(int volume);
   int get_audio_volume() const;
+
+  // Mario color preset.  0 = vanilla (no tint), 1 = red, 2 = yellow,
+  // 3 = green, 4 = purple, 5 = pink.  Plumbed through the mario_sm64
+  // fragment shader's `u_tint` uniform — shader multiplies the per-vertex
+  // color by this RGB.  Lives on the manager (instead of MarioRenderer)
+  // so any other renderer that wants to honor the same recolor (e.g. the
+  // corpse mesh, which intentionally shares the live shader) can read it
+  // without a renderer-to-renderer dependency.
+  void set_mario_color_preset(int preset);
+  int get_mario_color_preset() const { return m_mario_color_preset; }
+  // Returns (r, g, b) in 0..1 for the current preset.
+  std::array<float, 3> get_mario_tint() const;
 
   // Texture atlas (only valid after init)
   const uint8_t* get_texture_data() const { return m_texture_data.data(); }
@@ -774,6 +787,9 @@ class LibSM64Manager {
   bool m_respawn_pending = false;
   int m_loaded_surface_count = 0;
   int m_audio_volume = 100;  // latched value, also mirrored into m_audio on start
+  // Mario color tint preset (see set_mario_color_preset for the table).
+  // std::atomic so the renderer thread can read it lock-free.
+  std::atomic<int> m_mario_color_preset{0};
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)
 
   // ---- Dynamic actor collision state ------------------------------------------------

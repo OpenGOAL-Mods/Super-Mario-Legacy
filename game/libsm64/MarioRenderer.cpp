@@ -449,6 +449,12 @@ void MarioRenderer::render(const float* camera_matrix,
   light_dir[0] /= len; light_dir[1] /= len; light_dir[2] /= len;
   glUniform3fv(glGetUniformLocation(program, "light_dir"), 1, light_dir);
 
+  // Per-mesh color tint from the manager's preset.  Default preset = (1,1,1)
+  // = identity multiply, so vanilla Mario looks unchanged.  Corpses inherit
+  // the same tint (intentional — they're all "the same Mario").
+  auto tint = mgr.get_mario_tint();
+  glUniform3f(glGetUniformLocation(program, "u_tint"), tint[0], tint[1], tint[2]);
+
   // Draw Mario (skip when there's no live Mario — only the corpse should
   // appear during the brief no-Mario window between delete + auto-respawn,
   // or for as long as the user keeps a corpse around with no live Mario).

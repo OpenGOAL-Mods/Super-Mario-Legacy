@@ -209,6 +209,10 @@ void SM64CollisionRenderer::render(const float* camera_matrix,
   // the vertex-colour branch, so tex_T0 is untouched.  Still has to
   // resolve to something though, so point it at unit 0.
   glUniform1i(glGetUniformLocation(program, "tex_T0"), 0);
+  // Force u_tint to identity so the collision overlay doesn't get washed
+  // by Mario's color preset.  The shared shader has the uniform; we don't
+  // want the wireframe stained pink because the player picked Pink Mario.
+  glUniform3f(glGetUniformLocation(program, "u_tint"), 1.0f, 1.0f, 1.0f);
 
   // Two passes: translucent filled + opaque wireframe on top.
   //

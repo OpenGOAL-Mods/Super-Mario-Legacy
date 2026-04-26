@@ -257,6 +257,16 @@
 ;; plays.  Cleared when the target's `dying` state-flag clears (post-respawn).
 (define *sm64-jak-dying* #f)
 
+;; Input bridge — GOAL pushes processed pad values to libsm64 every frame
+;; via pc-sm64-set-input (kmachine.cpp registers this).  Mario inherits the
+;; user's stick-deadzone setting (*pc-settings* stick-deadzone) and per-
+;; button rebinding (cpad bits are post-rebinding) for free.
+;;
+;; Args: stick-x in -1..1 (right = +), stick-y in -1..1 (down = +), and a
+;; button bitmask (bit 0 = A / cross, bit 1 = B / square|circle,
+;; bit 2 = Z / L1|L2).
+(define-extern pc-sm64-set-input (function float float int none))
+
 ;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
 (define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
@@ -617,6 +627,39 @@
         ;; cutscene teleport gate so Mario follows Jak's animating
         ;; skeleton through the whole movie instead of staying put.
         (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0)))
+
+      ;; ---- Pad bridge: push processed input to libsm64 ------------------
+      ;; cpad-list buttons are already post-rebinding (input-settings.json
+      ;; maps physical buttons to cpad bits at the C++ input layer), and
+      ;; we apply the GOAL-side *pc-settings* stick-deadzone here so Mario
+      ;; inherits all the user's input settings.
+      (let* ((pad         (-> *cpad-list* cpads 0))
+             ;; Normalize raw -1..1.  PS2 sign convention: right = +x, down = +y.
+             (raw-x       (* 0.0078125 (the float (- (the int (-> pad leftx)) 127))))
+             (raw-y       (* 0.0078125 (the float (- (the int (-> pad lefty)) 127))))
+             (deadzone    (-> *pc-settings* stick-deadzone))
+             (mag         (sqrtf (+ (* raw-x raw-x) (* raw-y raw-y))))
+             (out-x       0.0)
+             (out-y       0.0))
+        (when (< deadzone mag)
+          ;; Radial deadzone: rescale (deadzone..1) to (0..1) so movement
+          ;; right at the edge isn't half-speed.
+          (let ((scale (/ (- mag deadzone) (* mag (- 1.0 deadzone)))))
+            (set! out-x (* raw-x scale))
+            (set! out-y (* raw-y scale))))
+        ;; Buttons via cpad-hold? — same predicate Jak uses, so user
+        ;; rebindings already took effect at the C++ input layer.
+        ;;
+        ;; Z-button (crouch / long-jump): L1, L2, OR R1.  The R1 binding is
+        ;; safe in JAK 1 only — this file lives under goal_src/jak1/, so it
+        ;; only ever loads in the jak1 build.  If you ever port this mod to
+        ;; jak2/jak3, REMOVE r1 from the OR: jak2/3 uses R1 to shoot things
+        (let ((btns (logior (if (cpad-hold? 0 x)                                  1 0)
+                            (logior (if (or (cpad-hold? 0 square) (cpad-hold? 0 circle)) 2 0)
+                                    (if (or (cpad-hold? 0 l1)
+                                            (cpad-hold? 0 l2)
+                                            (cpad-hold? 0 r1))                          4 0)))))
+          (pc-sm64-set-input out-x out-y btns)))
 
       ;; ---- Sync health: heal Mario when Jak heals ----
       (when (and *target* (not (-> self mario-dead)))

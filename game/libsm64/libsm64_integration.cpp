@@ -2724,6 +2724,29 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   }
 }
 
+MarioInputState LibSM64Manager::read_mario_input_from_goal(u8* /*ee_mem*/) {
+  // Return the latest values latched by pc-sm64-set-input.  Atomics make
+  // this lock-free across the GOAL kernel thread (writer) and GL thread
+  // (reader); torn reads of the floats don't matter because both sides
+  // write-then-read in tight loops every frame.
+  MarioInputState input{};
+  input.stick_x = m_input_stick_x.load(std::memory_order_acquire);
+  input.stick_y = m_input_stick_y.load(std::memory_order_acquire);
+  uint32_t b = m_input_buttons.load(std::memory_order_acquire);
+  input.button_a = (b & 1u) != 0;
+  input.button_b = (b & 2u) != 0;
+  input.button_z = (b & 4u) != 0;
+  return input;
+}
+
+u64 pc_sm64_set_input(u32 stick_x_bits, u32 stick_y_bits, u32 buttons) {
+  float sx, sy;
+  std::memcpy(&sx, &stick_x_bits, 4);
+  std::memcpy(&sy, &stick_y_bits, 4);
+  LibSM64Manager::instance().set_input_from_goal(sx, sy, buttons);
+  return 0;
+}
+
 bool LibSM64Manager::is_game_paused(u8* ee_mem) {
   if (!ee_mem) return false;
   u32 false_val = s7.offset;

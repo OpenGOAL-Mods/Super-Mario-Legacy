@@ -559,6 +559,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-capture-mario-corpse", (void*)sm64::pc_sm64_capture_mario_corpse);
   make_function_symbol_from_c("pc-sm64-clear-mario-corpse", (void*)sm64::pc_sm64_clear_mario_corpse);
   make_function_symbol_from_c("pc-sm64-set-mario-color", (void*)sm64::pc_sm64_set_mario_color);
+  make_function_symbol_from_c("pc-sm64-set-input", (void*)sm64::pc_sm64_set_input);
   make_function_symbol_from_c("pc-sm64-play-sound", (void*)sm64::pc_sm64_play_sound);
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);
   make_function_symbol_from_c("pc-sm64-play-music-forced", (void*)sm64::pc_sm64_play_music_forced);

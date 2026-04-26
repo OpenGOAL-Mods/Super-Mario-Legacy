@@ -231,6 +231,13 @@ u64 pc_sm64_star_dance_mario(u32 face_angle_bits);
 u64 pc_sm64_capture_mario_corpse();
 u64 pc_sm64_clear_mario_corpse();
 u64 pc_sm64_set_mario_color(u32 preset);
+// GOAL pushes processed pad input here every frame.  buttons is a bitmask
+// (bit 0 = A / cross, bit 1 = B / square|circle, bit 2 = Z / L1|L2).  Values
+// are latched inside LibSM64Manager and the next read_mario_input_from_goal
+// returns them.  Replaces the older "have C++ pull from a symbol-backed
+// vector" attempt — that path didn't fire reliably; calling a registered
+// function is the same mechanism teleport / damage / etc. use.
+u64 pc_sm64_set_input(u32 stick_x_bits, u32 stick_y_bits, u32 buttons);
 u64 pc_sm64_play_sound(u64 sound_bits);
 u64 pc_sm64_play_music(u64 seq_id);
 u64 pc_sm64_play_music_forced(u64 seq_id);
@@ -466,6 +473,20 @@ class LibSM64Manager {
   void debug_glue_mario_to_jak(u8* ee_mem);
   // Read *sm64-target-flags* bridge vector and update public flags below.
   void read_target_flags(u8* ee_mem);
+
+  // Read Mario's pad input — returns whatever the GOAL kernel last pushed
+  // via pc-sm64-set-input (mario.gc fires this every frame, applying the
+  // user's stick-deadzone setting and reading rebound cpad buttons).
+  // Replaces the older direct-from-input-manager path that ignored both
+  // settings.  cam_look is populated by the caller from m_render_state.
+  MarioInputState read_mario_input_from_goal(u8* ee_mem);
+  // Latched by pc-sm64-set-input.  Public so the registered bridge can
+  // write without needing friend status.  buttons: bit0=A, bit1=B, bit2=Z.
+  void set_input_from_goal(float sx, float sy, uint32_t buttons) {
+    m_input_stick_x.store(sx, std::memory_order_release);
+    m_input_stick_y.store(sy, std::memory_order_release);
+    m_input_buttons.store(buttons, std::memory_order_release);
+  }
 
   // Flags set by read_target_flags(), used by OpenGLRenderer for render/input control.
   bool target_grabbed = false;    // cutscene, clone-anim, or periscope
@@ -787,6 +808,13 @@ class LibSM64Manager {
   bool m_respawn_pending = false;
   int m_loaded_surface_count = 0;
   int m_audio_volume = 100;  // latched value, also mirrored into m_audio on start
+  // Latest input pushed from GOAL via pc-sm64-set-input.  read_mario_input_
+  // from_goal copies this into a fresh MarioInputState on demand.  Atomics
+  // because the bridge fires from the GOAL kernel thread while the renderer
+  // reads on the GL thread.
+  std::atomic<float> m_input_stick_x{0.0f};
+  std::atomic<float> m_input_stick_y{0.0f};
+  std::atomic<uint32_t> m_input_buttons{0};
   // Mario color tint preset (see set_mario_color_preset for the table).
   // std::atomic so the renderer thread can read it lock-free.
   std::atomic<int> m_mario_color_preset{0};

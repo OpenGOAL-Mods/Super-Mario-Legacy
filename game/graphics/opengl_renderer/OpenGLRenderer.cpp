@@ -1160,7 +1160,15 @@ void OpenGLRenderer::tick_mario_sm64() {
 
   // 2. Input gathering
   auto t2 = Clock::now();
-  sm64::MarioInputState input{};
+  // Pad input comes from GOAL (mario.gc populates *sm64-mario-stick* and
+  // *sm64-mario-buttons* every frame).  Mario inherits the user's
+  // stick-deadzone setting and per-button rebinding for free — anything
+  // Jak's pad-handler does, Mario gets the same treatment.  The previous
+  // direct-from-input-manager path bypassed all of that and hard-coded a
+  // 0.3 deadzone with no rebinding awareness.
+  sm64::MarioInputState input = mgr.read_mario_input_from_goal(g_ee_main_mem);
+  // cam_look is still derived from the camera position (a render-state
+  // value, not pad input) — that stays here.
   if (m_render_state.has_pc_data) {
     auto mario_state = mgr.get_state();
     float dx = mario_state.position.x() - m_render_state.camera_pos.x();
@@ -1169,25 +1177,6 @@ void OpenGLRenderer::tick_mario_sm64() {
     if (len > 0.001f) {
       input.cam_look_x = dx / len;
       input.cam_look_z = dz / len;
-    }
-  }
-  auto display = Display::GetMainDisplay();
-  if (display) {
-    auto input_mgr = display->get_input_manager();
-    if (input_mgr) {
-      auto pad_data = input_mgr->get_current_data(0);
-      if (pad_data.has_value()) {
-        auto& pad = *pad_data.value();
-        auto [lx, ly] = pad.analog_left();
-        input.stick_x = (static_cast<float>(lx) - 127.0f) / 127.0f;
-        input.stick_y = (static_cast<float>(ly) - 127.0f) / 127.0f;
-        constexpr float DEADZONE = 0.3f;
-        if (std::abs(input.stick_x) < DEADZONE) input.stick_x = 0.0f;
-        if (std::abs(input.stick_y) < DEADZONE) input.stick_y = 0.0f;
-        input.button_a = pad.cross().first;
-        input.button_b = pad.square().first || pad.circle().first;
-        input.button_z = pad.l2().first || pad.l1().first;
-      }
     }
   }
   // Freeze Mario input during cutscenes / periscope / goggle

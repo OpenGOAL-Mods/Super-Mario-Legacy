@@ -557,9 +557,18 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-full-heal-mario", (void*)sm64::pc_sm64_full_heal_mario);
   make_function_symbol_from_c("pc-sm64-star-dance-mario", (void*)sm64::pc_sm64_star_dance_mario);
   make_function_symbol_from_c("pc-sm64-capture-mario-corpse", (void*)sm64::pc_sm64_capture_mario_corpse);
+  make_function_symbol_from_c("pc-sm64-update-last-mario-corpse", (void*)sm64::pc_sm64_update_last_mario_corpse);
+  make_function_symbol_from_c("pc-sm64-finalize-last-mario-corpse", (void*)sm64::pc_sm64_finalize_last_mario_corpse);
   make_function_symbol_from_c("pc-sm64-clear-mario-corpse", (void*)sm64::pc_sm64_clear_mario_corpse);
   make_function_symbol_from_c("pc-sm64-set-mario-color", (void*)sm64::pc_sm64_set_mario_color);
   make_function_symbol_from_c("pc-sm64-set-input", (void*)sm64::pc_sm64_set_input);
+  make_function_symbol_from_c("pc-sm64-set-mario-wedges", (void*)sm64::pc_sm64_set_mario_wedges);
+  make_function_symbol_from_c("pc-sm64-knockback-mario", (void*)sm64::pc_sm64_knockback_mario);
+  make_function_symbol_from_c("pc-sm64-burn-mario", (void*)sm64::pc_sm64_burn_mario);
+  make_function_symbol_from_c("pc-sm64-drown-mario", (void*)sm64::pc_sm64_drown_mario);
+  make_function_symbol_from_c("pc-sm64-endlessfall-mario", (void*)sm64::pc_sm64_endlessfall_mario);
+  make_function_symbol_from_c("pc-sm64-kill-mario", (void*)sm64::pc_sm64_kill_mario);
+  make_function_symbol_from_c("pc-sm64-get-mario-air", (void*)sm64::pc_sm64_get_mario_air);
   make_function_symbol_from_c("pc-sm64-play-sound", (void*)sm64::pc_sm64_play_sound);
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);
   make_function_symbol_from_c("pc-sm64-play-music-forced", (void*)sm64::pc_sm64_play_music_forced);

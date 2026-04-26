@@ -21,13 +21,34 @@
 (define-extern pc-sm64-heal-mario (function none))
 (define-extern pc-sm64-full-heal-mario (function none))
 (define-extern pc-sm64-star-dance-mario (function none))
+;; Health-sync bridges (kmachine.cpp).  Each routes Mario through a real
+;; libsm64 special-state so the proper SM64 hurt animation + knockback
+;; plays — no hacked wedge subtracts.
+(define-extern pc-sm64-set-mario-wedges (function int none))    ; floor sync
+(define-extern pc-sm64-knockback-mario  (function int none))    ; generic hit
+(define-extern pc-sm64-burn-mario       (function int none))    ; lava bounce
+(define-extern pc-sm64-drown-mario      (function none))        ; out-of-air kill
+(define-extern pc-sm64-endlessfall-mario (function none))       ; OOB fatal kill
+(define-extern pc-sm64-kill-mario       (function none))        ; sync death from Jak
+;; Read-only: Mario's drowning timer (frames remaining), for the air HUD.
+;; Returns a value 0..768 (libsm64 internal) — full breath is around 768,
+;; underwater starts the countdown, surfacing refills.
+(define-extern pc-sm64-get-mario-air    (function int))
 ;; Corpse: snapshot Mario's current mesh in world space and stash it in C++
 ;; so the dead body keeps rendering at the death location after Mario is
 ;; deleted + auto-respawned at Jak's checkpoint.  Capture APPENDS to a list
 ;; — every death leaves a corpse, all of them persist (across level changes
-;; and save-load alike).  Clear wipes the entire list (debug / admin only —
-;; not wired into normal gameplay).
+;; and save-load alike).  update-last replaces the last corpse in-place
+;; (rolling capture during the death animation so the FINAL pose is what
+;; sticks, without stacking N copies of Mario at the death spot).  Clear
+;; wipes the entire list (debug / admin only — not wired into normal play).
 (define-extern pc-sm64-capture-mario-corpse (function none))
+(define-extern pc-sm64-update-last-mario-corpse (function none))
+;; Promote the just-captured corpse to visible.  Called once on the falling
+;; edge of Jak's dying state — until then the corpse is captured-but-hidden
+;; so the user never sees a half-formed mid-animation pose next to live
+;; Mario.  No-op if no pending corpse exists.
+(define-extern pc-sm64-finalize-last-mario-corpse (function none))
 (define-extern pc-sm64-clear-mario-corpse (function none))
 (define-extern pc-sm64-play-sound (function int none))
 (define-extern pc-sm64-play-music (function int none))
@@ -277,6 +298,15 @@
 ;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
 (define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
 
+;; C++ writes: damage-state info for the health sync.
+;;   x = current damage mode (0=none, 1=lava, 2=drown, 3=endlessfall, 4=generic)
+;;       set whenever Mario is in a libsm64 damage / dying special state so the
+;;       sync block can propagate the right attack type to Jak.
+;;   y = 1.0 if libsm64 invincibility frames are active (post-hit grace period)
+;;   z = air supply (m->health, 0..2176) for the underwater air HUD
+;;   w = 1.0 if Mario is in a submerged action (HUD shows air bar instead of HP)
+(define *sm64-mario-damage* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
 ;; Time-frame deadline used by the "Mario just killed an enemy" sound
 ;; hook in target-handler.gc's 'get-attack-count case.  Bumped ~0.5s
 ;; into the future by every call to `sm64-spawn-attack-tracker` — an
@@ -350,6 +380,7 @@
    (mario-dead        symbol)
    (death-timer       int)
    (prev-jak-health   float)
+   (prev-mario-wedges int)
    (prev-on-shell     symbol)
    (shell-tracker-timer int)
    ;; Handle to the spawned sm64-crab-shell visual (see
@@ -553,18 +584,55 @@
     (set! (-> self mario-dead) #t)
     (set! (-> self death-timer) 0)
     (set! (-> self prev-jak-health) 0.0)
+    (set! (-> self prev-mario-wedges) 0)
     (loop
       ;; ---- Music orchestration (mute Jak music + pick SM64 track) ----
       (update-mario-music!)
 
       ;; ---- Mario death → kill Jak, wait for respawn, THEN despawn Mario ----
       (let ((dead (< (-> *sm64-mario-health* x) 0.5)))
-        ;; Rising edge: Mario just died — kill Jak, start waiting
+        ;; Rising edge: Mario just died — kill Jak, append the FIRST corpse
+        ;; for this death, start the death timer.
         (when (and dead (not (-> self mario-dead)))
+          (format #t "[sync-debug] MARIO-DEAD rising: mario-w=~D prev=~D jak-hp=~f dmg.x=~D submerged=~A~%"
+                  (the int (-> *sm64-mario-health* x))
+                  (-> self prev-mario-wedges)
+                  (-> *target* fact health)
+                  (the int (-> *sm64-mario-damage* x))
+                  (> (-> *sm64-mario-damage* w) 0.5))
           (format #t "[sm64] Mario died! Killing Jak...~%")
+          ;; Append a fresh corpse for THIS death.  Every subsequent frame
+          ;; while Jak is dying we'll REPLACE this same slot via update-
+          ;; last so we end up with exactly one corpse per death (with the
+          ;; final pose), not one corpse per frame stacked on top of each
+          ;; other.  Past-me did the latter and the user found Mario
+          ;; meeting himself five times in the same place.  Sorry.
+          (pc-sm64-capture-mario-corpse)
           (send-event *target* 'attack-invinc #f (static-attack-info ((mode 'endlessfall))))
           (set! (-> self death-timer) 1))
         (set! (-> self mario-dead) dead))
+
+      ;; ---- Rolling corpse update (replace the just-appended slot) -------
+      ;; While Mario is dead AND Jak is still in his dying state, refresh
+      ;; the LAST corpse with Mario's current geometry.  Each call
+      ;; overwrites in-place — so 60 frames of dying-animation become 60
+      ;; replaces of one slot, not 60 separate corpses.  The final
+      ;; overwrite lands on the last frame before Jak's dying flag clears
+      ;; (same frame teleport-Mario-to-Jak runs), so the locked-in pose
+      ;; is Mario's full death animation frame at the death LOCATION.
+      ;;
+      ;; Edge cases:
+      ;;  - If the rising-edge capture above didn't fire (e.g. mario was
+      ;;    "dead" from libsm64's point of view but the rising-edge
+      ;;    detector missed it), update-last is a no-op against an empty
+      ;;    list — so worst case we end up with no corpse for this death,
+      ;;    not with a corpse at the wrong place.
+      ;;  - If Mario dies while Jak is ALREADY dying from another cause
+      ;;    (shell-mount sync), the rising-edge fires and the gate works.
+      (when (and (-> self mario-dead)
+                 *target*
+                 (logtest? (-> *target* state-flags) (state-flags dying)))
+        (pc-sm64-update-last-mario-corpse))
 
       ;; While waiting, count frames then delete Mario once Jak has respawned
       (when (> (-> self death-timer) 0)
@@ -576,15 +644,14 @@
                      (not (logtest? (-> *target* state-flags) (state-flags dying))))
                 ;; Safety cap: force delete after ~20 seconds
                 (> (-> self death-timer) 600))
-          (format #t "[sm64] Jak respawned — capturing corpse + deleting Mario for fresh spawn.~%")
-          ;; Snapshot Mario's mesh in world space BEFORE the delete so the
-          ;; dead body persists at the death location while auto-spawn brings
-          ;; a fresh Mario back at Jak's checkpoint.  Corpse renders as static
-          ;; geometry until clear / replace / level change.  Capturing this
-          ;; late (instead of on the death rising edge) means the snapshot is
-          ;; Mario's final dying-pose, which is the natural "left for dead"
-          ;; look — flopped over, eyes shut, etc.
-          (pc-sm64-capture-mario-corpse)
+          (format #t "[sm64] Jak respawned — finalizing corpse + deleting Mario for fresh spawn.~%")
+          ;; Promote the rolling-captured corpse from pending → visible.
+          ;; Until this call the renderer was skipping it (so the user
+          ;; never saw a half-formed mid-animation corpse next to live
+          ;; Mario during Jak's death window).  Has to happen BEFORE the
+          ;; delete so the corpse appears the same frame live Mario
+          ;; disappears — no flicker gap.
+          (pc-sm64-finalize-last-mario-corpse)
           (pc-sm64-delete-mario)
           (set! (-> self death-timer) 0)))
 
@@ -661,20 +728,145 @@
                                             (cpad-hold? 0 r1))                          4 0)))))
           (pc-sm64-set-input out-x out-y btns)))
 
-      ;; ---- Sync health: heal Mario when Jak heals ----
+      ;; ---- Health synchronization (Jak ↔ Mario) ---------------------------
+      ;;
+      ;; HISTORICAL HACKS (now removed, kept here for reference in case the
+      ;; new design has a regression and we need to compare):
+      ;;   - Old code only synced one direction: Jak heal → Mario heal.
+      ;;     Damage went the other way through `*sm64-mario-hit*` (Jak
+      ;;     punched Mario → C++ saw flag → called pc-sm64-damage-mario).
+      ;;   - Mario death triggered Jak via `(send-event *target* 'attack-invinc
+      ;;     #f (static-attack-info ((mode 'endlessfall))))`, then waited
+      ;;     for Jak respawn before deleting Mario (still done below in the
+      ;;     `mario-dead → kill Jak → wait → delete Mario` loop).
+      ;;   - Eco-pill bonus was a 0/1 boolean (full or not), so the visible
+      ;;     +1 HP from picking it up popped instead of progressing.
+      ;;   - No floor sync: any missed event drifted forever.  Common
+      ;;     desyncs were Mario taking lava damage Jak never saw, or Jak
+      ;;     getting hit during a frame Mario was being teleported.
+      ;;
+      ;; NEW DESIGN (Jak is the source of truth):
+      ;;   target_wedges = jak_hp * 2 + (eco_pill / 50 * 2)
+      ;;   Each frame we clamp Mario's wedges to target_wedges (the floor —
+      ;;   prevents drift no matter what events fire).  On top of the floor
+      ;;   we route real damage events through libsm64's proper take-damage
+      ;;   path so Mario plays the hurt animation + knockback (NOT a hacked
+      ;;   wedge subtract), and propagate Mario's libsm64-side damage back
+      ;;   into Jak via attack-invinc with mode-translated subtypes.  See
+      ;;   the design doc / chat for full rules.
       (when (and *target* (not (-> self mario-dead)))
-        (let* ((jak-full-pip (= (-> *target* fact eco-pill) (-> *target* fact eco-pill-max)))
-               (jak-hp (+ (-> *target* fact health) (if jak-full-pip 1 0)))
-               (jak-max (= jak-hp (+ (-> *target* fact health-max) 1))))
-          (when (> jak-hp (-> self prev-jak-health))
-            (if jak-max
-              ;; Full health (respawn, checkpoint, etc.) → fully heal Mario
-              (pc-sm64-full-heal-mario)
-              ;; Partial heal (green eco) → heal Mario 2 wedges per 1 HP
-              (let ((times (the int (+ (- jak-hp (-> self prev-jak-health)) 0.5))))
-                (dotimes (i times)
-                  (pc-sm64-heal-mario)))))
-          (set! (-> self prev-jak-health) jak-hp)))
+        (let* ((jak-hp        (-> *target* fact health))
+               (jak-eco       (-> *target* fact eco-pill))
+               (jak-eco-max   (-> *target* fact eco-pill-max))
+               ;; Eco pill contributes 0..2 wedges progressively, BUT only
+               ;; when Jak has at least 1 HP.  The eco pip is a buffer ABOVE
+               ;; base health, not a replacement — if Jak is at 0/3 HP he's
+               ;; dying, and Mario should be dead too regardless of how
+               ;; charged the pip is.  Otherwise the user sees Mario walk
+               ;; around with 2 wedges while Jak's death animation plays.
+               ;; eco-pill / eco-pill-max are FLOATS — comparing to int 0
+               ;; was reading the bytes as garbage.  Use 0.0 + the float.
+               (eco-wedges    (if (and (> jak-hp 0.0) (> jak-eco-max 0.0))
+                                  (the int (/ (* jak-eco 2.0) jak-eco-max))
+                                  0))
+               (target-wedges (min 8 (+ (the int (* jak-hp 2.0)) eco-wedges)))
+               (mario-wedges  (the int (-> *sm64-mario-health* x)))
+               (jak-edge      (< jak-hp (-> self prev-jak-health)))
+               ;; Mario edge = libsm64 actually subtracted wedges since last
+               ;; frame.  We DO NOT fire on `mario-wedges < target-wedges`
+               ;; alone — that includes the Jak-just-healed case (target
+               ;; went up, Mario sits at last frame's value), which would
+               ;; bogus-attack Jak when he should be healing.  Only when
+               ;; Mario's actual count fell does this represent damage to
+               ;; propagate.
+               (mario-edge    (and (not jak-edge)
+                                   (< mario-wedges (-> self prev-mario-wedges)))))
+
+          ;; Track what mario-wedges should be NEXT frame after our
+          ;; intervention, used to update prev-mario-wedges so the
+          ;; mario-edge detector doesn't fire on our own forced changes.
+          ;; Default = current mario-wedges (no intervention).
+          (let ((expected-next-mario-wedges mario-wedges))
+
+           (cond
+            ;; (1) Jak took damage this frame — route into Mario via libsm64
+            ;; take-damage so the proper SM64 hurt anim + knockback plays.
+            ;; All branches reduce Mario's wedges to target, so prev should
+            ;; track target (not the stale current) — otherwise next
+            ;; frame's mario-edge fires bogus attacks at Jak.
+            (jak-edge
+             (set! expected-next-mario-wedges target-wedges)
+             (let ((damage-wedges (the int (* (- (-> self prev-jak-health) jak-hp) 2.0)))
+                   (mode (-> *target* attack-info mode))
+                   (submerged (> (-> *sm64-mario-damage* w) 0.5)))
+               (format #t "[sync-debug] JAK-EDGE jak-hp:~f->~f mario-w:~D->target:~D mode=~A submerged=~A~%"
+                       (-> self prev-jak-health) jak-hp mario-wedges target-wedges mode submerged)
+               (cond
+                 ((= mode 'lava)
+                  (format #t "[sync-debug]   -> BURN ~D wedges~%" damage-wedges)
+                  (pc-sm64-burn-mario damage-wedges))
+                 ;; 'drown-death is the FATAL instant-kill mode (deep dark
+                 ;; eco / dark-eco-pool / out-of-air).  Triggers libsm64's
+                 ;; drowning death animation.  The plain 'drown periodic
+                 ;; tick from Jak's water-vol falls through to the
+                 ;; submerged branch below — it should just sync wedges
+                 ;; silently, NOT kill Mario.  Routing every drown tick
+                 ;; here previously was instant-killing Mario in 2 hits.
+                 ((= mode 'drown-death)
+                  (format #t "[sync-debug]   -> DROWN (fatal)~%")
+                  (pc-sm64-drown-mario))
+                 ((= mode 'endlessfall)
+                  (format #t "[sync-debug]   -> ENDLESSFALL~%")
+                  (pc-sm64-endlessfall-mario))
+                 (submerged
+                  (format #t "[sync-debug]   -> SET-WEDGES ~D (swim suppress, mode=~A)~%"
+                          target-wedges mode)
+                  (pc-sm64-set-mario-wedges target-wedges))
+                 (else
+                  (format #t "[sync-debug]   -> KNOCKBACK ~D wedges~%" damage-wedges)
+                  (pc-sm64-knockback-mario damage-wedges)))))
+
+            ;; (2) Mario lost wedges in libsm64 (lava bounce, drowning,
+            ;; OOB, etc.) and Jak didn't — propagate to Jak as an attack
+            ;; so Jak's HP catches up.  Don't change expected-next: Mario's
+            ;; wedges already reflect the loss, no further drift.
+            (mario-edge
+             (let ((mario-mode (the int (-> *sm64-mario-damage* x)))
+                   (submerged (> (-> *sm64-mario-damage* w) 0.5)))
+               (format #t "[sync-debug] MARIO-EDGE mario-w:~D->prev:~D target:~D mode=~D submerged=~A~%"
+                       mario-wedges (-> self prev-mario-wedges) target-wedges
+                       mario-mode submerged)
+               (cond
+                 ((= mario-mode 1)
+                  (format #t "[sync-debug]   -> JAK ATTACK 'lava (-1 hp)~%")
+                  (send-event *target* 'attack-invinc #f
+                              (static-attack-info ((mode 'lava)))))
+                 ((= mario-mode 2)
+                  (format #t "[sync-debug]   -> JAK ATTACK 'drown-death~%")
+                  (send-event *target* 'attack-invinc #f
+                              (static-attack-info ((mode 'drown-death)))))
+                 ((= mario-mode 3)
+                  (format #t "[sync-debug]   -> JAK ATTACK 'endlessfall~%")
+                  (send-event *target* 'attack-invinc #f
+                              (static-attack-info ((mode 'endlessfall)))))
+                 (else
+                  (let ((hp-loss (max 1 (/ (- (-> self prev-mario-wedges) mario-wedges) 2))))
+                    (format #t "[sync-debug]   -> JAK ATTACK 'generic x~D times~%" hp-loss)
+                    (dotimes (i hp-loss)
+                      (send-event *target* 'attack #f
+                                  (static-attack-info ((mode 'generic))))))))))
+
+            ;; (3) No edge fired — floor sync.  Same prev-update as
+            ;; jak-edge: we forced Mario to target, so next frame's edge
+            ;; detector should treat target as the baseline.
+            ((!= mario-wedges target-wedges)
+             (set! expected-next-mario-wedges target-wedges)
+             (format #t "[sync-debug] FLOOR-SYNC mario-w:~D -> target:~D (jak-hp=~f eco=~f/~f)~%"
+                     mario-wedges target-wedges jak-hp jak-eco jak-eco-max)
+             (pc-sm64-set-mario-wedges target-wedges)))
+
+           (set! (-> self prev-jak-health) jak-hp)
+           (set! (-> self prev-mario-wedges) expected-next-mario-wedges))))
 
       ;; ---- Track Mario's position ----
       (set! (-> self root trans x) (-> *sm64-mario-pos* x))

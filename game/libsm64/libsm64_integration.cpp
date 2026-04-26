@@ -2160,6 +2160,69 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
+  // ---- *sm64-mario-damage*: damage-state info for the health sync ----
+  // x = mode (0=none, 1=lava, 2=drown, 3=endlessfall, 4=generic) — derived
+  //     from Mario's current libsm64 action so GOAL knows what kind of
+  //     damage to propagate to Jak when Mario's wedges drop.
+  // y = invincibility (1.0 if libsm64's invincTimer is running)
+  // z = air supply (m->health, 0..2176) for the underwater air HUD
+  // w = submerged (1.0 if Mario is in a submerged action)
+  auto damage_sym = jak1::intern_from_c("*sm64-mario-damage*");
+  if (damage_sym.offset != 0) {
+    u32 dmg_ptr = damage_sym->value;
+    if (dmg_ptr != 0 && dmg_ptr != false_val && dmg_ptr + 16 <= EE_MAIN_MEM_SIZE) {
+      constexpr uint32_t kActLavaBoost          = 0x010208B7;
+      constexpr uint32_t kActDrowning           = 0x300032C4;
+      constexpr uint32_t kActForwardAirKB       = 0x010208B1;
+      constexpr uint32_t kActBackwardAirKB      = 0x010208B0;
+      constexpr uint32_t kActSoftBackwardGroundKB = 0x00020464;
+      constexpr uint32_t kActQuicksandDeath     = 0x00021312;
+      // ACT_FLAG_SWIMMING is set on every fully-submerged action.  But
+      // user can also be "at the water" while in ACT_WATER_JUMP — the
+      // breach-out-of-water arc — which is technically airborne (no
+      // SWIMMING flag) yet shouldn't trigger an airborne knockback
+      // animation either.  Catch both: SWIMMING flag OR water-jump action.
+      constexpr uint32_t ACT_FLAG_SWIMMING_F    = 0x00002000;
+      constexpr uint32_t kActWaterJump_W        = 0x01000889;
+      constexpr uint32_t kActHoldWaterJump_W    = 0x010008A3;
+      float mode = 0.0f;
+      switch (state.action) {
+        case kActLavaBoost:               mode = 1.0f; break;
+        case kActDrowning:                mode = 2.0f; break;
+        case kActForwardAirKB:
+        case kActBackwardAirKB:           mode = 3.0f; break;  // OOB-style flying KB
+        case kActSoftBackwardGroundKB:
+        case kActQuicksandDeath:          mode = 4.0f; break;  // generic dying
+        default:                          mode = 0.0f; break;
+      }
+      // Submerged: SWIMMING flag set, OR Mario is in a water-jump arc.
+      bool submerged = (state.action & ACT_FLAG_SWIMMING_F) != 0
+                       || state.action == kActWaterJump_W
+                       || state.action == kActHoldWaterJump_W;
+      // DEBUG: throttled print to verify the swim detection.  Remove once
+      // the GOAL-side knockback gate is confirmed working.
+      {
+        static uint32_t s_last_logged_action = 0xFFFFFFFFu;
+        static bool s_last_logged_submerged = false;
+        if (state.action != s_last_logged_action || submerged != s_last_logged_submerged) {
+          lg::info("[sm64-debug] action=0x{:08X} submerged={}", state.action, submerged);
+          s_last_logged_action = state.action;
+          s_last_logged_submerged = submerged;
+        }
+      }
+      // Invincibility: read from gMarioState — exposed via state if we add it,
+      // but for now infer from action (knockback actions all have ACT_FLAG_
+      // INVULNERABLE = 0x02000000 set).
+      constexpr uint32_t ACT_FLAG_INVULNERABLE = 0x02000000;
+      bool invinc = (state.action & ACT_FLAG_INVULNERABLE) != 0;
+      float dmg_data[4] = {mode,
+                           invinc ? 1.0f : 0.0f,
+                           static_cast<float>(state.health),
+                           submerged ? 1.0f : 0.0f};
+      std::memcpy(ee_mem + dmg_ptr, dmg_data, 16);
+    }
+  }
+
   // ---- *sm64-mario-on-shell*: x = 1.0 if riding shell, 0.0 otherwise ----
   auto shell_sym = jak1::intern_from_c("*sm64-mario-on-shell*");
   if (shell_sym.offset != 0) {
@@ -2265,6 +2328,128 @@ u64 pc_sm64_full_heal_mario() {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Health sync bridges — see mario.gc "Health synchronization" block for the
+// design.  Each routes Mario through a real libsm64 special state so the
+// proper SM64 hurt animation + knockback plays.
+// ---------------------------------------------------------------------------
+
+void LibSM64Manager::set_mario_wedges_from_goal(int wedges) {
+  if (!m_initialized || m_mario_id < 0) return;
+  if (wedges > 8) wedges = 8;
+  if (wedges < 0) wedges = 0;
+  uint16_t health = (wedges == 0) ? 0xFF
+                                  : static_cast<uint16_t>((wedges << 8) | 0x80);
+  auto pre = get_state();
+  lg::info("[health-debug] set_mario_wedges -> {} (action=0x{:08X} pre-health=0x{:04X} -> 0x{:04X})",
+           wedges, pre.action, static_cast<uint16_t>(pre.health), health);
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_health(m_mario_id, health);
+}
+
+void LibSM64Manager::knockback_mario_from_goal(int wedges) {
+  if (!m_initialized || m_mario_id < 0) return;
+  auto state = get_state();
+  lg::info("[health-debug] knockback_mario({}) action=0x{:08X} health=0x{:04X}",
+           wedges, state.action, static_cast<uint16_t>(state.health));
+  float front_x = state.position.x() + std::sin(state.face_angle) * 100.0f;
+  float front_z = state.position.z() + std::cos(state.face_angle) * 100.0f;
+  float sm64_x = front_x * JAK_TO_SM64_SCALE;
+  float sm64_y = state.position.y() * JAK_TO_SM64_SCALE;
+  float sm64_z = front_z * JAK_TO_SM64_SCALE;
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_mario_take_damage(m_mario_id, static_cast<uint32_t>(wedges), 0,
+                         sm64_x, sm64_y, sm64_z);
+}
+
+void LibSM64Manager::burn_mario_from_goal(int wedges) {
+  if (!m_initialized || m_mario_id < 0) return;
+  constexpr uint32_t kActLavaBoost = 0x010208B7;
+  auto st = get_state();
+  uint16_t cur = static_cast<uint16_t>(st.health);
+  uint16_t cur_wedges = (cur >> 8) & 0xF;
+  uint16_t new_wedges = (cur_wedges > static_cast<uint16_t>(wedges))
+                            ? (cur_wedges - static_cast<uint16_t>(wedges))
+                            : 0;
+  uint16_t new_health = (new_wedges == 0) ? 0xFF
+                                          : static_cast<uint16_t>((new_wedges << 8) | 0x80);
+  lg::info("[health-debug] burn_mario({}) action=0x{:08X} health=0x{:04X} -> 0x{:04X}",
+           wedges, st.action, cur, new_health);
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_action(m_mario_id, kActLavaBoost);
+  sm64_set_mario_health(m_mario_id, new_health);
+}
+
+void LibSM64Manager::drown_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  constexpr uint32_t kActDrowning = 0x300032C4;
+  auto st = get_state();
+  lg::info("[health-debug] drown_mario action=0x{:08X} health=0x{:04X}",
+           st.action, static_cast<uint16_t>(st.health));
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_action(m_mario_id, kActDrowning);
+  sm64_set_mario_health(m_mario_id, 0xFF);
+}
+
+void LibSM64Manager::endlessfall_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  constexpr uint32_t kActForwardAirKB = 0x010208B1;
+  auto st = get_state();
+  lg::info("[health-debug] endlessfall_mario action=0x{:08X} health=0x{:04X}",
+           st.action, static_cast<uint16_t>(st.health));
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_action(m_mario_id, kActForwardAirKB);
+  sm64_set_mario_health(m_mario_id, 0xFF);
+}
+
+void LibSM64Manager::kill_mario_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return;
+  constexpr uint32_t kActSoftBackwardGroundKB = 0x00020464;
+  auto st = get_state();
+  lg::info("[health-debug] kill_mario action=0x{:08X} health=0x{:04X}",
+           st.action, static_cast<uint16_t>(st.health));
+  std::scoped_lock lock(m_sm64_lock);
+  sm64_set_mario_action(m_mario_id, kActSoftBackwardGroundKB);
+  sm64_set_mario_health(m_mario_id, 0xFF);
+}
+
+int LibSM64Manager::get_mario_air_from_goal() {
+  if (!m_initialized || m_mario_id < 0) return 0;
+  // libsm64 uses Mario's health field as the air gauge while submerged
+  // (no separate timer — the health number is "air").  GOAL renders this
+  // as an air bar when Mario's in a submerged action.  Range 0..2176.
+  auto st = get_state();
+  return static_cast<int>(static_cast<uint16_t>(st.health));
+}
+
+u64 pc_sm64_set_mario_wedges(u32 wedges) {
+  LibSM64Manager::instance().set_mario_wedges_from_goal(static_cast<int>(wedges));
+  return 0;
+}
+u64 pc_sm64_knockback_mario(u32 wedges) {
+  LibSM64Manager::instance().knockback_mario_from_goal(static_cast<int>(wedges));
+  return 0;
+}
+u64 pc_sm64_burn_mario(u32 wedges) {
+  LibSM64Manager::instance().burn_mario_from_goal(static_cast<int>(wedges));
+  return 0;
+}
+u64 pc_sm64_drown_mario() {
+  LibSM64Manager::instance().drown_mario_from_goal();
+  return 0;
+}
+u64 pc_sm64_endlessfall_mario() {
+  LibSM64Manager::instance().endlessfall_mario_from_goal();
+  return 0;
+}
+u64 pc_sm64_kill_mario() {
+  LibSM64Manager::instance().kill_mario_from_goal();
+  return 0;
+}
+u64 pc_sm64_get_mario_air() {
+  return static_cast<u64>(LibSM64Manager::instance().get_mario_air_from_goal());
+}
+
 u64 pc_sm64_delete_mario() {
   auto& mgr = LibSM64Manager::instance();
   if (mgr.has_mario()) {
@@ -2306,8 +2491,51 @@ void LibSM64Manager::capture_mario_corpse() {
     new_count = m_corpse_geometries.size();
   }
   m_corpse_count.store(new_count, std::memory_order_release);
+  // New corpse starts as pending (invisible) — must be finalized before
+  // it shows up in the visible_corpse_count the renderer iterates.
+  m_last_corpse_pending.store(true, std::memory_order_release);
   m_corpse_version.fetch_add(1, std::memory_order_release);
-  lg::info("[libsm64] Captured Mario corpse #{}", new_count);
+  lg::info("[libsm64] Captured Mario corpse #{} (pending)", new_count);
+}
+
+void LibSM64Manager::finalize_last_mario_corpse() {
+  // Promote the pending corpse to visible.  No-op if there isn't one.
+  bool was_pending = m_last_corpse_pending.exchange(false, std::memory_order_acq_rel);
+  if (was_pending) {
+    // Bump version so the renderer's visible_corpse_count reading + GPU
+    // mesh list pick up the newly-visible entry on the next frame.
+    m_corpse_version.fetch_add(1, std::memory_order_release);
+    lg::info("[libsm64] Finalized Mario corpse #{}", m_corpse_count.load());
+  }
+}
+
+void LibSM64Manager::update_last_mario_corpse() {
+  // Replace the last corpse's geometry with Mario's current geo.  Used by
+  // the rolling-update during Jak's death animation — see the public
+  // header comment for the full lifecycle.  No-op if no corpse exists yet
+  // (rising-edge capture failed, level-clear happened mid-death, etc.).
+  MarioGeometry snapshot;
+  {
+    std::lock_guard<std::mutex> g(m_geo_mutex);
+    snapshot = m_geometry;
+  }
+  if (snapshot.num_triangles == 0) {
+    return;  // nothing to capture
+  }
+  bool replaced = false;
+  {
+    std::lock_guard<std::mutex> lock(m_corpse_mutex);
+    if (!m_corpse_geometries.empty()) {
+      m_corpse_geometries.back() = std::move(snapshot);
+      replaced = true;
+    }
+  }
+  if (replaced) {
+    // Bump version so the renderer re-uploads the (now-updated) last
+    // corpse's GPU buffers.  Don't change m_corpse_count — the slot
+    // count is unchanged.
+    m_corpse_version.fetch_add(1, std::memory_order_release);
+  }
 }
 
 void LibSM64Manager::clear_mario_corpses() {
@@ -2317,6 +2545,7 @@ void LibSM64Manager::clear_mario_corpses() {
     m_corpse_geometries.shrink_to_fit();
   }
   m_corpse_count.store(0, std::memory_order_release);
+  m_last_corpse_pending.store(false, std::memory_order_release);
   m_corpse_version.fetch_add(1, std::memory_order_release);
 }
 
@@ -2327,6 +2556,16 @@ std::vector<MarioGeometry> LibSM64Manager::get_mario_corpses() {
 
 u64 pc_sm64_capture_mario_corpse() {
   LibSM64Manager::instance().capture_mario_corpse();
+  return 0;
+}
+
+u64 pc_sm64_update_last_mario_corpse() {
+  LibSM64Manager::instance().update_last_mario_corpse();
+  return 0;
+}
+
+u64 pc_sm64_finalize_last_mario_corpse() {
+  LibSM64Manager::instance().finalize_last_mario_corpse();
   return 0;
 }
 

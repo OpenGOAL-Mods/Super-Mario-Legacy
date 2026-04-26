@@ -310,7 +310,14 @@ void MarioRenderer::rebuild_corpse_meshes(const std::vector<MarioGeometry>& corp
 void MarioRenderer::render_corpses() {
   // Same shader / texture / uniforms as the live Mario — caller (render())
   // has already set them up.  Just swap VAO per corpse and draw.
-  for (const auto& m : m_corpse_meshes) {
+  // Skip the LAST mesh if a pending (unfinalized) corpse exists — it's
+  // captured but not yet committed for display.  This avoids briefly
+  // showing a half-formed corpse next to live Mario during Jak's death
+  // window.  See LibSM64Manager::visible_corpse_count for the gate.
+  size_t visible = LibSM64Manager::instance().visible_corpse_count();
+  size_t n = std::min(visible, m_corpse_meshes.size());
+  for (size_t i = 0; i < n; ++i) {
+    const auto& m = m_corpse_meshes[i];
     if (m.num_triangles == 0) continue;
     glBindVertexArray(m.vao);
     glDrawArrays(GL_TRIANGLES, 0, m.num_triangles * 3);

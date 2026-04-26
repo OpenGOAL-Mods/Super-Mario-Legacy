@@ -1501,11 +1501,14 @@ void update_mario_health(struct MarioState *m) {
                 if ((m->action & ACT_FLAG_SWIMMING) && !(m->action & ACT_FLAG_INTANGIBLE)) {
                     terrainIsSnow = m->floor != NULL && m->curTerrain == TERRAIN_SNOW;
 
-                    // When Mario is near the water surface, recover health (unless in snow),
-                    // when in snow terrains lose 3 health.
-                    // If using the debug level select, do not lose any HP to water.
+                    // mario mod: vanilla heals Mario near the water surface
+                    // (`m->health += 0x1A`).  We don't want that — Jak is the
+                    // source of truth for HP and free wedges from bobbing
+                    // would desync the two.  Only the drain branch stays.
+                    // Snow-terrain drain (-3) and depth-drain (-1) keep their
+                    // original behavior so deep-water still drowns Mario.
                     if ((m->pos[1] >= (m->waterLevel - 140)) && !terrainIsSnow) {
-                        m->health += 0x1A;
+                        // No-op (was: m->health += 0x1A)
                     } else if (!gDebugLevelSelect) {
                         m->health -= (terrainIsSnow ? 3 : 1);
                     }

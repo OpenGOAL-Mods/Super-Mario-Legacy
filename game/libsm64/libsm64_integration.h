@@ -229,8 +229,18 @@ u64 pc_sm64_heal_mario();
 u64 pc_sm64_full_heal_mario();
 u64 pc_sm64_star_dance_mario(u32 face_angle_bits);
 u64 pc_sm64_capture_mario_corpse();
+u64 pc_sm64_update_last_mario_corpse();
+u64 pc_sm64_finalize_last_mario_corpse();
 u64 pc_sm64_clear_mario_corpse();
 u64 pc_sm64_set_mario_color(u32 preset);
+// Health sync — see mario.gc "Health synchronization" block for design.
+u64 pc_sm64_set_mario_wedges(u32 wedges);
+u64 pc_sm64_knockback_mario(u32 wedges);
+u64 pc_sm64_burn_mario(u32 wedges);
+u64 pc_sm64_drown_mario();
+u64 pc_sm64_endlessfall_mario();
+u64 pc_sm64_kill_mario();
+u64 pc_sm64_get_mario_air();
 // GOAL pushes processed pad input here every frame.  buttons is a bitmask
 // (bit 0 = A / cross, bit 1 = B / square|circle, bit 2 = Z / L1|L2).  Values
 // are latched inside LibSM64Manager and the next read_mario_input_from_goal
@@ -326,8 +336,29 @@ class LibSM64Manager {
   // teleports to a different level (the user signed up for that explicitly).
   // Threadsafe via m_corpse_mutex.
   void capture_mario_corpse();
+  // Overwrite the LAST corpse with Mario's current geometry.  Used for the
+  // rolling-update during Jak's death animation: capture_mario_corpse on
+  // the rising edge appends one corpse (PENDING — not yet visible), then
+  // update_last_mario_corpse refreshes it each frame so the FINAL pose
+  // (just before the teleport-to-checkpoint) is what sticks — without
+  // stacking N copies of Mario at the death spot.  No-op if the corpse
+  // list is empty.
+  void update_last_mario_corpse();
+  // Mark the last corpse as finalized — only finalized corpses render.
+  // Without this gate the user briefly sees a half-formed mid-animation
+  // corpse next to live Mario during Jak's death window.  Called from
+  // GOAL on the falling edge of Jak's dying state.  No-op if no pending
+  // corpse exists.
+  void finalize_last_mario_corpse();
   void clear_mario_corpses();
+  // Total corpses (including the pending one).
   size_t corpse_count() const { return m_corpse_count.load(); }
+  // Visible corpse count = total minus 1 if a pending corpse exists.
+  // The renderer iterates this many to skip the last (pending) entry.
+  size_t visible_corpse_count() const {
+    size_t c = m_corpse_count.load();
+    return (m_last_corpse_pending.load() && c > 0) ? c - 1 : c;
+  }
   // Snapshot copy of the full corpse list.  Renderer uses this to (re)build
   // its per-corpse GL meshes when corpse_version() changes.
   std::vector<MarioGeometry> get_mario_corpses();
@@ -444,6 +475,14 @@ class LibSM64Manager {
   void damage_mario_from_goal();
   void heal_mario_from_goal();
   void full_heal_mario_from_goal();
+  // Health sync (see mario.gc for design).  All take m_sm64_lock briefly.
+  void set_mario_wedges_from_goal(int wedges);   // floor sync, no animation
+  void knockback_mario_from_goal(int wedges);    // generic hit + knockback anim
+  void burn_mario_from_goal(int wedges);         // ACT_LAVA_BOOST + wedge loss
+  void drown_mario_from_goal();                  // ACT_DROWNING + 0 health
+  void endlessfall_mario_from_goal();            // ACT_FORWARD_AIR_KB + 0 health
+  void kill_mario_from_goal();                   // generic ground KB + 0 health
+  int  get_mario_air_from_goal();                // returns m->health (0..2176)
   void star_dance_mario_from_goal(float face_angle_rad);
   void play_sound_from_goal(int32_t sound_bits);
   void play_music_from_goal(uint8_t seq_id);
@@ -1065,6 +1104,11 @@ class LibSM64Manager {
   std::vector<MarioGeometry> m_corpse_geometries;
   std::atomic<size_t> m_corpse_count{0};
   std::atomic<uint64_t> m_corpse_version{0};
+  // Last corpse is "pending" — captured but not yet visible to the
+  // renderer.  Set true by capture_mario_corpse, false by
+  // finalize_last_mario_corpse / clear_mario_corpses.  See header public
+  // API for the lifecycle.
+  std::atomic<bool> m_last_corpse_pending{false};
   GroundPoundHitbox m_gp_hitbox;
   uint32_t m_prev_action = 0;        // last frame's mario action, for impact-frame edge detect
   // Last frame's "is Mario submerged in a lava water-vol" flag. Used by

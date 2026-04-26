@@ -107,16 +107,20 @@
 ;; so the root menu object is already live when this code executes — we
 ;; just push one more submenu onto it.
 ;; ---------------------------------------------------------------------------
-;; Color preset setter — kmachine.cpp registers pc-sm64-set-mario-color.
-;; Recolors Mario's red fabric (hat + shirt sleeves) only; everything else
-;; stays vanilla.  Preset table (mirrors libsm64_integration.cpp's
-;; kMarioColorPresets):
-;;   0 = red (vanilla)
-;;   1 = yellow
-;;   2 = green
-;;   3 = purple
-;;   4 = pink
-(define-extern pc-sm64-set-mario-color (function int none))
+;; Color preset selector — recolors Mario's red fabric (hat + shirt sleeves).
+;; Persisted via *mario-settings* (mario-color slot) so the choice survives
+;; relaunches.  Preset table mirrors kMarioColorPresets in
+;; libsm64_integration.cpp — 10 entries.  Indices ARE the persisted value;
+;; don't reorder, only append.
+;;
+;; This menu is the ONLY UI for color (deliberately not in the regular pause
+;; menu — kept as a debug-only toy).
+(defun mario-set-color! ((preset int))
+  "Write preset to *mario-settings*, persist, and the next-frame settings
+   push (mario.gc watcher loop) will hand it to libsm64."
+  (set! (-> *mario-settings* mario-color) preset)
+  (commit-to-file *mario-settings*)
+  (none))
 
 (when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
   (debug-menu-append-item
@@ -126,8 +130,13 @@
       '(menu "Mario"
              (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))
              (menu "Colors"
-                   (function "Red"     #f ,(lambda () (pc-sm64-set-mario-color 0) (none)))
-                   (function "Yellow"  #f ,(lambda () (pc-sm64-set-mario-color 1) (none)))
-                   (function "Green"   #f ,(lambda () (pc-sm64-set-mario-color 2) (none)))
-                   (function "Purple"  #f ,(lambda () (pc-sm64-set-mario-color 3) (none)))
-                   (function "Pink"    #f ,(lambda () (pc-sm64-set-mario-color 4) (none))))))))
+                   (function "Red"     #f ,(lambda () (mario-set-color! 0) (none)))
+                   (function "Orange"  #f ,(lambda () (mario-set-color! 1) (none)))
+                   (function "Yellow"  #f ,(lambda () (mario-set-color! 2) (none)))
+                   (function "Lime"    #f ,(lambda () (mario-set-color! 3) (none)))
+                   (function "Green"   #f ,(lambda () (mario-set-color! 4) (none)))
+                   (function "Cyan"    #f ,(lambda () (mario-set-color! 5) (none)))
+                   (function "Blue"    #f ,(lambda () (mario-set-color! 6) (none)))
+                   (function "Purple"  #f ,(lambda () (mario-set-color! 7) (none)))
+                   (function "Magenta" #f ,(lambda () (mario-set-color! 8) (none)))
+                   (function "Pink"    #f ,(lambda () (mario-set-color! 9) (none))))))))

@@ -233,6 +233,7 @@ u64 pc_sm64_update_last_mario_corpse();
 u64 pc_sm64_finalize_last_mario_corpse();
 u64 pc_sm64_clear_mario_corpse();
 u64 pc_sm64_set_mario_color(u32 preset);
+u64 pc_sm64_set_corpse_render_enabled(u32 enabled);
 // Health sync — see mario.gc "Health synchronization" block for design.
 u64 pc_sm64_set_mario_wedges(u32 wedges);
 u64 pc_sm64_knockback_mario(u32 wedges);
@@ -381,6 +382,18 @@ class LibSM64Manager {
   int get_mario_color_preset() const { return m_mario_color_preset; }
   // Returns (r, g, b) in 0..1 for the current preset.
   std::array<float, 3> get_mario_tint() const;
+
+  // Toggle whether the renderer draws death-corpse meshes.  Settable from
+  // the Mario Options pause menu (mario-menu.gc) backed by mario-settings'
+  // render-corpses? slot.  Default true.  When false the corpse list is
+  // still maintained — only the GL draw is skipped, so flipping it back
+  // on shows everything that accumulated in the meantime.
+  void set_corpse_render_enabled(bool enabled) {
+    m_corpse_render_enabled.store(enabled, std::memory_order_release);
+  }
+  bool corpse_render_enabled() const {
+    return m_corpse_render_enabled.load(std::memory_order_acquire);
+  }
 
   // Texture atlas (only valid after init)
   const uint8_t* get_texture_data() const { return m_texture_data.data(); }
@@ -857,6 +870,8 @@ class LibSM64Manager {
   // Mario color tint preset (see set_mario_color_preset for the table).
   // std::atomic so the renderer thread can read it lock-free.
   std::atomic<int> m_mario_color_preset{0};
+  // Pause-menu toggle for whether to render the death corpse list.
+  std::atomic<bool> m_corpse_render_enabled{true};
   u32 m_cached_target_sym_offset = 0;  // Cached *target* symbol offset (0 = not yet resolved)
 
   // ---- Dynamic actor collision state ------------------------------------------------

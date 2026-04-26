@@ -308,13 +308,19 @@ void MarioRenderer::rebuild_corpse_meshes(const std::vector<MarioGeometry>& corp
 }
 
 void MarioRenderer::render_corpses() {
+  // Hard skip if user disabled corpse rendering in Mario Options.  The
+  // corpse list is still maintained (capture/finalize/clear all run
+  // normally) — only the GL draw is gated, so flipping the toggle back
+  // on shows everything that accumulated while it was off.
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.corpse_render_enabled()) return;
   // Same shader / texture / uniforms as the live Mario — caller (render())
   // has already set them up.  Just swap VAO per corpse and draw.
   // Skip the LAST mesh if a pending (unfinalized) corpse exists — it's
   // captured but not yet committed for display.  This avoids briefly
   // showing a half-formed corpse next to live Mario during Jak's death
   // window.  See LibSM64Manager::visible_corpse_count for the gate.
-  size_t visible = LibSM64Manager::instance().visible_corpse_count();
+  size_t visible = mgr.visible_corpse_count();
   size_t n = std::min(visible, m_corpse_meshes.size());
   for (size_t i = 0; i < n; ++i) {
     const auto& m = m_corpse_meshes[i];

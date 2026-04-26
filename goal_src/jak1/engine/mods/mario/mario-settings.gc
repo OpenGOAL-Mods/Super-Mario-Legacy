@@ -31,7 +31,17 @@
    ;; 0..100 slider applied to every sample coming out of sm64_audio_tick
    ;; (music + SFX).  Pushed to C++ via pc-sm64-set-music-volume each
    ;; frame by update-mario-music!, so slider drags preview live.
-   (sm64-music-volume float))
+   (sm64-music-volume float)
+   ;; Mario red-fabric color preset (kMarioColorPresets index in
+   ;; libsm64_integration.cpp).  0 = vanilla red.  Only writable from
+   ;; the DEBUG menu Colors submenu — not exposed in the regular pause
+   ;; menu.  Applied to libsm64 on load via pc-sm64-set-mario-color.
+   (mario-color int)
+   ;; When #f, MarioRenderer skips rendering the corpse list (the dead
+   ;; Marios accumulated from past deaths).  Applied to C++ via
+   ;; pc-sm64-set-corpse-render-enabled on load + toggle.  Exposed in
+   ;; the regular pause menu's Mario Options.
+   (render-corpses? symbol))
   (:methods
     (reset (_type_) _type_)
     (load-settings (_type_) none)
@@ -44,6 +54,8 @@
   "Populate default values — call before load to guarantee fresh fields."
   (set! (-> obj play-sm64-music?) #t)
   (set! (-> obj sm64-music-volume) 100.0)
+  (set! (-> obj mario-color) 0)         ; 0 = vanilla red
+  (set! (-> obj render-corpses?) #t)    ; corpses on by default
   obj)
 
 (defun mario-settings-filename ()
@@ -59,6 +71,8 @@
     (format file "(mario-settings~%")
     (format file "  (play-sm64-music? ~A)~%" (-> obj play-sm64-music?))
     (format file "  (sm64-music-volume ~f)~%" (-> obj sm64-music-volume))
+    (format file "  (mario-color ~D)~%" (-> obj mario-color))
+    (format file "  (render-corpses? ~A)~%" (-> obj render-corpses?))
     (format file "  )~%")
     (file-stream-close file))
   (format 0 "mario settings file write: ~A~%" filename)
@@ -84,7 +98,11 @@
              (("play-sm64-music?")
               (set! (-> obj play-sm64-music?) (file-stream-read-symbol file)))
              (("sm64-music-volume")
-              (set! (-> obj sm64-music-volume) (file-stream-read-float file))))))))
+              (set! (-> obj sm64-music-volume) (file-stream-read-float file)))
+             (("mario-color")
+              (set! (-> obj mario-color) (file-stream-read-int file)))
+             (("render-corpses?")
+              (set! (-> obj render-corpses?) (file-stream-read-symbol file))))))))
     (file-stream-close file))
   (format 0 "mario settings file read: ~A~%" filename)
   #t)

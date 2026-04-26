@@ -801,6 +801,7 @@
   (mario-opts-play-music #x161b)
   (mario-opts-volume #x161c)
   (mario-opts-clear-corpses #x161d)
+  (mario-opts-render-corpses #x161e)
   ;; GAME-TEXT-ID ENUM ENDS
   )
 

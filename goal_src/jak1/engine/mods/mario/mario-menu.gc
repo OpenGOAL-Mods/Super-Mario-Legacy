@@ -47,6 +47,13 @@
     (pc-sm64-stop-music))
   (none))
 
+(defun sm64-render-corpses-changed! ((new-val symbol))
+  "Toggle corpse rendering — persists immediately, the per-frame settings
+   push in mario.gc forwards the value to libsm64 next frame."
+  (set! (-> *mario-settings* render-corpses?) new-val)
+  (commit-to-file *mario-settings*)
+  (none))
+
 (define *mario-options*
   (new 'static 'boxed-array :type game-option
        ;; [0] PLAY SM64 MUSIC toggle
@@ -71,7 +78,20 @@
             :slider-step-size 1.0
             :on-confirm (lambda ()
                           (commit-to-file *mario-settings*)))
-       ;; [2] CLEAR ALL CORPSES — pressing X wipes every saved death-pose
+       ;; [2] RENDER CORPSES toggle — controls whether MarioRenderer draws
+       ;; the death-corpse list.  When off, the corpse list keeps growing
+       ;; (capture/clear still run) but nothing is drawn — flip back on
+       ;; and everything reappears.  Persisted via *mario-settings*
+       ;; render-corpses?; mario.gc's per-frame settings push forwards the
+       ;; current value to libsm64 every tick.
+       (new 'static 'game-option
+            :option-type (game-option-type on-off)
+            :name (text-id mario-opts-render-corpses)
+            :scale #t
+            :on-change (lambda ((val object))
+                         (sm64-render-corpses-changed! (the-as symbol val))
+                         (none)))
+       ;; [3] CLEAR ALL CORPSES — pressing X wipes every saved death-pose
        ;; mesh.  Lives only in RAM (libsm64 manager's vector + the renderer's
        ;; per-corpse VAOs), nothing is persisted to disk so there's no
        ;; commit-to-file step.  The generic on-confirm fallback we added to
@@ -82,7 +102,7 @@
             :scale #t
             :on-confirm (lambda ()
                           (pc-sm64-clear-mario-corpse)))
-       ;; [3] BACK
+       ;; [4] BACK
        (new 'static 'game-option
             :option-type (game-option-type button)
             :name (text-id back)
@@ -166,9 +186,12 @@
   ;; Mario submenu value-to-modify:
   ;;   [0] Play SM64 Music toggle → *mario-settings* play-sm64-music?
   ;;   [1] Volume slider          → *mario-settings* sm64-music-volume
-  ;;   [2] Back button has no backing value.
+  ;;   [2] Render Corpses toggle  → *mario-settings* render-corpses?
+  ;;   [3] Clear Corpses (button — no backing value, on-confirm only)
+  ;;   [4] Back (no backing value)
   (set! (-> *mario-options* 0 value-to-modify) (&-> *mario-settings* play-sm64-music?))
   (set! (-> *mario-options* 1 value-to-modify) (&-> *mario-settings* sm64-music-volume))
+  (set! (-> *mario-options* 2 value-to-modify) (&-> *mario-settings* render-corpses?))
   (none))
 
 ;; ---------------------------------------------------------------------------

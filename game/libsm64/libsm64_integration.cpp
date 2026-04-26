@@ -2575,19 +2575,27 @@ u64 pc_sm64_clear_mario_corpse() {
 }
 
 // ---------------------------------------------------------------------------
-// Mario red-fabric color presets — debug-only toy.  The shader detects
-// Mario's red hat/sleeve vertex color and replaces it with u_tint; this
-// table is the single source of truth for u_tint per preset.  Values are
-// LITERAL output colors (not multipliers) — pick what you want the hat to
-// look like.  Preset 0 = vanilla red so "Red" leaves Mario unchanged.
+// Mario red-fabric color presets — the shader hue-rotates Mario's red
+// vertex color toward the hue of u_tint while preserving sat + value.  Only
+// the HUE of these RGBs matters; sat/val from the original red pixel is
+// kept.  Preset 0 = vanilla red so "Red" leaves Mario unchanged.
+//
+// Add new colors here AND in the debug-menu Colors submenu (mario-debug-
+// menu.gc).  Indices ARE persisted to disk via mario-settings, so DON'T
+// reorder existing entries — only append.
 // ---------------------------------------------------------------------------
 namespace {
-constexpr std::array<std::array<float, 3>, 5> kMarioColorPresets = {{
+constexpr std::array<std::array<float, 3>, 10> kMarioColorPresets = {{
     {{1.0f, 0.0f, 0.0f}},   // 0 = red (vanilla)
-    {{1.0f, 1.0f, 0.0f}},   // 1 = yellow
-    {{0.0f, 1.0f, 0.0f}},   // 2 = green
-    {{0.6f, 0.0f, 1.0f}},   // 3 = purple
-    {{1.0f, 0.5f, 0.7f}},   // 4 = pink
+    {{1.0f, 0.5f, 0.0f}},   // 1 = orange
+    {{1.0f, 1.0f, 0.0f}},   // 2 = yellow
+    {{0.5f, 1.0f, 0.0f}},   // 3 = lime
+    {{0.0f, 1.0f, 0.0f}},   // 4 = green
+    {{0.0f, 1.0f, 1.0f}},   // 5 = cyan
+    {{0.0f, 0.5f, 1.0f}},   // 6 = blue
+    {{0.6f, 0.0f, 1.0f}},   // 7 = purple
+    {{1.0f, 0.0f, 1.0f}},   // 8 = magenta
+    {{1.0f, 0.5f, 0.7f}},   // 9 = pink
 }};
 }  // namespace
 
@@ -2606,6 +2614,11 @@ std::array<float, 3> LibSM64Manager::get_mario_tint() const {
 
 u64 pc_sm64_set_mario_color(u32 preset) {
   LibSM64Manager::instance().set_mario_color_preset(static_cast<int>(preset));
+  return 0;
+}
+
+u64 pc_sm64_set_corpse_render_enabled(u32 enabled) {
+  LibSM64Manager::instance().set_corpse_render_enabled(enabled != 0);
   return 0;
 }
 

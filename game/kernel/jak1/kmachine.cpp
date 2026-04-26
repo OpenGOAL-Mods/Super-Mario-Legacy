@@ -561,6 +561,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-finalize-last-mario-corpse", (void*)sm64::pc_sm64_finalize_last_mario_corpse);
   make_function_symbol_from_c("pc-sm64-clear-mario-corpse", (void*)sm64::pc_sm64_clear_mario_corpse);
   make_function_symbol_from_c("pc-sm64-set-mario-color", (void*)sm64::pc_sm64_set_mario_color);
+  make_function_symbol_from_c("pc-sm64-set-corpse-render-enabled", (void*)sm64::pc_sm64_set_corpse_render_enabled);
   make_function_symbol_from_c("pc-sm64-set-input", (void*)sm64::pc_sm64_set_input);
   make_function_symbol_from_c("pc-sm64-set-mario-wedges", (void*)sm64::pc_sm64_set_mario_wedges);
   make_function_symbol_from_c("pc-sm64-knockback-mario", (void*)sm64::pc_sm64_knockback_mario);

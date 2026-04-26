@@ -21,6 +21,12 @@
 (define-extern pc-sm64-heal-mario (function none))
 (define-extern pc-sm64-full-heal-mario (function none))
 (define-extern pc-sm64-star-dance-mario (function none))
+;; Color / corpse-render bridges (kmachine.cpp).  pc-sm64-set-mario-color
+;; takes a preset index (0..N-1, see kMarioColorPresets in libsm64_
+;; integration.cpp).  pc-sm64-set-corpse-render-enabled takes 0/1.
+(define-extern pc-sm64-set-mario-color (function int none))
+(define-extern pc-sm64-set-corpse-render-enabled (function int none))
+
 ;; Health-sync bridges (kmachine.cpp).  Each routes Mario through a real
 ;; libsm64 special-state so the proper SM64 hurt animation + knockback
 ;; plays — no hacked wedge subtracts.
@@ -588,6 +594,16 @@
     (loop
       ;; ---- Music orchestration (mute Jak music + pick SM64 track) ----
       (update-mario-music!)
+
+      ;; ---- Push persisted Mario settings to C++ each frame ---------------
+      ;; Cheap idempotent stores (atomic int set + bool set).  Doing it
+      ;; every frame means any change to *mario-settings* — whether from
+      ;; the debug menu, the pause menu, or a settings file reload —
+      ;; takes effect on the next frame without needing per-toggle hooks
+      ;; everywhere it might be edited.
+      (pc-sm64-set-mario-color (-> *mario-settings* mario-color))
+      (pc-sm64-set-corpse-render-enabled
+        (if (-> *mario-settings* render-corpses?) 1 0))
 
       ;; ---- Mario death → kill Jak, wait for respawn, THEN despawn Mario ----
       (let ((dead (< (-> *sm64-mario-health* x) 0.5)))

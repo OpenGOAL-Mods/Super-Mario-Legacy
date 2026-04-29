@@ -293,7 +293,19 @@
       (set! (-> self attack-info-rec attacker) (process->handle arg2))
       (logior! (-> self attack-info-rec mask) (attack-mask attacker)))
     ;; libsm64: Jak took a real hit → also damage SM64 Mario.
-    (pc-sm64-damage-mario)
+    ;; Skip for environmental modes that mario.gc already routes to the correct
+    ;; SM64 handler (lava → pc-sm64-burn-mario; drown → wedge-sync;
+    ;; endlessfall → kill-mario).  Also skip 'mario-sync — that mode is sent
+    ;; by mario.gc's health-sync loop specifically to reduce Jak's HP without
+    ;; bouncing a knockback back to Mario (the loop that caused the bug).
+    (when (not (and (logtest? (-> self attack-info-rec mask) (attack-mask mode))
+                    (let ((m (-> self attack-info-rec mode)))
+                      (or (= m 'lava)
+                          (= m 'drown)
+                          (= m 'drown-death)
+                          (= m 'endlessfall)
+                          (= m 'mario-sync)))))
+      (pc-sm64-damage-mario))
     (cond
       ((and (logtest? (-> self attack-info-rec mask) (attack-mask mode))
             (and (= (-> self attack-info-rec mode) 'damage) (not (and (= (-> self game mode) 'play) (>= 1.0 (-> self fact health))))))

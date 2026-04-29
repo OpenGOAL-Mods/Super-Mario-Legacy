@@ -26,6 +26,7 @@
 
 extern "C" {
 #include "libsm64.h"
+#include "load_surfaces.h"
 #include "decomp/tools/libmio0.h"
 }
 
@@ -4218,6 +4219,7 @@ struct WalkCtx {
   u32 springbox_type;
   u32 spiderwebs_type;
   u32 teetertotter_type;
+  u32 cavetrapdoor_type;
   // Our own GOAL hitbox process type — skip it so its collide-shape doesn't
   // get mirrored into libsm64 as a surface object.
   u32 sm64_mario_col_type;
@@ -4386,6 +4388,10 @@ void do_sweep(WalkCtx& c) {
         (c.spiderwebs_type != 0 && node_type == c.spiderwebs_type);
     bool is_teetertotter_actor =
         (c.teetertotter_type != 0 && node_type == c.teetertotter_type);
+    // cavetrapdoor rotates when it falls open; zeroing its Euler rotation
+    // prevents libsm64's platform_displacement from spinning Mario.
+    bool is_no_rotate_actor =
+        (c.cavetrapdoor_type != 0 && node_type == c.cavetrapdoor_type);
 
     c.result.process_drawables_seen++;
 
@@ -4580,6 +4586,18 @@ void do_sweep(WalkCtx& c) {
       if (tracked.has_obj) {
         if (!c.dry_run) {
           sm64_surface_object_move(tracked.sm64_obj_id, &xform);
+          // For no-rotate actors (e.g. cavetrapdoor), zero the angular velocity
+          // fields that platform_displacement uses to yaw/pitch/roll Mario.
+          // The position and face-angle are still updated correctly so the
+          // collision geometry sits at the right world pose.
+          if (is_no_rotate_actor) {
+            auto* t = surfaces_object_get_transform_ptr(tracked.sm64_obj_id);
+            if (t) {
+              t->aAngleVelPitch = 0;
+              t->aAngleVelYaw   = 0;
+              t->aAngleVelRoll  = 0;
+            }
+          }
         }
         std::memcpy(tracked.last_trans, prim_pos, 12);
         refresh_world_aabb();
@@ -4800,6 +4818,16 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       }
     }
   }
+  if (m_type_cache.cavetrapdoor == 0) {
+    auto ct = jak1::find_symbol_from_c("cavetrapdoor");
+    if (ct.offset != 0) {
+      u32 v = ct->value;
+      if (v != 0 && v != false_val) {
+        m_type_cache.cavetrapdoor = v;
+        lg::info("[libsm64] Actor collision: cached cavetrapdoor type @0x{:X}", v);
+      }
+    }
+  }
 
   // Resolve *target* every frame. Jak's process-drawable pointer changes
   // any time the player is re-spawned (e.g. death), and there's no upside
@@ -4836,6 +4864,7 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
       m_type_cache.springbox,
       m_type_cache.spiderwebs,
       m_type_cache.teetertotter,
+      m_type_cache.cavetrapdoor,
       m_type_cache.sm64_mario_col,
       m_type_cache.touch_tracker,
       m_type_cache.projectile,
@@ -4950,6 +4979,7 @@ LibSM64Manager::TestSweepResult LibSM64Manager::test_sweep(u8* ee_mem,
       0,  // springbox_type: not needed in tests
       0,  // spiderwebs_type: not needed in tests
       0,  // teetertotter_type: not needed in tests
+      0,  // cavetrapdoor_type: not needed in tests
       0,  // sm64_mario_col_type: not needed in tests
       0,  // touch_tracker_type: not needed in tests
       0,  // projectile_type: not needed in tests

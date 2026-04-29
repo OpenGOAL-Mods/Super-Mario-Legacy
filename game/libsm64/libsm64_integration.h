@@ -784,7 +784,7 @@ class LibSM64Manager {
   // dial it live between collision reloads.  Default 0.30 ≈ 72° from
   // horizontal: captures near-vertical walls while leaving genuine
   // ramps alone.
-  float wall_extrusion_ny_max = 0.30f;
+  float wall_extrusion_ny_max = 0.25f;
   // Maximum height (Jak units) of each extruded vertical wall quad.
   // The quad is Y-centered on the source tri's centroid and clamped to
   // this height, so large sloped tris don't produce invisible wall slabs
@@ -904,6 +904,9 @@ class LibSM64Manager {
     u32 sm64_mario_col = 0;    // type ptr for sm64-mario-col (our GOAL hitbox process)
     u32 touch_tracker = 0;     // type ptr for touch-tracker (attack/eco hitboxes, not solid)
     u32 projectile = 0;        // type ptr for projectile (temporary attack effects, not solid)
+    // Actors whose rotation must NOT be forwarded to libsm64 so Mario isn't
+    // spun when the geometry rotates (e.g. cavetrapdoor falls open).
+    u32 cavetrapdoor = 0;      // type ptr for cavetrapdoor (dark cave trapdoor)
   } m_type_cache;
 
   // Memoized type-ancestry tests: (type_ptr) -> is-a-descendant

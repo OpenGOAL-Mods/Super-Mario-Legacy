@@ -470,11 +470,12 @@ void update_walking_speed(struct MarioState *m) {
     if (m->forwardVel <= 0.0f) {
         m->forwardVel += 1.1f;
     } else if (m->forwardVel <= targetSpeed) {
-        // Vanilla SM64 used a hardcoded 43 here (the same value as the Jak↔SM64
-        // scale); we route through g_libsm64_mario_scale so the walk-speed
-        // cap (= 1.1 * scale) tracks the runtime Mario scale.  See libsm64.h.
-        extern float g_libsm64_mario_scale;
-        m->forwardVel += 1.1f - m->forwardVel / g_libsm64_mario_scale;
+        // Hardcoded 43 keeps the formula equilibrium (1.1 * 43 = 47.3 SM64u/frame)
+        // just below the 48 hard cap, regardless of the runtime Mario scale.
+        // This ensures SM64-unit walking speed stays ~constant across all scales;
+        // Jak-unit speed then scales naturally via SM64_TO_JAK_SCALE = 4096/scale
+        // (bigger Mario → lower scale → higher Jak-unit speed).
+        m->forwardVel += 1.1f - m->forwardVel / 43.0f;
     } else if (m->floor->normal.y >= 0.95f) {
         m->forwardVel -= 1.0f;
     }
@@ -486,6 +487,11 @@ void update_walking_speed(struct MarioState *m) {
     m->faceAngle[1] =
         m->intendedYaw - approach_s32((s16)(m->intendedYaw - m->faceAngle[1]), 0, 0x800, 0x800);
     apply_slope_accel(m);
+    // apply_slope_accel can push forwardVel above 48 on steep Jak geometry.
+    // Re-apply the cap so walking speed stays bounded even on slopes.
+    if (m->forwardVel > 48.0f) {
+        m->forwardVel = 48.0f;
+    }
 }
 
 s32 should_begin_sliding(struct MarioState *m) {

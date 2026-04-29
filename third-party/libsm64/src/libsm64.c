@@ -146,7 +146,7 @@ SM64_LIB_FN void sm64_set_force_slide(int enabled)
 // 1.0 when force-slide toggles off so any subsequent non-forced slides
 // (should Mario ever trigger a genuine TERRAIN_SLIDE tri) still feel
 // vanilla.
-SM64_LIB_FN float g_libsm64_force_slide_speed_scale = 0.5f;
+SM64_LIB_FN float g_libsm64_force_slide_speed_scale = 0.25f;
 
 SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale)
 {

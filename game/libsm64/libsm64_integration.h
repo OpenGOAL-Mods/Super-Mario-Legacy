@@ -243,6 +243,7 @@ u64 pc_sm64_drown_mario();
 u64 pc_sm64_endlessfall_mario();
 u64 pc_sm64_kill_mario();
 u64 pc_sm64_get_mario_air();
+u64 pc_sm64_stomp_bounce_mario();
 // GOAL pushes processed pad input here every frame.  buttons is a bitmask
 // (bit 0 = A / cross, bit 1 = B / square|circle, bit 2 = Z / L1|L2).  Values
 // are latched inside LibSM64Manager and the next read_mario_input_from_goal

@@ -18,6 +18,8 @@
 
 ;; libsm64: C++ damage function so enemy hits on Jak also hurt SM64 Mario.
 (define-extern pc-sm64-damage-mario (function none))
+(define-extern pc-sm64-stomp-bounce-mario (function none))
+(define-extern crate type)
 
 ;; libsm64: shell-riding bridge — C++ writes 1.0 when Mario is on the koopa shell.
 ;; Used by the 'query 'mode handler to report 'racer so enemies like sharkey don't aggro.
@@ -694,8 +696,9 @@
                      (fmax (-> self control ground-impact-vel)
                            (- (vector-dot (-> self control transv) (-> self control dynam gravity-normal))))))
        (let ((f0-7 (vector-dot (-> self control dynam gravity-normal)
-                               (vector-! (new 'stack-no-clear 'vector) (-> self control unknown-vector111) (-> self control trans)))))
-         (when (< (-> *TARGET-bank* fall-far) f0-7)
+                               (vector-! (new 'stack-no-clear 'vector) (-> self control unknown-vector111) (-> self control trans))))
+               (crate-threshold (meters 15.0)))
+           (when (< (if (and arg0 (type-type? (-> arg0 type) crate)) crate-threshold (meters 0.8)) f0-7)
            (when (and (target-send-attack arg0
                                           (the-as uint 'bonk)
                                           (the-as touching-shapes-entry (-> arg3 param 0))
@@ -704,6 +707,7 @@
                       (not (logtest? (-> self state-flags) (state-flags being-attacked dying))))
              (set! (-> self control unknown-vector52 quad) (-> self control trans quad))
              (target-timed-invulnerable (seconds 0.1) self)
+             (pc-sm64-stomp-bounce-mario)
              (go target-jump (-> *TARGET-bank* jump-height-min) (-> *TARGET-bank* jump-height-max) (the-as surface #f)))))
        #f)
       ((= arg2 'jump)

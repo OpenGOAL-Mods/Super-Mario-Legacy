@@ -2447,6 +2447,28 @@ u64 pc_sm64_kill_mario() {
   LibSM64Manager::instance().kill_mario_from_goal();
   return 0;
 }
+u64 pc_sm64_stomp_bounce_mario() {
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.has_mario()) return 0;
+  // Give Mario the classic enemy-stomp upward bounce: vel[1] = 30 * scale/43.
+  // We call sm64_mario_attack first (which runs fake_interact_bounce_top and
+  // sets the correct action state/animation); if Mario is already grounded
+  // and the action check inside fails, we fall back to directly setting vel.
+  // Enemy position is passed 100 SM64 units below Mario so INT_HIT_FROM_ABOVE
+  // is guaranteed when the air check passes.
+  auto state = mgr.get_state();
+  float mx = state.position.x();
+  float my = state.position.y();
+  float mz = state.position.z();
+  bool bounced = sm64_mario_attack(mgr.get_mario_id(), mx, my - 100.0f, mz, 100.0f);
+  if (!bounced) {
+    // Mario already landed — set velocity directly so he still hops.
+    float bounce_vel = 30.0f * (g_libsm64_mario_scale / 43.0f);
+    auto cur = mgr.get_state();
+    sm64_set_mario_velocity(mgr.get_mario_id(), cur.velocity.x(), bounce_vel, cur.velocity.z());
+  }
+  return 0;
+}
 u64 pc_sm64_get_mario_air() {
   return static_cast<u64>(LibSM64Manager::instance().get_mario_air_from_goal());
 }

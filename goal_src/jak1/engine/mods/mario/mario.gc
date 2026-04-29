@@ -36,6 +36,7 @@
 (define-extern pc-sm64-drown-mario      (function none))        ; out-of-air kill
 (define-extern pc-sm64-endlessfall-mario (function none))       ; OOB fatal kill
 (define-extern pc-sm64-kill-mario       (function none))        ; sync death from Jak
+(define-extern pc-sm64-stomp-bounce-mario (function none))      ; enemy stomp hop
 ;; Read-only: Mario's drowning timer (frames remaining), for the air HUD.
 ;; Returns a value 0..768 (libsm64 internal) — full breath is around 768,
 ;; underwater starts the countdown, surfacing refills.

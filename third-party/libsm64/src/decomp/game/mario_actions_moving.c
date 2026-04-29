@@ -331,6 +331,23 @@ void apply_slope_accel(struct MarioState *m) {
                 break;
         }
 
+        // libsm64 fork: in no-slip mode, only the VERY_SLIPPERY path (set by
+        // g_libsm64_force_slide / g_libsm64_force_ice in mario_get_floor_class)
+        // should use slope gravity.  SLIPPERY (obstacles) and DEFAULT classes
+        // would otherwise decelerate or reverse Mario on Jak's steeper-than-SM64
+        // geometry.  NOT_SLIPPERY already has slopeAccel=0, VERY_SLIPPERY is
+        // intentional for tube slides and ice walking.
+        // libsm64 fork: cap slope gravity for non-slide surfaces in no-slip
+        // mode.  The vanilla values (2.7 / 1.7) can overcome walk acceleration
+        // on Jak's steep geometry and stall or reverse Mario.  0.5 gives a
+        // gentle slope feel without fighting the player.  VERY_SLIPPERY is
+        // left at 5.3 — it is set only by force_slide/force_ice paths
+        // (tube slides, ice walking) where strong gravity is intentional.
+        extern int g_libsm64_no_slippery_mario;
+        if (g_libsm64_no_slippery_mario && slopeClass != SURFACE_CLASS_VERY_SLIPPERY) {
+            if (slopeAccel > 0.15f) slopeAccel = 0.15f;
+        }
+
         if (floorDYaw > -0x4000 && floorDYaw < 0x4000) {
             m->forwardVel += slopeAccel * steepness;
         } else {

@@ -598,6 +598,15 @@ s32 mario_facing_downhill(struct MarioState *m, s32 turnYaw) {
 u32 mario_floor_is_slippery(struct MarioState *m) {
     f32 normY;
 
+    // Libsm64 fork: when force_slide is on the host is explicitly commanding
+    // a tube-slide state.  Skip every normY check and return slippery
+    // unconditionally so Mario always stays in his sliding action for the
+    // full duration of the tube, regardless of local floor normal.y.
+    extern int g_libsm64_force_slide;
+    if (g_libsm64_force_slide) {
+        return TRUE;
+    }
+
     if (m->curTerrain == TERRAIN_SLIDE
         && m->floor->normal.y < 0.9998477f //~cos(1 deg)
     ) {
@@ -617,11 +626,11 @@ u32 mario_floor_is_slippery(struct MarioState *m) {
             break;
 
         case SURFACE_SLIPPERY:
-            normY = no_slip ? 0.25f : 0.9396926f; //~cos(20 deg)
+            normY = no_slip ? 0.65f : 0.9396926f; //~cos(20 deg)
             break;
 
         default:
-            normY = no_slip ? 0.7f : 0.7880108f; //~cos(38 deg)
+            normY = no_slip ? 0.65f : 0.7880108f; //~cos(38 deg)
             break;
 
         case SURFACE_NOT_SLIPPERY:

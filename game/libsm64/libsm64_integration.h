@@ -655,6 +655,11 @@ class LibSM64Manager {
   // Delete the safety floor surface object if one exists. Called on Mario
   // respawn, delete, and shutdown.
   void clear_safety_floor();
+  // Maintain a large floor quad at wade depth inside tar volumes so Mario can
+  // walk through tar without free-falling. Must be called with m_sm64_lock
+  // held. Destroys the object automatically when m_in_tar_volume goes false.
+  void update_tar_floor(float mario_x_sm64, float mario_z_sm64);
+  void clear_tar_floor();
 
 
   // --- Testing hooks ---------------------------------------------------------
@@ -1016,6 +1021,13 @@ class LibSM64Manager {
   // shell-riding, preventing any brief SHELL_FALL bounce.
   bool m_in_water_volume = false;
   float m_water_level_sm64 = 0.0f;
+  // Set each frame by update_mario_water. When true, update_tar_floor creates
+  // a large floor surface object at m_tar_floor_y_sm64 so Mario can walk in
+  // tar without free-falling, and tick() applies horizontal drag.
+  bool m_in_tar_volume = false;
+  float m_tar_floor_y_sm64 = 0.0f;  // tar floor Y in SM64 units (surface - 1 m)
+  uint32_t m_tar_floor_id = 0;
+  bool m_tar_floor_created = false;
 
   // ---- Launcher glue state ------------------------------------------------
   // When Jak uses a launcher (spring pad), GOAL controls Jak's trajectory.

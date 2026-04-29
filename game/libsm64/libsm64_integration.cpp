@@ -997,6 +997,7 @@ void LibSM64Manager::shutdown() {
   clear_actor_collision();
   clear_yakow_grab();
   clear_safety_floor();
+  clear_tar_floor();
   m_in_launcher = false;
   m_post_glue_settle_frames = 0;
   m_all_static_surfaces.clear();
@@ -1045,6 +1046,7 @@ int32_t LibSM64Manager::create_mario(float x, float y, float z) {
   // a respawn into a completely different area would leave the safety
   // surface object at stale XYZ for one frame.
   clear_safety_floor();
+  clear_tar_floor();
 
   // Reset the lava-entry edge state so a respawn into a dry area doesn't
   // see a stale "was in lava" from the last Mario's death-in-lava frame.
@@ -1092,8 +1094,9 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
     // otherwise the stale m_grabbed_yakow_ee would leak and the next Mario
     // spawn would start "already holding".
     clear_yakow_grab();
-    // Drop the safety floor too so a later respawn starts clean.
+    // Drop the safety floor and tar floor so a later respawn starts clean.
     clear_safety_floor();
+    clear_tar_floor();
     sm64_mario_delete(m_mario_id);
     m_mario_id = -1;
   }
@@ -1155,6 +1158,8 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     update_safety_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
                         m_state.position.y() * JAK_TO_SM64_SCALE,
                         m_state.position.z() * JAK_TO_SM64_SCALE);
+    update_tar_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
+                     m_state.position.z() * JAK_TO_SM64_SCALE);
 
     sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
 
@@ -1217,6 +1222,7 @@ void LibSM64Manager::tick(const MarioInputState& input) {
       sm64_state.position[1] = ly;
       sm64_state.position[2] = lz;
     }
+
   }
 
   // Copy results into our managed buffers (threadsafe)
@@ -1650,6 +1656,72 @@ void LibSM64Manager::clear_safety_floor() {
   sm64_surface_object_delete(m_safety_floor_id);
   m_safety_floor_id = 0;
   m_safety_floor_created = false;
+}
+
+void LibSM64Manager::update_tar_floor(float mario_x_sm64, float mario_z_sm64) {
+  if (!m_initialized || m_mario_id < 0) return;
+  if (!m_in_tar_volume) {
+    // Left tar — destroy the floor object if one exists.
+    if (m_tar_floor_created) {
+      sm64_surface_object_delete(m_tar_floor_id);
+      m_tar_floor_id = 0;
+      m_tar_floor_created = false;
+    }
+    return;
+  }
+  // Large quad anchored at Mario's entry XZ, never moved after creation.
+  // Moving a surface object each tick gives it a derived platform velocity
+  // in SM64's engine which gets applied to Mario (since he's standing on it),
+  // causing runaway acceleration.  By creating it once and leaving it still,
+  // there is no platform velocity.  4000 SM64u half-extent ≈ 80 Jak metres per
+  // side — larger than any tar pool in the game, so Mario can't walk off the edge.
+  if (m_tar_floor_created) return;  // already exists, don't touch it
+  constexpr int32_t kTarHalfExtent = 4000;
+  SM64Surface surfaces[2];
+  std::memset(surfaces, 0, sizeof(surfaces));
+  // CW from above → +Y normal (same winding as the safety floor).
+  surfaces[0].type = 0x0000;
+  surfaces[0].force = 0;
+  surfaces[0].terrain = 0x0000;  // TERRAIN_GRASS — normal friction
+  surfaces[0].vertices[0][0] = -kTarHalfExtent;
+  surfaces[0].vertices[0][1] = 0;
+  surfaces[0].vertices[0][2] = -kTarHalfExtent;
+  surfaces[0].vertices[1][0] = -kTarHalfExtent;
+  surfaces[0].vertices[1][1] = 0;
+  surfaces[0].vertices[1][2] =  kTarHalfExtent;
+  surfaces[0].vertices[2][0] =  kTarHalfExtent;
+  surfaces[0].vertices[2][1] = 0;
+  surfaces[0].vertices[2][2] = -kTarHalfExtent;
+  surfaces[1].type = 0x0000;
+  surfaces[1].force = 0;
+  surfaces[1].terrain = 0x0000;
+  surfaces[1].vertices[0][0] =  kTarHalfExtent;
+  surfaces[1].vertices[0][1] = 0;
+  surfaces[1].vertices[0][2] = -kTarHalfExtent;
+  surfaces[1].vertices[1][0] = -kTarHalfExtent;
+  surfaces[1].vertices[1][1] = 0;
+  surfaces[1].vertices[1][2] =  kTarHalfExtent;
+  surfaces[1].vertices[2][0] =  kTarHalfExtent;
+  surfaces[1].vertices[2][1] = 0;
+  surfaces[1].vertices[2][2] =  kTarHalfExtent;
+  SM64SurfaceObject obj{};
+  obj.transform.position[0] = mario_x_sm64;
+  obj.transform.position[1] = m_tar_floor_y_sm64;
+  obj.transform.position[2] = mario_z_sm64;
+  obj.transform.eulerRotation[0] = 0.0f;
+  obj.transform.eulerRotation[1] = 0.0f;
+  obj.transform.eulerRotation[2] = 0.0f;
+  obj.surfaceCount = 2;
+  obj.surfaces = surfaces;
+  m_tar_floor_id = sm64_surface_object_create(&obj);
+  m_tar_floor_created = true;
+}
+
+void LibSM64Manager::clear_tar_floor() {
+  if (!m_tar_floor_created) return;
+  sm64_surface_object_delete(m_tar_floor_id);
+  m_tar_floor_id = 0;
+  m_tar_floor_created = false;
 }
 
 void LibSM64Manager::load_surfaces(const std::vector<SM64Surface>& surfaces) {
@@ -2463,7 +2535,7 @@ u64 pc_sm64_stomp_bounce_mario() {
   bool bounced = sm64_mario_attack(mgr.get_mario_id(), mx, my - 100.0f, mz, 100.0f);
   if (!bounced) {
     // Mario already landed — set velocity directly so he still hops.
-    float bounce_vel = 30.0f * (g_libsm64_mario_scale / 43.0f);
+    float bounce_vel = 80.0f * (g_libsm64_mario_scale / 43.0f);
     auto cur = mgr.get_state();
     sm64_set_mario_velocity(mgr.get_mario_id(), cur.velocity.x(), bounce_vel, cur.velocity.z());
   }
@@ -3397,6 +3469,11 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   // submerged in lava right now".
   const bool is_lava_volume = (flags & (1u << 25)) != 0;
   const bool in_lava = in_water && is_lava_volume;
+  // wt17 (bit 17) is set by swamp-tar water-vols (e.g. the dark eco pools in
+  // Boggy Swamp).  Like lava, we suppress the SM64 water level so Mario never
+  // enters ACT_WATER_IDLE / swim state, and apply velocity drag in tick() so
+  // he wades at reduced speed rather than running through the tar freely.
+  const bool is_tar_volume = (flags & (1u << 17)) != 0;
 
   // Snapshot current action/health under the geo mutex so we can decide
   // whether we already kicked Mario into a fire action on a previous frame
@@ -3437,7 +3514,7 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
 
   // Decide the SM64 water level to feed libsm64 this tick.
   int sm64_water_level;
-  if (in_water && !is_lava_volume) {
+  if (in_water && !is_lava_volume && !is_tar_volume) {
     float water_y_jak;
     std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
     // libsm64 stores waterLevel in SM64 units, same space as Mario's position.
@@ -3445,11 +3522,21 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
     // Publish for the post-tick shell-over-water correction in tick().
     m_in_water_volume = true;
     m_water_level_sm64 = water_y_jak * JAK_TO_SM64_SCALE;
+    m_in_tar_volume = false;
   } else {
-    // Dry or lava: keep the SM64 water level far below Mario so libsm64
-    // never puts him into ACT_WATER_IDLE / swim state.
-    sm64_water_level = -100000;
     m_in_water_volume = false;
+    m_in_tar_volume = in_water && is_tar_volume;
+    if (m_in_tar_volume) {
+      // Tar: keep SM64 water level far below so Mario never enters swim state.
+      // The actual floor comes from a surface object in update_tar_floor().
+      // 1 Jak metre = 4096 units; * JAK_TO_SM64_SCALE (50/4096) = 50 SM64 units.
+      constexpr float kTarWadeDepthSM64 = 50.0f;
+      float water_y_jak;
+      std::memcpy(&water_y_jak, ee_mem + water_ctrl_ptr + WC_HEIGHT_OFF, 4);
+      m_tar_floor_y_sm64 = water_y_jak * JAK_TO_SM64_SCALE - kTarWadeDepthSM64;
+    }
+    // Dry, lava, or tar: keep SM64 water level far below Mario.
+    sm64_water_level = -100000;
   }
 
   // Edge-triggered re-entry: fire a fresh kick if Mario JUST crossed into

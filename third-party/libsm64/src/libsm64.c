@@ -155,6 +155,19 @@ SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale)
     g_libsm64_force_slide_speed_scale = scale;
 }
 
+// Speed scale for natural slides (not force_slide / tube slides).  Applied
+// to acceleration and the top-speed cap in update_sliding_angle whenever
+// g_libsm64_force_slide is OFF.  Default 0.25 (quarter speed) keeps normal
+// slopes feeling gentle; 1.0 restores vanilla SM64 slide speed.
+SM64_LIB_FN float g_libsm64_normal_slide_speed_scale = 1.0f;
+
+SM64_LIB_FN void sm64_set_normal_slide_speed_scale(float scale)
+{
+    if (scale < 0.01f) scale = 0.01f;
+    if (scale > 4.0f)  scale = 4.0f;
+    g_libsm64_normal_slide_speed_scale = scale;
+}
+
 // "Force Mario to treat whatever floor he's on as ice" toggle.  Shares the
 // SURFACE_CLASS_VERY_SLIPPERY short-circuit in mario_get_floor_class with
 // g_libsm64_force_slide, but does NOT apply the slide-speed scale — so

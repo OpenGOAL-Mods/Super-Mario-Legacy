@@ -264,6 +264,10 @@ extern SM64_LIB_FN void sm64_set_force_slide(int enabled);
 extern SM64_LIB_FN float g_libsm64_force_slide_speed_scale;
 extern SM64_LIB_FN void sm64_set_force_slide_speed_scale(float scale);
 
+// Speed scale for natural slides (g_libsm64_force_slide OFF).  Default 0.25.
+extern SM64_LIB_FN float g_libsm64_normal_slide_speed_scale;
+extern SM64_LIB_FN void sm64_set_normal_slide_speed_scale(float scale);
+
 // "Force ice" toggle (libsm64 fork extension).  Shares the
 // SURFACE_CLASS_VERY_SLIPPERY short-circuit in mario_get_floor_class with
 // g_libsm64_force_slide but does NOT apply the slide-speed scale — so

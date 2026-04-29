@@ -170,12 +170,14 @@ void update_sliding_angle(struct MarioState *m, f32 accel, f32 lossFactor) {
     // unmanageable speeds.  The top-speed cap below is scaled by the
     // same factor for consistency.
     extern int g_libsm64_force_slide;
-    extern float g_libsm64_force_slide_speed_scale;
-    f32 slide_scale = 1.0f;
+    extern float g_libsm64_normal_slide_speed_scale;
+    f32 slide_scale;
     if (g_libsm64_force_slide) {
-        slide_scale = g_libsm64_force_slide_speed_scale;
-        accel *= slide_scale;
+        slide_scale = g_libsm64_force_slide_speed_scale;   // tube slide: 0.5
+    } else {
+        slide_scale = g_libsm64_normal_slide_speed_scale;  // normal slide: 0.25
     }
+    accel *= slide_scale;
 
     struct SM64SurfaceCollisionData *floor = m->floor;
     s16 slopeAngle = atan2s(floor->normal.z, floor->normal.x);

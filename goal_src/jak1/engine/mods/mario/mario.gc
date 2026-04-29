@@ -344,9 +344,13 @@
 (defmethod hud-update ((this hud-health))
   (cond
     ((and *target* (> (-> *sm64-mario-health* x) 0.0))
-     (tally-value this
-                  (the int (/ (-> *sm64-mario-health* x) 2.0))
-                  (the-as int (-> *target* fact health-pickup-time))))
+     ;; Clamp to 0 when Jak's own health is gone — the eco-pill buffer
+     ;; can leave Mario with >0 wedges even while Jak is at 0 HP,
+     ;; which would incorrectly display 1/4 on a dead Jak.
+     (let ((display-hp (if (<= (-> *target* fact health) 0.0)
+                           0
+                           (the int (/ (-> *sm64-mario-health* x) 2.0)))))
+       (tally-value this display-hp (the-as int (-> *target* fact health-pickup-time)))))
     (*target*
      (tally-value this
                   (the int (-> *target* fact health))
@@ -867,21 +871,35 @@
                               (static-attack-info ((mode 'endlessfall)))))
                  (else
                   (let ((hp-loss (max 1 (/ (- (-> self prev-mario-wedges) mario-wedges) 2))))
-                    (format #t "[sync-debug]   -> JAK ATTACK 'generic x~D times~%" hp-loss)
+                    (format #t "[sync-debug]   -> JAK ATTACK 'mario-sync x~D times~%" hp-loss)
                     (dotimes (i hp-loss)
+                      ;; Use 'mario-sync so target-handler.gc can distinguish
+                      ;; this from a real enemy hit and skip pc-sm64-damage-mario,
+                      ;; preventing the knockback-loop (Mario damage → Jak attack
+                      ;; → Mario knockback → repeat).
                       (send-event *target* 'attack #f
-                                  (static-attack-info ((mode 'generic))))))))))
+                                  (static-attack-info ((mode 'mario-sync))))))))))
 
-            ;; (3) No edge fired — floor sync.  Same prev-update as
-            ;; jak-edge: we forced Mario to target, so next frame's edge
-            ;; detector should treat target as the baseline.
+            ;; (3) No edge fired — floor sync.
+            ;; When going DOWN (damage), advance prev to target so next
+            ;; frame's mario-edge doesn't re-fire on our own forced change.
+            ;; When going UP (healing), do NOT advance prev — C++ won't
+            ;; update *sm64-mario-health* until next tick, so the following
+            ;; frame would see mario-wedges < prev-mario-wedges and falsely
+            ;; fire mario-edge → attack Jak.  Leaving prev at mario-wedges
+            ;; keeps the detector silent until the healed value arrives.
             ((!= mario-wedges target-wedges)
-             (set! expected-next-mario-wedges target-wedges)
+             (when (< target-wedges mario-wedges)
+               (set! expected-next-mario-wedges target-wedges))
              (format #t "[sync-debug] FLOOR-SYNC mario-w:~D -> target:~D (jak-hp=~f eco=~f/~f)~%"
                      mario-wedges target-wedges jak-hp jak-eco jak-eco-max)
              (pc-sm64-set-mario-wedges target-wedges)))
 
-           (set! (-> self prev-jak-health) jak-hp)
+           ;; Read Jak's health AFTER all send-event calls above so that
+           ;; when mario-edge sent an attack to Jak this frame, next frame's
+           ;; jak-edge detector sees no change (prev == new) and doesn't
+           ;; fire a knockback back at Mario, breaking the damage cycle.
+           (set! (-> self prev-jak-health) (if *target* (-> *target* fact health) 0.0))
            (set! (-> self prev-mario-wedges) expected-next-mario-wedges))))
 
       ;; ---- Track Mario's position ----
@@ -1194,7 +1212,9 @@
              ;; it's the shield Jak can eat before real damage starts.
              ;; So effective HP = health + (full-pill ? 1 : 0), and the
              ;; max HP the HUD can ever show = health-max + 1.
-             (effective-jak   (+ jak-hp (if full-pill? 1 0)))
+                          ;; Clamp to 0 when Jak is dead — the pill buffer doesn't
+             ;; grant an effective hit-point on a dead Jak.
+             (effective-jak   (if (<= jak-hp 0) 0 (+ jak-hp (if full-pill? 1 0))))
              (effective-max   (+ jak-hp-max 1))
              (mario-hp        (the int (-> *sm64-mario-health* x)))
              (desync?         (!= (* effective-jak 2) mario-hp))

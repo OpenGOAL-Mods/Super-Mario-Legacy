@@ -152,7 +152,7 @@
        :wheel-flip-art-height (meters 3.2969)
        :wheel-flip-art-dist (meters 12.5)
        :duck-slide-distance (meters 5.75)
-       :fall-far (meters 99999)
+       :fall-far (meters 99999) ;; effectively disable Jak's fall damage
        :fall-far-inc (meters 20)
        :attack-timeout (seconds 0.3)
        :ground-timeout (seconds 0.2)

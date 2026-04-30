@@ -2519,7 +2519,7 @@ u64 pc_sm64_kill_mario() {
   LibSM64Manager::instance().kill_mario_from_goal();
   return 0;
 }
-u64 pc_sm64_stomp_bounce_mario() {
+u64 pc_sm64_stomp_bounce_mario() { // potentilly look at trampoline bounce instead
   auto& mgr = LibSM64Manager::instance();
   if (!mgr.has_mario()) return 0;
   // Give Mario the classic enemy-stomp upward bounce: vel[1] = 30 * scale/43.

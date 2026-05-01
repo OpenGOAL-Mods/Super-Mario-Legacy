@@ -606,7 +606,7 @@
       (update-mario-music!)
 
       ;; ---- Longjump trainer (debug helper, see definition below) -------
-      (longjump-trainer-tick)
+      ;; (longjump-trainer-tick)
 
       ;; ---- Push persisted Mario settings to C++ each frame ---------------
       ;; Cheap idempotent stores (atomic int set + bool set).  Doing it

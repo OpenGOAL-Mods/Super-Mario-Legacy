@@ -2564,23 +2564,27 @@ u64 pc_sm64_kill_mario() {
 u64 pc_sm64_stomp_bounce_mario() { // potentilly look at trampoline bounce instead
   auto& mgr = LibSM64Manager::instance();
   if (!mgr.has_mario()) return 0;
-  // Give Mario the classic enemy-stomp upward bounce: vel[1] = 30 * scale/43.
-  // We call sm64_mario_attack first (which runs fake_interact_bounce_top and
-  // sets the correct action state/animation); if Mario is already grounded
-  // and the action check inside fails, we fall back to directly setting vel.
-  // Enemy position is passed 100 SM64 units below Mario so INT_HIT_FROM_ABOVE
-  // is guaranteed when the air check passes.
+  // Fixed bounce velocity — independent of how fast Mario was falling.
+  // sm64_mario_attack's fake_interact_bounce_top adds to the incoming vertical
+  // velocity, so stomping from a high jump would produce a much taller bounce
+  // than stomping from a low one. We call sm64_mario_attack purely to set the
+  // correct action state and animation, then unconditionally override Y velocity
+  // so the bounce height is always the same regardless of fall speed.
+  float bounce_vel = 20.0f * (g_libsm64_mario_scale / 43.0f);
   auto state = mgr.get_state();
-  float mx = state.position.x();
-  float my = state.position.y();
-  float mz = state.position.z();
-  bool bounced = sm64_mario_attack(mgr.get_mario_id(), mx, my - 100.0f, mz, 100.0f);
-  if (!bounced) {
-    // Mario already landed — set velocity directly so he still hops.
-    float bounce_vel = 80.0f * (g_libsm64_mario_scale / 43.0f);
-    auto cur = mgr.get_state();
-    sm64_set_mario_velocity(mgr.get_mario_id(), cur.velocity.x(), bounce_vel, cur.velocity.z());
-  }
+  // Convert Jak-unit position to SM64 units for the fake attack object.
+  float mx = state.position.x() * JAK_TO_SM64_SCALE;
+  float my = state.position.y() * JAK_TO_SM64_SCALE;
+  float mz = state.position.z() * JAK_TO_SM64_SCALE;
+  sm64_mario_attack(mgr.get_mario_id(), mx, my - 100.0f, mz, 100.0f);
+  // Force ACT_FREEFALL so no action handler overrides vel[1] on the next tick.
+  constexpr uint32_t kActFreefall = 0x0100088C;
+  sm64_set_mario_action(mgr.get_mario_id(), kActFreefall);
+  // Set fixed bounce velocity; pass XZ velocity in SM64 units.
+  auto cur = mgr.get_state();
+  float cur_vx = cur.velocity.x() * JAK_TO_SM64_SCALE;
+  float cur_vz = cur.velocity.z() * JAK_TO_SM64_SCALE;
+  sm64_set_mario_velocity(mgr.get_mario_id(), cur_vx, bounce_vel, cur_vz);
   return 0;
 }
 u64 pc_sm64_hover_mario() {
@@ -3733,6 +3737,7 @@ constexpr u32 PDRAW_ROOT_OFF = 108;
 constexpr u32 PDRAW_NODE_LIST_OFF = 112;        // process-drawable.node-list (basic), declared 116 - 4
 constexpr u32 CSHAPE_TRANS_OFF = 12;
 constexpr u32 CSHAPE_QUAT_OFF = 28;
+constexpr u32 CSHAPE_SCALE_OFF = 44;  // trs::scale, declared offset 48, runtime 48-4=44
 constexpr u32 CSHAPE_ROOT_PRIM_OFF = 156;
 constexpr u32 PRIM_TRANSFORM_INDEX_OFF = 8;     // collide-shape-prim.transform-index (int8)
 // Jak 1 collide-kind is a 64-bit bitfield (uint64). Both the root prim's
@@ -4609,10 +4614,17 @@ void do_sweep(WalkCtx& c) {
                        c.prim_group_type, c.prim_sphere_type, prims);
     if (prims.empty()) continue;
 
-    // Read the actor's world transform.
-    float trans[4], quat[4];
+    // Read the actor's world transform and per-instance scale.
+    float trans[4], quat[4], root_scale[4];
     if (!read_vec4(c.ee_mem, root + CSHAPE_TRANS_OFF, c.mem_size, trans)) continue;
     if (!read_vec4(c.ee_mem, root + CSHAPE_QUAT_OFF, c.mem_size, quat)) continue;
+    // trs::scale at runtime offset 44. Default to (1,1,1) if unreadable or degenerate.
+    if (!read_vec4(c.ee_mem, root + CSHAPE_SCALE_OFF, c.mem_size, root_scale)) {
+      root_scale[0] = root_scale[1] = root_scale[2] = 1.0f;
+    }
+    for (int k = 0; k < 3; k++) {
+      if (!std::isfinite(root_scale[k]) || root_scale[k] <= 0.0f) root_scale[k] = 1.0f;
+    }
 
     // Sanity: finite trans, unit-ish quaternion. Replace garbage rotations with identity.
     if (!std::isfinite(trans[0]) || !std::isfinite(trans[1]) || !std::isfinite(trans[2])) {
@@ -4742,24 +4754,42 @@ void do_sweep(WalkCtx& c) {
       };
 
       if (tracked.has_obj) {
-        if (!c.dry_run) {
-          sm64_surface_object_move(tracked.sm64_obj_id, &xform);
-          // For no-rotate actors (e.g. cavetrapdoor), zero the angular velocity
-          // fields that platform_displacement uses to yaw/pitch/roll Mario.
-          // The position and face-angle are still updated correctly so the
-          // collision geometry sits at the right world pose.
-          if (is_no_rotate_actor) {
-            auto* t = surfaces_object_get_transform_ptr(tracked.sm64_obj_id);
-            if (t) {
-              t->aAngleVelPitch = 0;
-              t->aAngleVelYaw   = 0;
-              t->aAngleVelRoll  = 0;
+        // Guard against process-slot recycling: if a GOAL process dies and a
+        // new process of the same type is allocated at the same EE address, its
+        // prim_ptr is also the same → same key → we'd "move" the old surface
+        // object from actor A's position to actor B's position in a single frame.
+        // libsm64 interprets that delta as platform displacement and teleports
+        // Mario. Detect it by checking for an implausibly large single-frame
+        // jump (> 50 m in Jak units) and force a delete+recreate instead.
+        constexpr float kRecycleThresholdSq = 204800.0f * 204800.0f;  // 50 m
+        float dx = prim_pos[0] - tracked.last_trans[0];
+        float dy = prim_pos[1] - tracked.last_trans[1];
+        float dz = prim_pos[2] - tracked.last_trans[2];
+        bool slot_recycled = (dx * dx + dy * dy + dz * dz) > kRecycleThresholdSq;
+        if (slot_recycled) {
+          if (!c.dry_run) sm64_surface_object_delete(tracked.sm64_obj_id);
+          tracked.has_obj = false;
+          // Fall through to the creation path below.
+        } else {
+          if (!c.dry_run) {
+            sm64_surface_object_move(tracked.sm64_obj_id, &xform);
+            // For no-rotate actors (e.g. cavetrapdoor), zero the angular velocity
+            // fields that platform_displacement uses to yaw/pitch/roll Mario.
+            // The position and face-angle are still updated correctly so the
+            // collision geometry sits at the right world pose.
+            if (is_no_rotate_actor) {
+              auto* t = surfaces_object_get_transform_ptr(tracked.sm64_obj_id);
+              if (t) {
+                t->aAngleVelPitch = 0;
+                t->aAngleVelYaw   = 0;
+                t->aAngleVelRoll  = 0;
+              }
             }
           }
+          std::memcpy(tracked.last_trans, prim_pos, 12);
+          refresh_world_aabb();
+          continue;
         }
-        std::memcpy(tracked.last_trans, prim_pos, 12);
-        refresh_world_aabb();
-        continue;
       }
 
       if (created_this_frame >= MAX_ACTOR_SURFACE_OBJECTS) break;
@@ -4777,6 +4807,27 @@ void do_sweep(WalkCtx& c) {
         if (surfaces.empty()) {
           c.broken_meshes.insert(mesh_ptr);
           continue;
+        }
+        // Bake per-instance root scale into the local-space mesh geometry.
+        // libsm64 surface objects have no scale field. Mesh-prim actors like
+        // citb-plat share a single mesh template authored at scale=1, with
+        // per-instance scale stored in trs::scale (offset 44). Sphere-prim
+        // actors (enemies etc.) have their collision radius already authored
+        // at the correct world size, so scale is NOT applied to that path.
+        if (root_scale[0] != 1.0f || root_scale[1] != 1.0f || root_scale[2] != 1.0f) {
+          for (auto& s : surfaces) {
+            for (int v = 0; v < 3; v++) {
+              s.vertices[v][0] = static_cast<int32_t>(s.vertices[v][0] * root_scale[0]);
+              s.vertices[v][1] = static_cast<int32_t>(s.vertices[v][1] * root_scale[1]);
+              s.vertices[v][2] = static_cast<int32_t>(s.vertices[v][2] * root_scale[2]);
+            }
+          }
+          for (int k = 0; k < 3; k++) {
+            local_aabb_min[k] *= root_scale[k];
+            local_aabb_max[k] *= root_scale[k];
+            if (local_aabb_min[k] > local_aabb_max[k])
+              std::swap(local_aabb_min[k], local_aabb_max[k]);
+          }
         }
       } else {
         // Sphere prim: tessellate into SM64Surfaces using the prim's

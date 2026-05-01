@@ -7,8 +7,10 @@
  * input translation, and provides geometry data for rendering.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -244,6 +246,7 @@ u64 pc_sm64_endlessfall_mario();
 u64 pc_sm64_kill_mario();
 u64 pc_sm64_get_mario_air();
 u64 pc_sm64_stomp_bounce_mario();
+u64 pc_sm64_hover_mario();
 // GOAL pushes processed pad input here every frame.  buttons is a bitmask
 // (bit 0 = A / cross, bit 1 = B / square|circle, bit 2 = Z / L1|L2).  Values
 // are latched inside LibSM64Manager and the next read_mario_input_from_goal
@@ -297,6 +300,7 @@ class LibSM64Manager {
   //     is alive and at the continue-point trans.
   bool respawn_pending() const { return m_respawn_pending; }
   void set_respawn_pending(bool on) { m_respawn_pending = on; }
+  void request_hover() { m_hover_requested.store(true, std::memory_order_release); }
 
   // Per-frame tick
   void tick(const MarioInputState& input);
@@ -537,6 +541,15 @@ class LibSM64Manager {
   // Latched by pc-sm64-set-input.  Public so the registered bridge can
   // write without needing friend status.  buttons: bit0=A, bit1=B, bit2=Z.
   void set_input_from_goal(float sx, float sy, uint32_t buttons) {
+    // Normalize the stick vector so its magnitude never exceeds 1.0.
+    // Per-axis clamping alone isn't enough: at 45° with high sensitivity both
+    // axes can be ~0.94, giving r ≈ 1.33.  SM64 computes intendedMag = r²×32,
+    // so that's nearly 2× max speed.  Scale the pair down proportionally.
+    float mag = std::sqrt(sx * sx + sy * sy);
+    if (mag > 1.0f) {
+      sx /= mag;
+      sy /= mag;
+    }
     m_input_stick_x.store(sx, std::memory_order_release);
     m_input_stick_y.store(sy, std::memory_order_release);
     m_input_buttons.store(buttons, std::memory_order_release);
@@ -1151,6 +1164,7 @@ class LibSM64Manager {
   // pass through the lava surface without any reaction on the second drop.
   bool m_prev_in_lava = false;
   int m_star_dance_timer = -1;  // -1 = inactive, >= 0 = frames since star dance started
+  std::atomic<bool> m_hover_requested{false};  // set by pc_sm64_hover_mario, consumed in tick()
   // Diagnostic counter bumped every time teleport_mario_to_jak fires.
   // The ImGui panel displays the delta-per-frame to confirm the cutscene
   // gate is actually reaching the teleport function.

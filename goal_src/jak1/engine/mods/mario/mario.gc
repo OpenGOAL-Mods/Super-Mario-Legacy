@@ -37,6 +37,7 @@
 (define-extern pc-sm64-endlessfall-mario (function none))       ; OOB fatal kill
 (define-extern pc-sm64-kill-mario       (function none))        ; sync death from Jak
 (define-extern pc-sm64-stomp-bounce-mario (function none))      ; enemy stomp hop
+(define-extern pc-sm64-hover-mario (function none))             ; debug R2 hover
 ;; Read-only: Mario's drowning timer (frames remaining), for the air HUD.
 ;; Returns a value 0..768 (libsm64 internal) — full breath is around 768,
 ;; underwater starts the countdown, surfacing refills.
@@ -756,6 +757,12 @@
                                             (cpad-hold? 0 r1))                          4 0)))))
           (pc-sm64-set-input out-x out-y btns)))
 
+      ;; Debug hover: R2 in debug mode makes Mario slowly rise (like Jak's debug float)
+      (when (and (= *cheat-mode* 'debug)
+                 (cpad-hold? 0 r2)
+                 (not (-> self mario-dead)))
+        (pc-sm64-hover-mario))
+
       ;; ---- Health synchronization (Jak ↔ Mario) ---------------------------
       ;;
       ;; HISTORICAL HACKS (now removed, kept here for reference in case the
@@ -1001,7 +1008,7 @@
               (+ (-> *sm64-mario-pos* y) (meters 0.3))
               (+ (-> *sm64-mario-pos* z) (* (cos yaw) (meters 1.5)))
               1.0)
-            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 80 'punch)))
+            (let ((tracker (sm64-spawn-attack-tracker self body-pos (* (meters 2.0) atk-scale) 280 'punch)))
               (when tracker
                 (send-event (ppointer->process tracker) 'function
                   (lambda :behavior touch-tracker ()

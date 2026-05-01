@@ -570,6 +570,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-endlessfall-mario", (void*)sm64::pc_sm64_endlessfall_mario);
   make_function_symbol_from_c("pc-sm64-kill-mario", (void*)sm64::pc_sm64_kill_mario);
   make_function_symbol_from_c("pc-sm64-stomp-bounce-mario", (void*)sm64::pc_sm64_stomp_bounce_mario);
+  make_function_symbol_from_c("pc-sm64-hover-mario", (void*)sm64::pc_sm64_hover_mario);
   make_function_symbol_from_c("pc-sm64-get-mario-air", (void*)sm64::pc_sm64_get_mario_air);
   make_function_symbol_from_c("pc-sm64-play-sound", (void*)sm64::pc_sm64_play_sound);
   make_function_symbol_from_c("pc-sm64-play-music", (void*)sm64::pc_sm64_play_music);

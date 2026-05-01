@@ -1172,6 +1172,11 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     update_tar_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
                      m_state.position.z() * JAK_TO_SM64_SCALE);
 
+    // printf("[tick] Mario input: stick=(%.2f, %.2f) camLook=(%.2f, %.2f) buttons=(A=%d B=%d Z=%d)\n",
+    //              sm64_input.stickX, sm64_input.stickY,
+    //              sm64_input.camLookX, sm64_input.camLookZ,
+    //              sm64_input.buttonA, sm64_input.buttonB, sm64_input.buttonZ);
+
     sm64_mario_tick(m_mario_id, &sm64_input, &sm64_state, &sm64_geo);
 
     // Post-tick shell-over-water correction.
@@ -1232,6 +1237,32 @@ void LibSM64Manager::tick(const MarioInputState& input) {
       sm64_state.position[0] = lx;
       sm64_state.position[1] = ly;
       sm64_state.position[2] = lz;
+    }
+
+    // --- Debug hover: R2 in debug mode slowly lifts Mario upward ----------
+    // Set by pc_sm64_hover_mario (called from GOAL every frame R2 is held).
+    // Consumes the flag atomically so hover stops as soon as GOAL stops
+    // calling (i.e. R2 released or debug mode left).
+    if (m_hover_requested.load(std::memory_order_acquire)) {
+      m_hover_requested.store(false, std::memory_order_release);
+      // Rise: ~512 Jak units per SM64 tick (matches Jak's debug float rate).
+      constexpr float kHoverRiseJak = 800.0f;
+      float new_y_sm64 = sm64_state.position[1] + kHoverRiseJak * JAK_TO_SM64_SCALE;
+      sm64_set_mario_position(m_mario_id,
+                              sm64_state.position[0],
+                              new_y_sm64,
+                              sm64_state.position[2]);
+      // Zero vertical velocity so gravity doesn't fight the hover each tick.
+      sm64_set_mario_velocity(m_mario_id,
+                              sm64_state.velocity[0],
+                              0.0f,
+                              sm64_state.velocity[2]);
+      // Force freefall so grounded action handlers don't snap Mario back to
+      // the floor on the next substep.
+      constexpr uint32_t kActFreefall = 0x0100088C;  // ACT_FREEFALL
+      sm64_set_mario_action(m_mario_id, kActFreefall);
+      sm64_state.position[1] = new_y_sm64;
+      sm64_state.velocity[1] = 0.0f;
     }
 
   }
@@ -2552,6 +2583,13 @@ u64 pc_sm64_stomp_bounce_mario() { // potentilly look at trampoline bounce inste
   }
   return 0;
 }
+u64 pc_sm64_hover_mario() {
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.has_mario()) return 0;
+  mgr.request_hover();
+  return 0;
+}
+
 u64 pc_sm64_get_mario_air() {
   return static_cast<u64>(LibSM64Manager::instance().get_mario_air_from_goal());
 }

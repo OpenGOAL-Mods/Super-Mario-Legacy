@@ -73,6 +73,10 @@
 ;; sm64-mario-col's idle loop calls it every tick to track level
 ;; transitions and mute Jak's music while SM64 music is enabled.
 (define-extern update-mario-music! (function none))
+;; Forward decl — longjump-trainer-tick is defined at the bottom of this
+;; file, but called from the watcher loop above its definition.  GOAL
+;; doesn't allow forward refs without an extern.
+(define-extern longjump-trainer-tick (function none))
 
 ;; The lurker-crab skelgroup is global now (see game.gd — `lurkercrab.o`
 ;; and `lurkercrab-ag.go` are promoted into GAME.CGO following the
@@ -599,6 +603,9 @@
     (loop
       ;; ---- Music orchestration (mute Jak music + pick SM64 track) ----
       (update-mario-music!)
+
+      ;; ---- Longjump trainer (debug helper, see definition below) -------
+      (longjump-trainer-tick)
 
       ;; ---- Push persisted Mario settings to C++ each frame ---------------
       ;; Cheap idempotent stores (atomic int set + bool set).  Doing it
@@ -1363,4 +1370,246 @@
       (none))
     :name "crab-test-driver"
     :from *4k-dead-pool*)
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; in-bubble? — point-in-sphere check against Jak's position.
+;;
+;; Returns #t when (-> *target* control trans) is within `radius` of the
+;; given (x, y, z) center, #f otherwise (and #f when there's no *target*
+;; — title screen, between-level loads).  When *debug-segment* is on the
+;; sphere also draws — green if Jak's inside, red if not.  All inputs are
+;; raw GOAL units (4096 = 1 m), so callers can pass `(meters 5)` style
+;; constants.
+;;
+;;   (in-bubble? 0.0 0.0 0.0 (meters 10))   ;; 10m bubble at origin
+;;   (when (in-bubble? cx cy cz r) ...)
+;; ---------------------------------------------------------------------------
+(defun in-bubble? ((x float) (y float) (z float) (radius float))
+  (cond
+    ((not *target*) #f)
+    (else
+     (let* ((tx       (-> *target* control trans x))
+            (ty       (-> *target* control trans y))
+            (tz       (-> *target* control trans z))
+            (dx       (- tx x))
+            (dy       (- ty y))
+            (dz       (- tz z))
+            (dist-sq  (+ (* dx dx) (+ (* dy dy) (* dz dz))))
+            (r-sq     (* radius radius))
+            (inside   (< dist-sq r-sq)))
+       (when *debug-segment*
+         (let ((center (new 'stack-no-clear 'vector)))
+           (set-vector! center x y z 1.0)
+           (add-debug-sphere
+             #t
+             (bucket-id debug-no-zbuf)
+             center
+             radius
+             (if inside
+               (new 'static 'rgba :g #xc0 :a #x80)    ;; green = inside
+               (new 'static 'rgba :r #xc0 :a #x80))))) ;; red   = outside
+       inside))))
+
+;; ---------------------------------------------------------------------------
+;; Retail-safe debug-style draws.
+;;
+;; The standard `add-debug-line` / `add-debug-sphere` / `add-debug-text-3d`
+;; family is `defun-debug` (rebinds to `nothing` in retail) AND writes to
+;; `(-> (current-frame) debug-buf)` — which only gets allocated when
+;; *debug-segment* is true (engine/gfx/hw/display.gc:236-238).  So even
+;; just removing the `-debug` from the macro leaves a NULL buffer pointer
+;; at runtime in retail builds.
+;;
+;; The fix is the same trick that `letterbox` / `blackout` (engine/game/
+;; main.gc:24, 61) use: write to `global-buf` (always allocated) with
+;; `(bucket-id debug-no-zbuf)` (one of the last buckets, renders on top,
+;; works in retail).  These helpers are direct ports of internal-draw-
+;; debug-line / internal-draw-debug-text-3d / add-debug-sphere-from-table
+;; from engine/debug/, with the buffer + macro change applied.
+;;
+;; *debug-sphere-table* (the precomputed 300-vert wireframe) lives in
+;; `engine/debug/debug-sphere.gc` which is bundled into ENGINE.CGO and
+;; GAME.CGO and populated by a top-level `defun` (not defun-debug), so
+;; the table is always available.
+;; ---------------------------------------------------------------------------
+(define-extern *debug-sphere-table* debug-sphere-table)
+
+(defun retail-draw-line ((p0 vector) (p1 vector) (color rgba))
+  "Retail-safe single-color 3D line.  Mirror of internal-draw-debug-line
+   without the fade modes, writing to global-buf."
+  (let ((s4-0 (new 'stack 'vector4w-2))
+        (s1-0 (new 'stack 'vector4w-2)))
+    (set! (-> p0 w) 1.0)
+    (set! (-> p1 w) 1.0)
+    (when (and (transform-point-qword! (-> s4-0 vector 0) p0)
+               (transform-point-qword! (-> s4-0 vector 1) p1))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id debug-no-zbuf))
+        (with-cnt-vif-block (buf)
+          (dma-buffer-add-gif-tag buf
+                                  (new 'static 'gif-tag64
+                                       :nloop 1 :eop 1 :pre 1 :nreg 4
+                                       :prim (gif-prim line))
+                                  (gs-reg-list rgbaq xyzf2 rgbaq xyzf2))
+          (set! (-> s1-0 vector 0 x) (the-as int (-> color r)))
+          (set! (-> s1-0 vector 0 y) (the-as int (-> color g)))
+          (set! (-> s1-0 vector 0 z) (the-as int (-> color b)))
+          (set! (-> s1-0 vector 0 w) (the-as int (-> color a)))
+          (set! (-> s1-0 vector 1 x) (the-as int (-> color r)))
+          (set! (-> s1-0 vector 1 y) (the-as int (-> color g)))
+          (set! (-> s1-0 vector 1 z) (the-as int (-> color b)))
+          (set! (-> s1-0 vector 1 w) (the-as int (-> color a)))
+          (+! (-> s4-0 vector 0 z) -8192)
+          (+! (-> s4-0 vector 1 z) -8192)
+          (dma-buffer-add-uint128 buf
+                                  (-> s1-0 quad 0)
+                                  (-> s4-0 quad 0)
+                                  (-> s1-0 quad 1)
+                                  (-> s4-0 quad 1))))))
+  (none))
+
+(defun retail-draw-sphere ((center vector) (radius float) (color rgba))
+  "Retail-safe wireframe sphere.  Same point table as add-debug-sphere-
+   from-table, but routes lines through retail-draw-line so they reach
+   global-buf instead of the (null in retail) debug-buf."
+  (rlet ((vf1 :class vf)
+         (vf2 :class vf)
+         (vf3 :class vf)
+         (vf4 :class vf)
+         (vf5 :class vf))
+    (let ((p1 (new-stack-vector0))
+          (p2 (new-stack-vector0))
+          (p3 (new-stack-vector0))
+          (points (-> *debug-sphere-table* point)))
+      (.lvf vf1 (&-> center quad))
+      (.mov vf2 radius)
+      (dotimes (i (* DEBUG_SPHERE_SEC_W DEBUG_SPHERE_SEC_H))
+        (.lvf vf3 (&-> points 0 quad))
+        (.lvf vf4 (&-> points 1 quad))
+        (.lvf vf5 (&-> points 2 quad))
+        (set! points (the-as (inline-array vector) (-> points 3)))
+        (.mul.x.vf vf3 vf3 vf2)
+        (.mul.x.vf vf4 vf4 vf2)
+        (.mul.x.vf vf5 vf5 vf2)
+        (.add.vf vf3 vf3 vf1)
+        (.add.vf vf4 vf4 vf1)
+        (.add.vf vf5 vf5 vf1)
+        (.svf (&-> p1 quad) vf3)
+        (.svf (&-> p2 quad) vf4)
+        (.svf (&-> p3 quad) vf5)
+        (retail-draw-line p1 p2 color)
+        (retail-draw-line p1 p3 color))))
+  (none))
+
+(defun retail-draw-text-3d ((str string) (location vector) (color font-color))
+  "Retail-safe 3D-positioned text.  Mirror of internal-draw-debug-text-3d
+   that writes to global-buf so it survives in retail builds."
+  (let ((s2-0 (new 'stack-no-clear 'vector4w)))
+    (set! (-> s2-0 quad) (the-as uint128 0))
+    (when (transform-point-qword! (the-as vector4w s2-0) location)
+      (with-dma-buffer-add-bucket ((s3-0 (-> (current-frame) global-buf))
+                                   (bucket-id debug-no-zbuf))
+        (let ((ctx (new 'stack 'font-context *font-default-matrix*
+                        (+ -1792 (/ (-> s2-0 x) 16))
+                        (- (+ -8 (/ (-> s2-0 y) 16))
+                           (-> *video-parms* screen-miny))
+                        0.0
+                        color
+                        (font-flags shadow kerning))))
+          (set! (-> ctx origin z) (the float (/ (-> s2-0 z) 16)))
+          (draw-string str s3-0 ctx)))))
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; Longjump trainer — per-frame helper, retail-safe.
+;;
+;; Capture three positions with `(save-bubble-pos! 1)` / `2` / `3` from the
+;; REPL while Jak stands where you want each one.  Then `longjump-trainer-
+;; tick` (called from mario.gc's watcher loop) does:
+;;   - if Jak is inside the bubble at pos 1 (radius 6 m) →
+;;     - print "sorry" message on screen
+;;     - draw wireframe sphere + "start longjump here" 3D label at pos 2
+;;     - draw wireframe sphere + "end ur longjump here" 3D label at pos 3
+;;
+;; All draws go through retail-draw-* above, so they're visible in BOTH
+;; debug and retail builds.  in-bubble? above still gates its trigger
+;; sphere on *debug-segment* (dev-only visualization aid).
+;; ---------------------------------------------------------------------------
+(define-perm *bubble-pos-1* vector (new 'global 'vector))
+(define-perm *bubble-pos-2* vector (new 'global 'vector))
+(define-perm *bubble-pos-3* vector (new 'global 'vector))
+
+(defun save-bubble-pos! ((slot int))
+  "Snapshot Jak's current position into one of the three trainer slots.
+   Call from the REPL while standing where you want the slot.  Slot 1 is
+   the trigger bubble center, slots 2 and 3 are the start/end labels."
+  (when *target*
+    (let ((dest (cond
+                  ((= slot 1) *bubble-pos-1*)
+                  ((= slot 2) *bubble-pos-2*)
+                  ((= slot 3) *bubble-pos-3*)
+                  (else (the vector #f)))))
+      (when dest
+        (set! (-> dest x) (-> *target* control trans x))
+        (set! (-> dest y) (-> *target* control trans y))
+        (set! (-> dest z) (-> *target* control trans z))
+        (set! (-> dest w) 1.0)
+        (format #t "[bubble] slot ~D saved at (~f ~f ~f)~%"
+                slot (-> dest x) (-> dest y) (-> dest z)))))
+  (none))
+
+;; ---- Permanent (hardcoded) trainer positions ------------------------------
+;; Captured via save-bubble-pos! and locked in here so they survive
+;; restarts.  To recapture: stand at the new spot, run save-bubble-pos!
+;; <slot> in the REPL, copy the printed coords into the right defconstant
+;; below, recompile.
+(defconstant *bubble-pos-1-x*  11110828.0)
+(defconstant *bubble-pos-1-y* -94126.0781)
+(defconstant *bubble-pos-1-z* -20129848.0)
+(defconstant *bubble-pos-2-x*  11062840.0)
+(defconstant *bubble-pos-2-y* -93594.4843)
+(defconstant *bubble-pos-2-z* -20086188.0)
+(defconstant *bubble-pos-3-x*  10922921.0)
+(defconstant *bubble-pos-3-y* -95044.3906)
+(defconstant *bubble-pos-3-z* -20116414.0)
+
+(defun longjump-trainer-tick ()
+  "Per-frame check.  Trigger bubble at the slot-1 constants; if Jak is
+   inside, draw the markers at slots 2 and 3."
+  (when (in-bubble?
+          *bubble-pos-1-x* *bubble-pos-1-y* *bubble-pos-1-z*
+          (meters 6))
+    ;; ---- Screen-space text (retail-safe) ----------------------------
+    ;; print-game-text is a regular `defun` (text.gc) so this fires in
+    ;; both debug and retail builds.  Three separate print-game-text
+    ;; calls with explicit y offsets — the `~%` approach overlapped at
+    ;; large font because line-height didn't track glyph-height.  Plain
+    ;; (non-large) font + ~16px per line spaces cleanly.
+    (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 60 0.0
+                    (font-color default) (font-flags shadow kerning))))
+      (print-game-text (string-format "SORRY THE COLLIDE HERE SUCKS") ctx #f 128 22))
+    (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 76 0.0
+                    (font-color default) (font-flags shadow kerning))))
+      (print-game-text (string-format "AND YOU FALL THROUGH THE PLATFORM I AM LOOKING INTO IT") ctx #f 128 22))
+    (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 92 0.0
+                    (font-color default) (font-flags shadow kerning))))
+      (print-game-text (string-format "LONG JUMP ACROSS WITHOUT THE PLATFORM INSTEAD") ctx #f 128 22))
+    ;; ---- 3D world spheres + labels (retail-safe) --------------------
+    ;; Goes through retail-draw-sphere / retail-draw-text-3d above, which
+    ;; write to global-buf with bucket-id debug-no-zbuf — same trick as
+    ;; letterbox/blackout in engine/game/main.gc, so this lights up in
+    ;; both debug and retail builds.
+    ;; pos 2 — start sphere + label
+    (let ((p (new 'stack-no-clear 'vector)))
+      (set-vector! p *bubble-pos-2-x* *bubble-pos-2-y* *bubble-pos-2-z* 1.0)
+      (retail-draw-sphere p (meters 1)
+                          (new 'static 'rgba :g #xc0 :b #x40 :a #x80))
+      (retail-draw-text-3d "start longjump here" p (font-color menu-flag-on)))
+    ;; pos 3 — end sphere + label
+    (let ((p (new 'stack-no-clear 'vector)))
+      (set-vector! p *bubble-pos-3-x* *bubble-pos-3-y* *bubble-pos-3-z* 1.0)
+      (retail-draw-sphere p (meters 1)
+                          (new 'static 'rgba :r #xc0 :b #x40 :a #x80))
+      (retail-draw-text-3d "end ur longjump here" p (font-color menu-flag-on))))
   (none))

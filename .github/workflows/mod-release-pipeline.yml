@@ -147,7 +147,7 @@ jobs:
           TAG_VAL=${{ needs.create_release.outputs.bundleTagName }}
           7z a -tzip ${{ inputs.outputDir }}/dist/windows-${TAG_VAL}.zip ./ci-artifacts/windows/*
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows
           if-no-files-found: error
@@ -197,7 +197,7 @@ jobs:
           tar czf ../../${{ inputs.outputDir }}/dist/linux-${TAG_VAL}.tar.gz .
           popd
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux
           if-no-files-found: error
@@ -247,7 +247,7 @@ jobs:
           tar czf ../../${{ inputs.outputDir }}/dist/macos-intel-${TAG_VAL}.tar.gz .
           popd
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-intel
           if-no-files-found: error
@@ -269,7 +269,7 @@ jobs:
           toolingVersion: ${{ inputs.toolingVersion }}
         run: python ./.github/scripts/create-mod-release/bundle-windows.py
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows
           if-no-files-found: error
@@ -291,7 +291,7 @@ jobs:
           toolingVersion: ${{ inputs.toolingVersion }}
         run: python ./.github/scripts/create-mod-release/bundle-linux.py
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux
           if-no-files-found: error
@@ -313,7 +313,7 @@ jobs:
           toolingVersion: ${{ inputs.toolingVersion }}
         run: python ./.github/scripts/create-mod-release/bundle-macos.py
       - name: Upload Bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-intel
           if-no-files-found: error

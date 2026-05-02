@@ -1820,6 +1820,7 @@ void LibSM64Manager::load_level_collision(
   size_t burning_tris = 0;
   size_t skipped_degenerate = 0;
   size_t skipped_endlessfall = 0;  // pat-event=endlessfall planes — Mario falls through instead of standing on them
+  size_t skipped_inverted_floor = 0;  // pat-mode=GROUND/OBSTACLE tris with strongly-downward normal (back-faces that libsm64 would treat as low ceilings)
   size_t extruded_wall_tris = 0;   // steep pat-mode=WALL tris replaced by vertical quads (counts source tris)
 
   // libsm64's wall/floor classification threshold (surface_collision.c:104/180).
@@ -1880,6 +1881,7 @@ void LibSM64Manager::load_level_collision(
     // integer truncation to SM64 units preserves the sign of ny for
     // anything non-degenerate.
     float ny_abs = 0.0f;
+    float ny_signed = 0.0f;  // sign matters for floor-vs-ceiling detection below
     bool is_degenerate = false;
     {
       float e1x = jv1.x - jv0.x, e1y = jv1.y - jv0.y, e1z = jv1.z - jv0.z;
@@ -1892,6 +1894,7 @@ void LibSM64Manager::load_level_collision(
         is_degenerate = true;
       } else {
         ny_abs = std::abs(ny) / l;
+        ny_signed = ny / l;
       }
     }
 
@@ -1902,6 +1905,23 @@ void LibSM64Manager::load_level_collision(
     // action whenever he touches one.
     if (test_new_collide_toggle && is_degenerate) {
       skipped_degenerate++;
+      continue;
+    }
+
+    // Skip pat-mode=GROUND/OBSTACLE tris whose computed normal points
+    // strongly DOWN (ny_signed < -0.7).  These are usually back-faces of
+    // curved tunnel floors that Jak labels as walkable but with flipped
+    // winding — in libsm64, ny<-0.01 makes the tri a CEILING, and a
+    // "ceiling" sitting only ~60 SM64 units above the real floor trips
+    // perform_ground_quarter_step's `floorHeight + 160 >= ceilHeight`
+    // headroom check (mario_step.c:298) and stops Mario dead.  The
+    // sunken-city tunnel arch was full of these — Jak walks through
+    // because pat-mode=GROUND wins; libsm64 has no such concept and
+    // strictly uses normal direction.  Walls (PAT_MODE_WALL) can
+    // legitimately have any orientation, so leave those alone.
+    if (test_new_collide_toggle && ny_signed < -0.7f &&
+        (pat_mode == PAT_MODE_GROUND || pat_mode == PAT_MODE_OBSTACLE)) {
+      skipped_inverted_floor++;
       continue;
     }
 
@@ -1956,8 +1976,8 @@ void LibSM64Manager::load_level_collision(
     //
     // The `|ny| <= wall_extrusion_ny_max` upper bound gates this off for
     // anything too close to a slope — extruding a 30-degree ramp into a
-    // vertical quad would create a tall false wall.  Default cap of 0.30
-    // (~72° slope) is tunable via the ImGui slider.
+    // vertical quad would create a tall false wall.  Default cap of 0.25
+    // (~75° from horizontal) is tunable via the ImGui slider.
     if (test_new_collide_toggle && g_no_slippery_mario && !is_hot &&
         pat_mode == PAT_MODE_WALL &&
         ny_abs > kLibsm64WallNyCutoff && ny_abs <= wall_extrusion_ny_max) {
@@ -2049,8 +2069,8 @@ void LibSM64Manager::load_level_collision(
   }
 
   lg::info(
-      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} endlessfall skipped, {} degenerate skipped, {} burning, {} source tris extruded into vertical wall quads, streaming={}, new_classify={})",
-      m_all_static_surfaces.size(), skipped_noentity, skipped_endlessfall, skipped_degenerate, burning_tris,
+      "[libsm64] Stored {} collision surfaces from level geometry ({} noentity skipped, {} endlessfall skipped, {} degenerate skipped, {} inverted-floor skipped, {} burning, {} source tris extruded into vertical wall quads, streaming={}, new_classify={})",
+      m_all_static_surfaces.size(), skipped_noentity, skipped_endlessfall, skipped_degenerate, skipped_inverted_floor, burning_tris,
       extruded_wall_tris, collision_streaming, test_new_collide_toggle);
 }
 

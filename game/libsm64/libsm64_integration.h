@@ -787,15 +787,23 @@ class LibSM64Manager {
   // walls, and skipped by the extruder.  Lower values = fewer extrusions
   // (only the most vertical walls); higher = more (risk of false walls
   // on mildly sloped surfaces).  Exposed as an ImGui slider so you can
-  // dial it live between collision reloads.  Default 0.30 ≈ 72° from
+  // dial it live between collision reloads.  Default 0.25 ≈ 75° from
   // horizontal: captures near-vertical walls while leaving genuine
   // ramps alone.
+  //
+  // NOTE (2026-04): tried bumping this to 0.7 to capture curved tunnel
+  // walls in 0.25-0.7 |ny| band — that band falls through libsm64's
+  // wall query (|ny|>0.01 → treated as floor) so curved walls weren't
+  // blocking Mario.  But raising the cap created MASSIVE false walls on
+  // legitimate ramps Mario should walk up (slopes also live in that
+  // band).  Reverted.  A real fix needs to distinguish "wall" from
+  // "ramp" via something other than just |ny|.
   float wall_extrusion_ny_max = 0.25f;
   // Maximum height (Jak units) of each extruded vertical wall quad.
   // The quad is Y-centered on the source tri's centroid and clamped to
   // this height, so large sloped tris don't produce invisible wall slabs
-  // taller than one or two Mario heights.  Default 120 ≈ ~1.5 Mario
-  // heights at scale 50.  Tunable live via ImGui; takes effect on the
+  // taller than one or two Mario heights.  Default 3000 Jak units ≈
+  // 73 cm at scale 50.  Tunable live via ImGui; takes effect on the
   // next collision stream.
   float wall_extrusion_height_cap = 3000.0f;
   // When set, update_actor_collision walks the tree and logs what it finds

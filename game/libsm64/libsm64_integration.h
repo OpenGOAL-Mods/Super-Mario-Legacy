@@ -1178,27 +1178,29 @@ class LibSM64Manager {
   // gate is actually reaching the teleport function.
   uint32_t m_teleport_call_count = 0;
 
-  // Cell-pickup state preservation.  Snapshotted at the rising edge of
-  // target_clone_anim (cutscene start) and restored at the falling edge
-  // so Mario picks back up exactly where he was — same position, same
-  // velocity, same action.  Without this Mario would drift during the
-  // ~1-2s cutscene (gravity, action timeouts, etc.) and most visibly
-  // fall off a shell he was riding when the cell was grabbed.
+  // Cell-pickup state preservation.  A rolling snapshot of Mario's on-shell
+  // state is kept fresh every frame he is on the shell and outside a
+  // clone-anim.  On the clone-anim falling edge the snapshot is restored so
+  // Mario comes back in exactly the same spot still riding the shell.
+  // m_clone_anim_snapshot_valid doubles as "we have a valid on-shell snapshot
+  // to restore" — it stays true as long as Mario was on the shell before the
+  // cutscene started, regardless of what SM64 did on the contact frame.
   bool m_prev_target_clone_anim = false;
   bool m_clone_anim_snapshot_valid = false;
   MarioState m_clone_anim_snapshot;
 
-  // Post-cutscene freeze.  On the cutscene's falling edge we restore the
-  // libsm64 state, then flag `pending_settle`.  The next tick() runs
-  // normally (so sm64_mario_tick propagates the restored pose into
-  // m_state/m_geometry and the renderer sees it), and on its way out
-  // converts the flag into `freeze_ticks = 90` which makes subsequent
-  // ticks skip sm64_mario_tick for 3 s.  That holds Mario still long
-  // enough for Jak's camera to catch up to his new position before
-  // physics resumes and he zips off on the shell.
+  // Post-restore input-zero window.  After the falling edge restore we
+  // suppress player input for a few frames so a button held through the
+  // cutscene can't immediately exit the shell.  SM64 still ticks normally —
+  // this is NOT a freeze, so the camera tracks Mario naturally from the
+  // first frame after the cutscene.
   bool m_post_restore_pending_settle = false;
   int  m_post_restore_freeze_ticks = 0;
-  static constexpr int kPostCloneAnimFreezeTicks = 60;  // @ 30 Hz
+  // If non-zero, the shell action to re-assert after each tick during the window.
+  // Keeps m_state.action shell-flagged so GOAL never fires the shell-exit edge,
+  // and ensures burn_mario_from_goal's shell immunity guard fires correctly.
+  uint32_t m_post_restore_shell_action = 0;
+  static constexpr int kPostRestoreInputZeroTicks = 10;  // @ 30 Hz (~333 ms)
 
   // Pre-allocated buffers for sm64_mario_tick
   std::vector<float> m_tick_position_buf;

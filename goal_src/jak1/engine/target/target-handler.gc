@@ -269,6 +269,16 @@
   arg0)
 
 (defbehavior target-attacked target ((arg0 symbol) (arg1 attack-info) (arg2 process) (arg3 touching-shapes-entry) (arg4 (state symbol attack-info target)))
+  ;; Shell-riding lava immunity: when Mario is on the Koopa shell (or a
+  ;; cell-pickup cutscene started while he was), Jak also gets lava immunity.
+  ;; *sm64-mario-on-shell*.y is written by C++ as 1.0 whenever the shell-
+  ;; protect window is active (m_clone_anim_snapshot_valid).  Rejecting the
+  ;; attack here prevents Jak's HP from dropping at all, so there is no desync
+  ;; to resolve in mario.gc's health-sync loop.
+  (when (and (logtest? (-> arg1 mask) (attack-mask mode))
+             (or (= (-> arg1 mode) 'burn) (= (-> arg1 mode) 'burnup))
+             (> (-> *sm64-mario-on-shell* y) 0.5))
+    (return #f))
   (when (not (logtest? (-> self state-flags) (state-flags being-attacked)))
     (cond
       ((or (logtest? (-> self state-flags) (state-flags invulnerable timed-invulnerable invuln-powerup))

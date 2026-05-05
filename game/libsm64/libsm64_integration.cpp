@@ -1116,13 +1116,33 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
 void LibSM64Manager::tick(const MarioInputState& input) {
   if (!m_initialized || m_mario_id < 0) return;
 
-  // Post-cutscene freeze: skip sm64_mario_tick (and everything that
-  // depends on it) for 90 sim ticks after a cell-pickup cutscene, so
-  // Jak's camera has time to catch up.  m_state / m_geometry stay at
-  // the "settle tick" values so the renderer still draws Mario — he
-  // just doesn't advance.
+  // Post-restore input window: SM64 ticks normally but player input is zeroed
+  // for a few frames after a shell-preserve restore.  Prevents accidental
+  // shell exit from a button held through the cutscene, without the old
+  // 2-second tick-skip that caused a jarring camera stall.
+  MarioInputState effective_input = input;
   if (m_post_restore_freeze_ticks > 0) {
     --m_post_restore_freeze_ticks;
+    effective_input = MarioInputState{};
+  }
+
+  // Suppress SM64 ticking during fuel-cell clone-anim (unless we're also in
+  // a scripted movie, which has its own teleport-Mario-to-Jak logic and must
+  // keep ticking).  This mirrors the movie-mode suppression and is the core
+  // fix for "Mario sometimes kicked off shell after power-cell cutscene":
+  //
+  //   Old path: snapshot at clone-anim start -> SM64 keeps ticking through
+  //   the whole cutscene -> restore at the end -> ONE settle tick with live
+  //   player input -> then freeze.  That one settle tick is a race: if the
+  //   player is pressing a button SM64 treats as exit-shell, Mario leaves
+  //   shell in that tick, bridge writes on_shell=0, and GOAL fires the
+  //   falling edge.
+  //
+  //   New path: SM64 is frozen the moment clone-anim starts.  m_state.action
+  //   never changes (still shell), *sm64-mario-on-shell* stays 1.0 the whole
+  //   time.  The restore on the falling edge is a no-op.  The settle tick
+  //   starts from the correct shell state -- safe.
+  if (target_clone_anim && !target_in_movie) {
     return;
   }
 
@@ -1130,16 +1150,16 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   // previous frame into _prev first so (_cur && !_prev) becomes a single-
   // frame "just pressed" pulse.
   m_prev_button_b = m_cur_button_b;
-  m_cur_button_b = input.button_b;
+  m_cur_button_b = effective_input.button_b;
 
   SM64MarioInputs sm64_input{};
-  sm64_input.camLookX = input.cam_look_x;
-  sm64_input.camLookZ = input.cam_look_z;
-  sm64_input.stickX = input.stick_x;
-  sm64_input.stickY = input.stick_y;
-  sm64_input.buttonA = input.button_a ? 1 : 0;
-  sm64_input.buttonB = input.button_b ? 1 : 0;
-  sm64_input.buttonZ = input.button_z ? 1 : 0;
+  sm64_input.camLookX = effective_input.cam_look_x;
+  sm64_input.camLookZ = effective_input.cam_look_z;
+  sm64_input.stickX = effective_input.stick_x;
+  sm64_input.stickY = effective_input.stick_y;
+  sm64_input.buttonA = effective_input.button_a ? 1 : 0;
+  sm64_input.buttonB = effective_input.button_b ? 1 : 0;
+  sm64_input.buttonZ = effective_input.button_z ? 1 : 0;
 
   SM64MarioState sm64_state{};
   SM64MarioGeometryBuffers sm64_geo{};
@@ -1265,6 +1285,31 @@ void LibSM64Manager::tick(const MarioInputState& input) {
       sm64_state.velocity[1] = 0.0f;
     }
 
+  }
+
+  // Post-restore shell re-assertion: keep m_state.action shell-flagged for
+  // the entire input-zero window so GOAL never fires the shell-exit falling
+  // edge during the transition after a cell-pickup cutscene.
+  //
+  // Why SM64 might drop the shell action on the first tick after restore:
+  // act_riding_shell_ground in native SM64 checks riddenObj != NULL.  Our
+  // shell is a Jak collision object, not an SM64 object, so riddenObj may
+  // be NULL.  The libsm64 fork may or may not have patched this check, but
+  // we hedge regardless: if sm64_state.action lost the shell flag, silently
+  // re-assert the saved action and override sm64_state before m_state is
+  // written.  The input-zero prevents B-button from exiting during the window.
+  if (m_post_restore_shell_action != 0) {
+    const bool action_dropped = !(sm64_state.action & 0x00010000u);
+    if (action_dropped) {
+      std::scoped_lock relock(m_sm64_lock);
+      sm64_set_mario_action(m_mario_id, m_post_restore_shell_action);
+      sm64_state.action = m_post_restore_shell_action;
+    }
+    // Clear on the last frame of the window (freeze_ticks was already
+    // decremented at the top of this function).
+    if (m_post_restore_freeze_ticks == 0) {
+      m_post_restore_shell_action = 0;
+    }
   }
 
   // Copy results into our managed buffers (threadsafe)
@@ -1441,17 +1486,6 @@ void LibSM64Manager::tick(const MarioInputState& input) {
   }
 
   m_prev_action = sm64_state.action;
-
-  // If the previous frame did a cell-pickup restore, THIS tick is the
-  // settle tick (sm64_mario_tick above propagated the restored pose
-  // into m_state / m_geometry so the renderer is caught up).  Arm the
-  // freeze so the next kPostCloneAnimFreezeTicks ticks early-return
-  // before even calling sm64_mario_tick, holding Mario in place for Jak
-  // to catch up.
-  if (m_post_restore_pending_settle) {
-    m_post_restore_pending_settle = false;
-    m_post_restore_freeze_ticks = kPostCloneAnimFreezeTicks;
-  }
 }
 
 GroundPoundHitbox LibSM64Manager::get_ground_pound_hitbox() {
@@ -2338,14 +2372,20 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
     }
   }
 
-  // ---- *sm64-mario-on-shell*: x = 1.0 if riding shell, 0.0 otherwise ----
+  // ---- *sm64-mario-on-shell*: x = 1.0 if riding shell, 0.0 otherwise
+  //                              y = 1.0 if shell-protect window is active
+  //                                  (m_clone_anim_snapshot_valid: Mario is on
+  //                                   shell OR is in a cell-pickup cutscene
+  //                                   that started while on shell) ----
   auto shell_sym = jak1::intern_from_c("*sm64-mario-on-shell*");
   if (shell_sym.offset != 0) {
     u32 shell_ptr = shell_sym->value;
     if (shell_ptr != 0 && shell_ptr != false_val && shell_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       constexpr uint32_t ACT_FLAG_RIDING_SHELL = 0x00010000;
       bool on_shell = (state.action & ACT_FLAG_RIDING_SHELL) != 0;
-      float shell_data[4] = {on_shell ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+      float shell_data[4] = {on_shell ? 1.0f : 0.0f,
+                             m_clone_anim_snapshot_valid ? 1.0f : 0.0f,
+                             0.0f, 0.0f};
       std::memcpy(ee_mem + shell_ptr, shell_data, 16);
     }
   }
@@ -2455,9 +2495,6 @@ void LibSM64Manager::set_mario_wedges_from_goal(int wedges) {
   if (wedges < 0) wedges = 0;
   uint16_t health = (wedges == 0) ? 0xFF
                                   : static_cast<uint16_t>((wedges << 8) | 0x80);
-  auto pre = get_state();
-  lg::info("[health-debug] set_mario_wedges -> {} (action=0x{:08X} pre-health=0x{:04X} -> 0x{:04X})",
-           wedges, pre.action, static_cast<uint16_t>(pre.health), health);
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_health(m_mario_id, health);
 }
@@ -2465,8 +2502,6 @@ void LibSM64Manager::set_mario_wedges_from_goal(int wedges) {
 void LibSM64Manager::knockback_mario_from_goal(int wedges) {
   if (!m_initialized || m_mario_id < 0) return;
   auto state = get_state();
-  lg::info("[health-debug] knockback_mario({}) action=0x{:08X} health=0x{:04X}",
-           wedges, state.action, static_cast<uint16_t>(state.health));
   float front_x = state.position.x() + std::sin(state.face_angle) * 100.0f;
   float front_z = state.position.z() + std::cos(state.face_angle) * 100.0f;
   float sm64_x = front_x * JAK_TO_SM64_SCALE;
@@ -2480,7 +2515,13 @@ void LibSM64Manager::knockback_mario_from_goal(int wedges) {
 void LibSM64Manager::burn_mario_from_goal(int wedges) {
   if (!m_initialized || m_mario_id < 0) return;
   constexpr uint32_t kActLavaBoost = 0x010208B7;
+  constexpr uint32_t kActFlagRidingShell = 0x00010000;
   auto st = get_state();
+  // Shell provides lava immunity — match native SM64's check_lava_boost which
+  // explicitly skips the burn when ACT_FLAG_RIDING_SHELL is set.
+  if (st.action & kActFlagRidingShell) {
+    return;
+  }
   uint16_t cur = static_cast<uint16_t>(st.health);
   uint16_t cur_wedges = (cur >> 8) & 0xF;
   uint16_t new_wedges = (cur_wedges > static_cast<uint16_t>(wedges))
@@ -2488,8 +2529,6 @@ void LibSM64Manager::burn_mario_from_goal(int wedges) {
                             : 0;
   uint16_t new_health = (new_wedges == 0) ? 0xFF
                                           : static_cast<uint16_t>((new_wedges << 8) | 0x80);
-  lg::info("[health-debug] burn_mario({}) action=0x{:08X} health=0x{:04X} -> 0x{:04X}",
-           wedges, st.action, cur, new_health);
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_action(m_mario_id, kActLavaBoost);
   sm64_set_mario_health(m_mario_id, new_health);
@@ -2498,9 +2537,6 @@ void LibSM64Manager::burn_mario_from_goal(int wedges) {
 void LibSM64Manager::drown_mario_from_goal() {
   if (!m_initialized || m_mario_id < 0) return;
   constexpr uint32_t kActDrowning = 0x300032C4;
-  auto st = get_state();
-  lg::info("[health-debug] drown_mario action=0x{:08X} health=0x{:04X}",
-           st.action, static_cast<uint16_t>(st.health));
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_action(m_mario_id, kActDrowning);
   sm64_set_mario_health(m_mario_id, 0xFF);
@@ -2509,9 +2545,6 @@ void LibSM64Manager::drown_mario_from_goal() {
 void LibSM64Manager::endlessfall_mario_from_goal() {
   if (!m_initialized || m_mario_id < 0) return;
   constexpr uint32_t kActForwardAirKB = 0x010208B1;
-  auto st = get_state();
-  lg::info("[health-debug] endlessfall_mario action=0x{:08X} health=0x{:04X}",
-           st.action, static_cast<uint16_t>(st.health));
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_action(m_mario_id, kActForwardAirKB);
   sm64_set_mario_health(m_mario_id, 0xFF);
@@ -2520,9 +2553,6 @@ void LibSM64Manager::endlessfall_mario_from_goal() {
 void LibSM64Manager::kill_mario_from_goal() {
   if (!m_initialized || m_mario_id < 0) return;
   constexpr uint32_t kActSoftBackwardGroundKB = 0x00020464;
-  auto st = get_state();
-  lg::info("[health-debug] kill_mario action=0x{:08X} health=0x{:04X}",
-           st.action, static_cast<uint16_t>(st.health));
   std::scoped_lock lock(m_sm64_lock);
   sm64_set_mario_action(m_mario_id, kActSoftBackwardGroundKB);
   sm64_set_mario_health(m_mario_id, 0xFF);
@@ -3563,7 +3593,10 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   // all three shell actions (ground, jump, fall). Testing the bit covers
   // every shell variant without an explicit action enumeration.
   constexpr uint32_t kActFlagRidingShell = 0x00010000;
-  const bool riding_shell = (current_action & kActFlagRidingShell) != 0;
+  // Also treat the post-restore window as shell-riding: SM64 may briefly drop
+  // the shell action while re-stabilising after a clone-anim cutscene.
+  const bool riding_shell = (current_action & kActFlagRidingShell) != 0 ||
+                             m_post_restore_shell_action != 0;
 
   // Decide the SM64 water level to feed libsm64 this tick.
   int sm64_water_level;
@@ -5702,10 +5735,23 @@ void LibSM64Manager::update_shell_preserve_across_cell_grab() {
   // ACT_FLAG_RIDING_SHELL = 0x00010000 (1 << 16)
   const bool mario_on_shell = (m_state.action & 0x00010000) != 0;
 
-  if (now_clone && !prev_clone && mario_on_shell) {
-    // Rising edge — cutscene just started.  Copy the whole MarioState
-    // under the geo mutex so the restore at the falling edge has a
-    // consistent snapshot.  We copy in Jak-unit form to match m_state.
+  // Rolling snapshot: update the on-shell state every frame Mario is on the
+  // shell and clone-anim is NOT yet active.  This fires before the rising-edge
+  // check below so the snapshot is always from the last good tick before the
+  // cutscene begins — even for directly-placed cells where GOAL writes the
+  // clone-anim flag one frame late.
+  //
+  // Why "one frame late"?  mario.gc writes *sm64-target-flags*.z inside the
+  // GOAL process tick, before the fuel-cell process fires.  When Jak touches a
+  // free-standing cell the fuel-cell process sends 'clone-anim and Jak enters
+  // target-clone-anim in the SAME GOAL frame that mario.gc already wrote 0.
+  // C++ therefore reads target_clone_anim=0 on the contact frame, runs
+  // sm64_mario_tick with live player input (possibly triggering shell exit),
+  // and only sees the rising edge one frame later.  By this point m_state may
+  // already reflect the "not on shell" action, so the old rising-edge snapshot
+  // captured the wrong state.  The rolling approach sidesteps this entirely:
+  // the snapshot is always from the frame BEFORE the contact frame.
+  if (mario_on_shell && !now_clone) {
     std::lock_guard<std::mutex> g(m_geo_mutex);
     m_clone_anim_snapshot = m_state;
     m_clone_anim_snapshot_valid = true;
@@ -5737,12 +5783,32 @@ void LibSM64Manager::update_shell_preserve_across_cell_grab() {
         sm64_set_mario_faceangle(m_mario_id, s.face_angle);
       }
       lg::info("[libsm64] cell-pickup cutscene ended — restored Mario to "
-               "pre-cutscene state (action=0x{:08X})", s.action);
-      // Flag this tick's tail to arm a 90-frame (3 s) post-settle freeze
-      // so the Jak camera has time to catch up to Mario's restored
-      // position before physics resumes and he accelerates away.
-      m_post_restore_pending_settle = true;
+               "pre-cutscene on-shell state (action=0x{:08X})", s.action);
+      // Short input-zero window: SM64 still ticks (no freeze) but player
+      // input is suppressed so a button held through the cutscene can't
+      // accidentally exit the shell.  Camera follows Mario naturally.
+      // Also save the shell action: tick() re-asserts it after each
+      // sm64_mario_tick in case SM64 drops it (e.g. null riddenObj →
+      // ACT_FREEFALL), keeping m_state.action shell-flagged so GOAL never
+      // sees the shell-exit falling edge during the transition window.
+      m_post_restore_shell_action = (s.action & 0x00010000u) ? s.action : 0u;
+      m_post_restore_freeze_ticks  = kPostRestoreInputZeroTicks;
     }
+    m_clone_anim_snapshot_valid = false;
+  }
+
+  // Clear the snapshot flag on genuine shell dismount — prevents
+  // m_clone_anim_snapshot_valid from granting false lava immunity after
+  // Mario voluntarily exits the shell outside of a cutscene.
+  // Conditions:
+  //   !mario_on_shell  — Mario is not currently on shell
+  //   !now_clone       — we are not inside a cutscene
+  //   !prev_clone      — this is NOT the falling-edge frame (on the falling
+  //                      edge prev_clone=true; the restore + clear above
+  //                      already ran, so we must not clobber the flag again
+  //                      before the restore check — or rather, it's already
+  //                      false, but the restore must be allowed to fire first)
+  if (!mario_on_shell && !now_clone && !prev_clone) {
     m_clone_anim_snapshot_valid = false;
   }
 

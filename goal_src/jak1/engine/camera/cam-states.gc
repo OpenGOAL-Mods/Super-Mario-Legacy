@@ -1592,6 +1592,13 @@
                              (the-as float 4096.0)
                              #t)
   (cond
+    ((logtest? (-> self options) #x40000)
+     ;; Shell / fast-follow mode: aggressive spline tracking so the camera
+     ;; catches up to string-trans in 2-3 frames rather than 2 seconds.
+     ;; All wall-avoidance, los-state side-tracking, and min-z-override logic
+     ;; is unchanged -- those operate on string-trans, not trans.
+     ;; Set by mario.gc when the player is riding the Koopa shell.
+     (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 40960.0) (the-as float 40960.0)))
     ((and (logtest? (-> self options) #x4000) (logtest? (-> self options) 256))
      (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 102.4) (the-as float 4096.0)))
     ((logtest? (-> self options) #x4000)

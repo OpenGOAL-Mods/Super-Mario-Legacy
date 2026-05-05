@@ -1083,9 +1083,15 @@
         (when (and on-shell (not (-> self prev-on-shell)) *target*)
           (logior! (-> *target* control root-prim prim-core action) (collide-action racer))
           (set! (-> self shell-tracker-timer) 0)
-          ;; Pull camera back and track faster for shell speed
+          ;; Pull camera back and enable fast-follow (option #x40000 in cam-string-code)
+          ;; so the string camera tracks at shell speed without lag.  The string
+          ;; camera keeps all its wall-avoidance and los-state logic; only the
+          ;; final spline-smoothing step is sped up.
           (set! (-> *camera* stringMaxLength) (meters 20))
           (set! (-> *camera* string-push-z) (meters 18))
+          (let ((cs (-> *camera* slave 0)))
+            (when cs
+              (logior! (-> cs 0 options) #x40000)))
           ;; Spawn the visual crab shell under Mario.  spawn-sm64-crab-shell
           ;; handles the entity-borrow / art-resolution internally; if the
           ;; current level has no borrowable entity (unusual — happens
@@ -1095,11 +1101,17 @@
             (when proc
               (set! (-> self shell-proc) (process->handle (ppointer->process proc))))))
         ;; Falling edge: just dismounted shell
-        (when (and (not on-shell) (-> self prev-on-shell) *target*)
-          (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
-          ;; Restore default camera
-          (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
-          (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z))
+        (when (and (not on-shell) (-> self prev-on-shell))
+          ;; Clear fast-follow flag regardless of *target* state so a
+          ;; death-while-riding can't leave #x40000 stuck on the camera slave.
+          (let ((cs (-> *camera* slave 0)))
+            (when cs
+              (logand! (-> cs 0 options) (lognot #x40000))))
+          (when *target*
+            (logclear! (-> *target* control root-prim prim-core action) (collide-action racer))
+            ;; Restore default camera and clear fast-follow flag
+            (set! (-> *camera* stringMaxLength) (-> *CAMERA-bank* default-string-max-z))
+            (set! (-> *camera* string-push-z) (-> *CAMERA-bank* default-string-push-z)))
           ;; Deactivate the visual crab shell if we spawned one.
           ;; handle->process returns #f for already-dead processes (e.g. the
           ;; shell self-terminated from its :trans invariant checks), so
@@ -1108,8 +1120,12 @@
             (when shell (deactivate shell)))
           (set! (-> self shell-proc) (the-as handle #f)))
         ;; While on shell: spawn a touch-tracker every frame with 'racer attack
-        ;; 12-frame duration with per-frame spawn ensures continuous coverage at any shell speed
-        (when (and on-shell *target*)
+        ;; 12-frame duration with per-frame spawn ensures continuous coverage at any shell speed.
+        ;; Guard with (not (paused?)) — sm64-mario-col clears the pause bit from its mask so
+        ;; it keeps running during pause, but touch-trackers (children of *target*) do NOT run
+        ;; during pause and cannot expire.  Without this guard, every paused frame spawns a new
+        ;; tracker that accumulates until unpause floods *touching-list* past its 32-slot limit.
+        (when (and on-shell *target* (not (paused?)))
           (+! (-> self shell-tracker-timer) 1)
           (let ((shell-pos (new 'stack-no-clear 'vector))
                 (yaw (-> *sm64-mario-pos* w)))

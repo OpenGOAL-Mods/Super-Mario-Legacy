@@ -745,6 +745,14 @@ class LibSM64Manager {
     // frame from local_aabb_{min,max} + the prim's world transform.
     float world_aabb_min[3] = {0, 0, 0};
     float world_aabb_max[3] = {0, 0, 0};
+    // Process PID (process.pid field, PROCESS_PID_OFF=36) cached at
+    // surface-object creation time. Every process.spawn() increments a global
+    // counter and assigns the result as the PID, so two successive processes at
+    // the same EE address always get different PIDs — even if they share the
+    // same entity pointer (same-entity respawn) or both have entity=0 (two
+    // dynamic actors of the same type). This is the primary recycling signal.
+    // 0 when the PID read failed or was never set.
+    u32 pid = 0;
   };
 
   // Settings

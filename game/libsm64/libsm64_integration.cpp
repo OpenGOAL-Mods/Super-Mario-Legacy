@@ -3783,12 +3783,14 @@ constexpr u32 CSPACE_BONE_OFF = 16;             // structure field, no -4 adjust
 // process-tree.brother is at GOAL :offset 16 -> runtime 12
 constexpr u32 PTREE_BROTHER_OFF = 12;
 constexpr u32 PTREE_CHILD_OFF = 16;
-// Offset of `entity` (entity-actor) field in the `process` struct.
+// Offsets of `pid` and `entity` fields in the `process` struct.
 // process inherits from process-tree (28 bytes: name/mask/parent/brother/
-// child/ppointer/self), then process adds pool/status/pid/main-thread/
-// top-thread (5 * 4 bytes = 20 more bytes) before `entity`.  See
-// gkernel-h.gc deftype process.
-constexpr u32 PROCESS_ENTITY_OFF = 48;
+// child/ppointer/self), then process adds pool/status before `pid`.
+// Layout (all 4-byte fields, runtime offset = GOAL declared offset - 4):
+//   pool(28), status(32), pid(36), main-thread(40), top-thread(44), entity(48)
+// See gkernel-h.gc deftype process.
+constexpr u32 PROCESS_PID_OFF    = 36;  // process.pid  (int32)
+constexpr u32 PROCESS_ENTITY_OFF = 48;  // process.entity (entity-actor*)
 
 // Limits, tunable
 constexpr int MAX_PROCESS_TREE_NODES = 4096;     // safety cap on DFS
@@ -4759,16 +4761,31 @@ void do_sweep(WalkCtx& c) {
         // prim_ptr is also the same → same key → we'd "move" the old surface
         // object from actor A's position to actor B's position in a single frame.
         // libsm64 interprets that delta as platform displacement and teleports
-        // Mario. Detect it by checking for an implausibly large single-frame
-        // jump (> 50 m in Jak units) and force a delete+recreate instead.
-        constexpr float kRecycleThresholdSq = 204800.0f * 204800.0f;  // 50 m
-        float dx = prim_pos[0] - tracked.last_trans[0];
-        float dy = prim_pos[1] - tracked.last_trans[1];
-        float dz = prim_pos[2] - tracked.last_trans[2];
-        bool slot_recycled = (dx * dx + dy * dy + dz * dz) > kRecycleThresholdSq;
+        // Mario.
+        //
+        // Detection layer 1: compare the process PID (process.pid,
+        // PROCESS_PID_OFF=36). Every GOAL process.spawn() increments a global
+        // counter and stamps the PID, so two successive processes at the same
+        // EE slot always get different PIDs — regardless of entity pointer or
+        // proximity. Guarded with both-non-zero to avoid false positives from
+        // read failures.
+        u32 cur_pid = 0;
+        read_u32(c.ee_mem, node + PROCESS_PID_OFF, c.mem_size, cur_pid);
+        bool slot_recycled =
+            (tracked.pid != 0 && cur_pid != 0 && cur_pid != tracked.pid);
+        // Detection layer 2: implausibly large single-frame jump (> 50 m)
+        // catches the remaining edge case where both PID reads return 0.
+        if (!slot_recycled) {
+          constexpr float kRecycleThresholdSq = 204800.0f * 204800.0f;  // 50 m
+          float dx = prim_pos[0] - tracked.last_trans[0];
+          float dy = prim_pos[1] - tracked.last_trans[1];
+          float dz = prim_pos[2] - tracked.last_trans[2];
+          slot_recycled = (dx * dx + dy * dy + dz * dz) > kRecycleThresholdSq;
+        }
         if (slot_recycled) {
           if (!c.dry_run) sm64_surface_object_delete(tracked.sm64_obj_id);
           tracked.has_obj = false;
+          tracked.pid = 0;  // cleared so creation path stores the new pid
           // Fall through to the creation path below.
         } else {
           if (!c.dry_run) {
@@ -4875,6 +4892,13 @@ void do_sweep(WalkCtx& c) {
         obj.surfaces = surfaces.data();
         tracked.sm64_obj_id = sm64_surface_object_create(&obj);
         tracked.has_obj = true;
+      }
+      // Cache the PID so the recycling check next frame can detect
+      // same-address-but-different-process actor replacements.
+      {
+        u32 new_pid = 0;
+        read_u32(c.ee_mem, node + PROCESS_PID_OFF, c.mem_size, new_pid);
+        tracked.pid = new_pid;
       }
       std::memcpy(tracked.last_trans, prim_pos, 12);
       std::memcpy(tracked.local_aabb_min, local_aabb_min, sizeof(local_aabb_min));

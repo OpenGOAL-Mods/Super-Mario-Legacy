@@ -3553,10 +3553,11 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   const bool is_lava_volume = (flags & (1u << 25)) != 0;
   const bool in_lava = in_water && is_lava_volume;
   // wt17 (bit 17) is set by swamp-tar water-vols (e.g. the dark eco pools in
-  // Boggy Swamp).  Like lava, we suppress the SM64 water level so Mario never
-  // enters ACT_WATER_IDLE / swim state, and apply velocity drag in tick() so
-  // he wades at reduced speed rather than running through the tar freely.
-  const bool is_tar_volume = (flags & (1u << 17)) != 0;
+  // Boggy Swamp).  wt18 (bit 18) is set by misty mud (mud.gc:45).  Both are
+  // treated identically: suppress the SM64 water level so Mario never enters
+  // ACT_WATER_IDLE / swim state, and place a surface object so he can run
+  // across the top with a floor under him.
+  const bool is_tar_volume = (flags & ((1u << 17) | (1u << 18))) != 0;
 
   // Snapshot current action/health under the geo mutex so we can decide
   // whether we already kicked Mario into a fire action on a previous frame

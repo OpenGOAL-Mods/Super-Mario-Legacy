@@ -708,7 +708,10 @@
        (let ((f0-7 (vector-dot (-> self control dynam gravity-normal)
                                (vector-! (new 'stack-no-clear 'vector) (-> self control unknown-vector111) (-> self control trans))))
                (crate-threshold (meters 15.0)))
-           (when (< (if (and arg0 (type-type? (-> arg0 type) crate)) crate-threshold (meters 0.8)) f0-7)
+           (when (and arg0
+                      (or (type-type? (-> arg0 type) nav-enemy)
+                          (type-type? (-> arg0 type) crate))
+                      (< (if (type-type? (-> arg0 type) crate) crate-threshold (meters 0.6)) f0-7))
            (when (and (target-send-attack arg0
                                           (the-as uint 'bonk)
                                           (the-as touching-shapes-entry (-> arg3 param 0))

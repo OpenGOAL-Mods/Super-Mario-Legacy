@@ -107,6 +107,84 @@
             :name (text-id back)
             :scale #t)))
 
+;; ---- Extended Sound Options screen ----------------------------------------
+;; Mirrors *sound-options-pc* but adds SM64 Music Volume and SM64 Sounds
+;; Volume sliders before the BACK button.  Redirected from the
+;; (progress-screen sound-settings) slot in init-game-options below so that
+;; both the vanilla Sound Options screen and the Mario Options submenu expose
+;; the same underlying *mario-settings* fields.
+(define *sound-options-mario*
+  (new 'static 'boxed-array :type game-option
+       ;; [0] SFX VOLUME (vanilla)
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id sfx-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm
+            (lambda ((val object))
+              (set! (-> *setting-control* default sfx-volume) (-> *pc-settings* memcard-volume-sfx))
+              (none)))
+       ;; [1] MUSIC VOLUME (vanilla)
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id music-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm
+            (lambda ((val object))
+              (set! (-> *setting-control* default music-volume) (-> *pc-settings* memcard-volume-music))
+              (none)))
+       ;; [2] SPEECH VOLUME (vanilla)
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id speech-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm
+            (lambda ((val object))
+              (set! (-> *setting-control* default dialog-volume) (-> *pc-settings* memcard-volume-dialog))
+              (none)))
+       ;; [3] PLAY SM64 MUSIC toggle
+       (new 'static 'game-option
+            :option-type (game-option-type on-off)
+            :name (text-id mario-opts-play-music)
+            :scale #t
+            :on-change (lambda ((val object))
+                         (sm64-music-setting-changed! (the-as symbol val))
+                         (none)))
+       ;; [4] SM64 MUSIC VOLUME
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id mario-opts-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm (lambda ()
+                          (commit-to-file *mario-settings*)))
+       ;; [5] SM64 SOUNDS VOLUME
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id mario-opts-sfx-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm (lambda ()
+                          (commit-to-file *mario-settings*)))
+       ;; [6] BACK
+       (new 'static 'game-option
+            :option-type (game-option-type button)
+            :name (text-id back)
+            :scale #t)))
+
 ;; ---- Replacement for *game-options-pc* -------------------------------------
 ;; Mirrors the 10-entry *game-options-pc* (progress-pc.gc:217) but with a
 ;; MARIO OPTIONS submenu entry inserted at index 1.  Every non-Mario entry
@@ -171,6 +249,8 @@
   (set! (-> *options-remap* (progress-screen game-settings)) *game-options-mario*)
   ;; Register the new MARIO OPTIONS screen.
   (set! (-> *options-remap* (progress-screen mario-options)) *mario-options*)
+  ;; Redirect the SOUND OPTIONS screen to our extended array.
+  (set! (-> *options-remap* (progress-screen sound-settings)) *sound-options-mario*)
 
   ;; Value-to-modify wiring for *game-options-mario*.  All indices shift +1
   ;; vs progress-pc.gc:2130 onwards because the Mario entry is at index 1.
@@ -193,6 +273,16 @@
   (set! (-> *mario-options* 1 value-to-modify) (&-> *mario-settings* sm64-music-volume))
   (set! (-> *mario-options* 2 value-to-modify) (&-> *mario-settings* sm64-sfx-volume))
   (set! (-> *mario-options* 3 value-to-modify) (&-> *mario-settings* render-corpses?))
+  ;; Sound Options screen value-to-modify:
+  ;;   [0..2] vanilla sliders → *pc-settings* memcard-volume-{sfx,music,dialog}
+  ;;   [3] SM64 music vol     → *mario-settings* sm64-music-volume
+  ;;   [4] SM64 sfx vol       → *mario-settings* sm64-sfx-volume
+  (set! (-> *sound-options-mario* 0 value-to-modify) (&-> *pc-settings* memcard-volume-sfx))
+  (set! (-> *sound-options-mario* 1 value-to-modify) (&-> *pc-settings* memcard-volume-music))
+  (set! (-> *sound-options-mario* 2 value-to-modify) (&-> *pc-settings* memcard-volume-dialog))
+  (set! (-> *sound-options-mario* 3 value-to-modify) (&-> *mario-settings* play-sm64-music?))
+  (set! (-> *sound-options-mario* 4 value-to-modify) (&-> *mario-settings* sm64-music-volume))
+  (set! (-> *sound-options-mario* 5 value-to-modify) (&-> *mario-settings* sm64-sfx-volume))
   (none))
 
 ;; ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@
 ;; an extern and let runtime linking resolve it; mario.gc's `define`
 ;; binds the actual storage.
 (define-extern *sm64-mario-attack-until* time-frame)
+(define-extern *sm64-mario-info* vector)
 (define-extern mario-sm64-music-enabled? (function symbol))
 (define-extern sm64-play-preview-sound (function string symbol))
 
@@ -720,7 +721,10 @@
                       (not (logtest? (-> self state-flags) (state-flags being-attacked dying))))
              (set! (-> self control unknown-vector52 quad) (-> self control trans quad))
              (target-timed-invulnerable (seconds 0.1) self)
-             (pc-sm64-stomp-bounce-mario)
+             ;; sm64 mod: skip stomp bounce when Mario is ground-pounding
+             (when (and (= 0.0 (-> *sm64-mario-info* y))
+                        (= 0.0 (-> *sm64-mario-info* z)))
+               (pc-sm64-stomp-bounce-mario))
              (go target-jump (-> *TARGET-bank* jump-height-min) (-> *TARGET-bank* jump-height-max) (the-as surface #f)))))
        #f)
       ((= arg2 'jump)

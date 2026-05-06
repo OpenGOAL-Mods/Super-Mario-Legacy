@@ -123,6 +123,13 @@ bool LibSM64Manager::init(const std::string& rom_path) {
     lg::warn("[libsm64] Shell model extraction failed — shell won't render");
   }
 
+  // Apply startup defaults for our fork extensions.
+  // Wall extrusion strips are ON by default (test_new_collide_toggle=true),
+  // so start with the vanilla SM64 threshold (0.01).  When the user turns
+  // extrusion OFF the GUI sets it to 0.25 so libsm64 natively recognises
+  // Jak's tilted walls without extra geometry.
+  sm64_set_wall_ny_threshold(0.01f);
+
   m_initialized = true;
   m_last_rom_path = rom_path;
   lg::info("[libsm64] Initialized successfully");
@@ -289,6 +296,7 @@ float get_mario_scale() {
 void set_no_slippery_mario(bool enabled) {
   g_no_slippery_mario = enabled;
   sm64_set_no_slippery_mario(enabled ? 1 : 0);
+  // Wall NY threshold is driven by the wall-extrusion toggle, not this one.
 }
 
 bool get_no_slippery_mario() {

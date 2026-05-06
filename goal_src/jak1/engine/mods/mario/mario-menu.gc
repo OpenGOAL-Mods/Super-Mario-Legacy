@@ -64,11 +64,8 @@
             :on-change (lambda ((val object))
                          (sm64-music-setting-changed! (the-as symbol val))
                          (none)))
-       ;; [1] SM64 MUSIC VOLUME slider (0..100, same range as the vanilla
-       ;; sfx/music/speech sliders).  Live preview is driven by
-       ;; update-mario-music! pushing *mario-settings* sm64-music-volume
-       ;; down to pc-sm64-set-music-volume every frame.  on-confirm
-       ;; persists the new value to disk so it survives a relaunch.
+       ;; [1] SM64 MUSIC VOLUME slider (0..100).  Live preview driven by
+       ;; update-mario-music! pushing sm64-music-volume to C++ each frame.
        (new 'static 'game-option
             :option-type (game-option-type slider)
             :name (text-id mario-opts-volume)
@@ -78,12 +75,18 @@
             :slider-step-size 1.0
             :on-confirm (lambda ()
                           (commit-to-file *mario-settings*)))
-       ;; [2] RENDER CORPSES toggle — controls whether MarioRenderer draws
-       ;; the death-corpse list.  When off, the corpse list keeps growing
-       ;; (capture/clear still run) but nothing is drawn — flip back on
-       ;; and everything reappears.  Persisted via *mario-settings*
-       ;; render-corpses?; mario.gc's per-frame settings push forwards the
-       ;; current value to libsm64 every tick.
+       ;; [2] SM64 SOUNDS VOLUME slider (0..100).  Controls voice-line
+       ;; volume when music is off.
+       (new 'static 'game-option
+            :option-type (game-option-type slider)
+            :name (text-id mario-opts-sfx-volume)
+            :scale #t
+            :param1 0.0
+            :param2 100.0
+            :slider-step-size 1.0
+            :on-confirm (lambda ()
+                          (commit-to-file *mario-settings*)))
+       ;; [3] RENDER CORPSES toggle
        (new 'static 'game-option
             :option-type (game-option-type on-off)
             :name (text-id mario-opts-render-corpses)
@@ -91,18 +94,14 @@
             :on-change (lambda ((val object))
                          (sm64-render-corpses-changed! (the-as symbol val))
                          (none)))
-       ;; [3] CLEAR ALL CORPSES — pressing X wipes every saved death-pose
-       ;; mesh.  Lives only in RAM (libsm64 manager's vector + the renderer's
-       ;; per-corpse VAOs), nothing is persisted to disk so there's no
-       ;; commit-to-file step.  The generic on-confirm fallback we added to
-       ;; progress.gc's button dispatch is what calls this lambda.
+       ;; [4] CLEAR ALL CORPSES
        (new 'static 'game-option
             :option-type (game-option-type button)
             :name (text-id mario-opts-clear-corpses)
             :scale #t
             :on-confirm (lambda ()
                           (pc-sm64-clear-mario-corpse)))
-       ;; [4] BACK
+       ;; [5] BACK
        (new 'static 'game-option
             :option-type (game-option-type button)
             :name (text-id back)
@@ -185,13 +184,15 @@
 
   ;; Mario submenu value-to-modify:
   ;;   [0] Play SM64 Music toggle → *mario-settings* play-sm64-music?
-  ;;   [1] Volume slider          → *mario-settings* sm64-music-volume
-  ;;   [2] Render Corpses toggle  → *mario-settings* render-corpses?
-  ;;   [3] Clear Corpses (button — no backing value, on-confirm only)
-  ;;   [4] Back (no backing value)
+  ;;   [1] Music volume slider    → *mario-settings* sm64-music-volume
+  ;;   [2] Sounds volume slider   → *mario-settings* sm64-sfx-volume
+  ;;   [3] Render Corpses toggle  → *mario-settings* render-corpses?
+  ;;   [4] Clear Corpses (button — no backing value, on-confirm only)
+  ;;   [5] Back (no backing value)
   (set! (-> *mario-options* 0 value-to-modify) (&-> *mario-settings* play-sm64-music?))
   (set! (-> *mario-options* 1 value-to-modify) (&-> *mario-settings* sm64-music-volume))
-  (set! (-> *mario-options* 2 value-to-modify) (&-> *mario-settings* render-corpses?))
+  (set! (-> *mario-options* 2 value-to-modify) (&-> *mario-settings* sm64-sfx-volume))
+  (set! (-> *mario-options* 3 value-to-modify) (&-> *mario-settings* render-corpses?))
   (none))
 
 ;; ---------------------------------------------------------------------------

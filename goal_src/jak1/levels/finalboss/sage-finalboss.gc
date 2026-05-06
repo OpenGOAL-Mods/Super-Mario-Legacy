@@ -575,9 +575,15 @@
         (((task-status need-reward-speech)) (spool-push *art-control* "green-sagecage-outro-big-finish" 0 self -1.0)))
       ((-> (method-of-type process-taskable play-anim) trans))))
 
+(define-extern *sm64-in-final-credits* symbol)
+
 (defstate sage-finalboss-credits (sage-finalboss)
+  :enter
+    (behavior ()
+      (set! *sm64-in-final-credits* #t))
   :exit
     (behavior ()
+      (set! *sm64-in-final-credits* #f)
       (when (= (current-status (-> self tasks)) (task-status invalid))
         (set-blackout-frames 0)
         (initialize! *game-info* 'game (the-as game-save #f) "title-start")))

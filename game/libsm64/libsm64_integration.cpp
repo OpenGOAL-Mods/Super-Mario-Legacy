@@ -124,11 +124,11 @@ bool LibSM64Manager::init(const std::string& rom_path) {
   }
 
   // Apply startup defaults for our fork extensions.
-  // Wall extrusion strips are ON by default (test_new_collide_toggle=true),
-  // so start with the vanilla SM64 threshold (0.01).  When the user turns
-  // extrusion OFF the GUI sets it to 0.25 so libsm64 natively recognises
-  // Jak's tilted walls without extra geometry.
-  sm64_set_wall_ny_threshold(0.01f);
+  // Wall extrusion is OFF by default (test_new_collide_toggle=false),
+  // so start with 0.25 so libsm64 natively recognises Jak's tilted walls
+  // without extra geometry.  When the user turns extrusion ON the GUI
+  // drops it back to the vanilla SM64 threshold (0.01).
+  sm64_set_wall_ny_threshold(0.25f);
 
   m_initialized = true;
   m_last_rom_path = rom_path;

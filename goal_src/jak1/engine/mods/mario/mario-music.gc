@@ -35,6 +35,14 @@
 ;; in mario.gc accepts.
 ;; ---------------------------------------------------------------------------
 
+(defun determine-final-boss-track ()
+  "Helper for mario-music-for-level to pick the right track for the final boss fight based on progress.  Returns a symbol suitable for sm64-music."
+  (cond
+    (*sm64-in-final-credits* 'credits)
+    (#f 'final-boss)
+    (#f 'final-boss-true)
+    (else 'final-bowser)))
+
 (defun mario-music-for-level ((lev symbol))
   "Return the sm64-music symbol that should play in the given Jak level.
    Default: 'bob-omb everywhere — fill in per level as desired."
@@ -62,7 +70,7 @@
     (('village3)     'hot)
     (('lavatube)     'metal-cap)
     (('citadel)      'koopa-road)
-    (('finalboss)    (if *sm64-in-final-credits* 'credits 'final-bowser))
+    (('finalboss)    (determine-final-boss-track))
     (else            'bob-omb)))
 
 ;; True while a given level's track is considered "played in paused

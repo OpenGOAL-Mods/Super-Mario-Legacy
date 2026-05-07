@@ -176,8 +176,12 @@ static s32 find_wall_collisions_from_list( struct SM64WallCollisionData *data) {
         // libsm64: Weed out surfaces whose triangles are actually line segs. TODO do this at surface load time
         if( !surf->isValid ) continue;
 
-        // Do the check normally done in add_surface_to_cell
-        if( surf->normal.y < -0.01f || surf->normal.y > 0.01f ) continue;
+        // Do the check normally done in add_surface_to_cell.
+        // g_libsm64_wall_ny_threshold extends the vanilla ±0.01 cutoff so
+        // Jak's tilted wall geometry (|ny| up to ~0.3) is detected as a
+        // wall without needing supplementary vertical extrusion surfaces.
+        extern float g_libsm64_wall_ny_threshold;
+        if( surf->normal.y < -g_libsm64_wall_ny_threshold || surf->normal.y > g_libsm64_wall_ny_threshold ) continue;
 
         if( surf->normal.x < -0.707f || surf->normal.x > 0.707f ) {
             surf->flags |= SURFACE_FLAG_X_PROJECTION;

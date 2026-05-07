@@ -113,6 +113,23 @@ SM64_LIB_FN void sm64_set_mario_scale(float scale)
     g_libsm64_mario_scale = scale;
 }
 
+// Wall normal.y threshold (libsm64 fork extension).  Vanilla SM64 treats
+// any surface with |normal.y| > 0.01 as a floor, not a wall, so Jak's
+// tilted wall geometry (|ny| up to ~0.3) is invisible to
+// find_wall_collisions and Mario tunnels through it.  This global raises
+// that cutoff so the wall detector accepts surfaces up to this |ny| value.
+// 0.01 = vanilla behaviour; 0.5 = all surfaces up to 60° from vertical
+// are treated as walls.  Default 0.0 means "use vanilla 0.01 hardcoded"
+// unless the host sets it.  Clamped to [0.0, 1.0] by the setter.
+SM64_LIB_FN float g_libsm64_wall_ny_threshold = 0.25f;
+
+SM64_LIB_FN void sm64_set_wall_ny_threshold(float threshold)
+{
+    if (threshold < 0.0f) threshold = 0.0f;
+    if (threshold > 1.0f) threshold = 1.0f;
+    g_libsm64_wall_ny_threshold = threshold;
+}
+
 // "No slippery Mario" toggle — read by mario.c's mario_floor_is_slippery
 // to swap in looser slope thresholds that keep Mario on his feet on
 // Jak's steeper-than-SM64-intended geometry.  Off by default (0); the

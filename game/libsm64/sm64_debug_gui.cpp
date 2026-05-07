@@ -18,6 +18,7 @@
 #include "game/libsm64/libsm64_integration.h"
 #include "game/runtime.h"
 
+#include "third-party/libsm64/src/libsm64.h"
 #include "third-party/imgui/imgui.h"
 
 namespace sm64 {
@@ -308,6 +309,20 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
     }
   }
 
+  // libsm64 wall detector threshold — surfaces with |normal.y| above this
+  // are treated as floors/ceilings; below it they register as walls.
+  // SM64's default is 0.01 which misses Jak's tilted walls (~0.25–0.30).
+  ImGui::SliderFloat("Wall NY Threshold", &g_libsm64_wall_ny_threshold, 0.01f, 1.0f, "%.3f");
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "libsm64 wall-detection threshold.\n"
+        "A surface is treated as a WALL when |normal.y| <= this value.\n"
+        "SM64 default: 0.01 (near-perfect verticals only).\n"
+        "Jak's tilted walls have |ny| up to ~0.30, so raise this to ~0.30\n"
+        "to make them block Mario properly.\n"
+        "Change takes effect immediately (no collision reload needed).");
+  }
+
   // Experimental normal-aware collision classification.  See libsm64_integration.h
   // for full rationale — tl;dr ~95 % of Jak-labelled walls aren't vertical enough
   // for libsm64 to treat as walls, so tagging them VERY_SLIPPERY (the legacy
@@ -316,29 +331,26 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
   // drop degenerate zero-area tris.  Only applies to the next collision
   // stream — reload by crossing a level transition or waiting for the
   // streaming window around Mario to roll over.
-  if (ImGui::Checkbox("Test New Collide Toggle", &mgr.test_new_collide_toggle)) {
-    // Reload immediately so the new classification shows up without
-    // waiting for a level transition.
+  if (ImGui::Checkbox("Wall Extrusion", &mgr.test_new_collide_toggle)) {
+    // When extrusion is ON the strips handle tilted walls geometrically, so
+    // use the vanilla SM64 threshold (0.01).  When OFF, raise to 0.25 so
+    // libsm64 natively recognises Jak's tilted walls without extra geometry.
+    sm64_set_wall_ny_threshold(mgr.test_new_collide_toggle ? 0.01f : 0.25f);
     size_t tris = reload_level_collision_from_loader(mgr, loader);
     if (tris > 0) {
-      lg::info("[libsm64] Test-new-collide toggle={} — reloaded {} triangles",
+      lg::info("[libsm64] Wall extrusion strips={} — reloaded {} triangles",
                mgr.test_new_collide_toggle ? 1 : 0, tris);
     }
   }
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip(
-        "EXPERIMENTAL collision-loader supplement.\n"
-        "For every pat-mode=WALL tri whose normal is in the configured\n"
-        "wall-extrusion window (0.01 < |ny| <= slider below), ADDITIONALLY\n"
-        "emits a pair of perfectly vertical triangles forming a wall\n"
-        "quad over the source tri's longest XZ edge and Y range.  Fixes\n"
-        "the tunneling-at-speed case (Mario's sub-step jumps past the\n"
-        "original tilted tri's footprint) while leaving the source tri\n"
-        "intact so find_floor still picks it up and Mario slides on its\n"
-        "surface as before.  Also drops degenerate (zero-area) tris that\n"
-        "can NaN libsm64's find_floor.\n"
-        "Flips auto-reload the collision so the change is immediate.\n"
-        "Pairs with 'No Slippery Mario' — no effect unless that's also on.");
+        "LEGACY supplement for high-speed tunneling through tilted walls.\n"
+        "When ON: for each pat-mode=WALL tri whose |ny| is in the extrusion\n"
+        "window below, emits extra vertical wall quads over the tri's longest\n"
+        "XZ edge.  Prevents tunneling at speed but produces visual geometry\n"
+        "artifacts (stray strips visible in the collision overlay).\n"
+        "When OFF (recommended): rely on 'Wall NY Threshold' above to make\n"
+        "libsm64 recognise tilted Jak walls without extra geometry.");
   }
   ImGui::SliderFloat("Wall Extrusion Max |ny|", &mgr.wall_extrusion_ny_max, 0.01f, 1.0f,
                      "%.3f");
@@ -359,6 +371,7 @@ void SM64DebugGui::draw(std::shared_ptr<Loader> loader) {
   // boundary.  IsItemDeactivatedAfterEdit fires exactly once on mouse-
   // release if the value changed during the drag.
   if (ImGui::IsItemDeactivatedAfterEdit()) {
+    sm64_set_wall_ny_threshold(mgr.wall_extrusion_ny_max);
     size_t tris = reload_level_collision_from_loader(mgr, loader);
     if (tris > 0) {
       lg::info("[libsm64] Wall-extrusion cap changed to {:.3f} — reloaded {} triangles",

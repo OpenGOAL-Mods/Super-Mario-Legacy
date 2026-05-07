@@ -801,7 +801,7 @@ class LibSM64Manager {
   // "tunnel through tilted walls at speed" case that's present in the
   // legacy loader, and has been validated against the sandover wall
   // geometry that first surfaced the bug.
-  bool test_new_collide_toggle = true;
+  bool test_new_collide_toggle = false;
 
   // Upper bound on |normal.y| for the wall-extrusion supplement above.
   // Tris with `|ny| > wall_extrusion_ny_max` are considered slopes, not

@@ -173,18 +173,24 @@ Used by `read_target_transform`, `write_mario_pos_to_target`,
 `teleport_mario_to_jak`, `read_cutscene_track_position`, and
 `update_mario_water`.
 
-### sm64-mario-col watcher process (minimal jak2 port)
+### sm64-mario-col watcher process (jak2 port)
 Spawns at file-load, ticks every frame.  Drives:
 - *mario-settings* push to libsm64 each frame (color, render-corpses)
 - update-mario-music! (level-aware track + volume)
 - Pad bridge (left stick + A/B/Z buttons via cpad-hold?)
-- *sm64-target-flags* w = (movie?), *sm64-jak-dying* = #f
-- Auto-spawn on first frame *target* exists (calls
+- *sm64-target-flags* x = (state name = 'target-grab),
+  w = (movie?), other slots stay 0 for now
+- *sm64-jak-dying* = (state name = 'target-death) — drives Mario-
+  hide so he doesn't hover phantom-shell while Jak's death plays
+- Auto-spawn on first frame *target* is real (calls
   pc-sm64-spawn-mario-at-jak; tracked via *sm64-jak2-auto-spawned*)
-
-NOT ported (need jak2-specific work — see "What still needs porting"
-below): death/respawn cycle, corpse capture, state-flags grabbed/
-periscope/clone-anim writes (jak 2 state-flags enum is different).
+- **Death sync**: rising edge on Mario's wedges < 0.5 captures a
+  corpse, sends `'attack-invinc` with `'endlessfall` mode to *target*
+  (jak 2 attack-info syntax requires explicit `(id (new-attack-id))`),
+  starts the respawn timer.  While Jak is dying, refreshes the
+  rolling corpse each frame.  Once Jak respawns + 90 frames, finalizes
+  the corpse, deletes Mario, and clears the auto-spawn flag so the
+  next tick re-spawns Mario at Jak's new location.
 
 ### pc-sm64-spawn-mario-at-jak bridge
 New GOAL-callable bridge (registered in both jak1/kmachine.cpp and

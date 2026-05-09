@@ -351,7 +351,8 @@
 ;; ---------------------------------------------------------------------------
 
 (deftype sm64-mario-col (process)
-  ()
+  ((mario-dead?  symbol)
+   (death-timer  int))
   (:state-methods
     idle))
 
@@ -363,6 +364,11 @@
 (defstate idle (sm64-mario-col)
   :virtual #t
   :code (behavior ()
+    ;; Init the per-process state.  Start dead=#t so the first frame's
+    ;; health=0 (before C++ writes) doesn't false-trigger the death
+    ;; pipeline; flips to #f on the first tick where Mario has any HP.
+    (set! (-> self mario-dead?) #t)
+    (set! (-> self death-timer) 0)
     (loop
       ;; Auto-spawn Mario the first frame *target* exists.  Without this
       ;; the user has to manually click the debug-menu "Spawn at Jak"
@@ -373,6 +379,50 @@
         (when (= (pc-sm64-spawn-mario-at-jak) 1)
           (set! *sm64-jak2-auto-spawned* #t)
           (format #t "[sm64] Auto-spawned Mario at Jak's position~%")))
+
+      ;; ---- Mario death → kill Jak, capture corpse, wait for respawn ----
+      (let ((dead (< (-> *sm64-mario-health* x) 0.5)))
+        ;; Rising edge: Mario just died.  Capture a corpse, slam Jak
+        ;; with an attack-invinc / endlessfall send-event (same payload
+        ;; as jak 1 mario.gc), and start the respawn timer.
+        (when (and dead (not (-> self mario-dead?)) *target*)
+          (format #t "[sm64] Mario died — killing Jak (mode 'endlessfall)~%")
+          (pc-sm64-capture-mario-corpse)
+          (send-event *target* 'attack-invinc #f
+                      (static-attack-info
+                        ((id (new-attack-id)) (mode 'endlessfall))))
+          (set! (-> self death-timer) 1))
+        (set! (-> self mario-dead?) dead))
+
+      ;; Rolling corpse update — while Jak is dying, refresh the rolling
+      ;; corpse with Mario's current geometry so the captured pose lands
+      ;; on Mario's death-animation final frame, not the rising-edge one.
+      (when (and (-> self mario-dead?)
+                 *target*
+                 (-> *target* state)
+                 (= (-> *target* state name) 'target-death))
+        (pc-sm64-update-last-mario-corpse))
+
+      ;; Tick the respawn timer.  Once Jak is respawned (state name no
+      ;; longer 'target-death) AND we've waited at least 90 frames OR
+      ;; we hit the 600-frame safety cap, finalize the corpse and
+      ;; despawn Mario — the auto-spawn flag-reset below brings him
+      ;; back at Jak's new location next tick.
+      (when (> (-> self death-timer) 0)
+        (+! (-> self death-timer) 1)
+        (when (or
+                (and (> (-> self death-timer) 90)
+                     *target*
+                     (-> *target* state)
+                     (!= (-> *target* state name) 'target-death))
+                (> (-> self death-timer) 600))
+          (format #t "[sm64] Jak respawned — finalizing corpse, deleting Mario~%")
+          (pc-sm64-finalize-last-mario-corpse)
+          (pc-sm64-delete-mario)
+          (set! (-> self death-timer) 0)
+          ;; Clear the auto-spawn flag so the next tick re-spawns Mario
+          ;; at Jak's NEW position (post-respawn).
+          (set! *sm64-jak2-auto-spawned* #f)))
 
       ;; Music orchestration (mute Jak's music + pick libsm64 track).
       (update-mario-music!)
@@ -386,14 +436,28 @@
         (pc-sm64-set-corpse-render-enabled
           (if (-> *mario-settings* render-corpses?) 1 0)))
 
-      ;; Target flags — the only fields we can populate cleanly on jak 2
-      ;; right now.  grabbed / periscope / clone-anim need state-flags
-      ;; bits that jak 2 doesn't expose; w = (movie?) is universal.
-      (set! (-> *sm64-target-flags* x) 0.0)
-      (set! (-> *sm64-target-flags* y) 0.0)
-      (set! (-> *sm64-target-flags* z) 0.0)
-      (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0))
-      (set! *sm64-jak-dying* #f)
+      ;; Target flags.  Jak 2 doesn't expose `grabbed` / `dying` as
+      ;; state-flags bits like jak 1 does, but we can fall back to state-
+      ;; NAME comparisons against the equivalent state machine entries:
+      ;;   grabbed         → state name = 'target-grab
+      ;;   jak-dying       → state name = 'target-death
+      ;;   in-movie        → (movie?) — universal across versions
+      ;; periscope and clone-anim have no obvious jak2 equivalents and
+      ;; stay 0 for now.  Setting these correctly lets the C++ side
+      ;; pause Mario / hide him at the right moments.
+      (let ((grabbed   #f)
+            (jak-dying #f)
+            (state-name (and *target*
+                             (-> *target* state)
+                             (-> *target* state name))))
+        (when state-name
+          (set! grabbed (= state-name 'target-grab))
+          (set! jak-dying (= state-name 'target-death)))
+        (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
+        (set! (-> *sm64-target-flags* y) 0.0)  ;; periscope — no jak2 equiv
+        (set! (-> *sm64-target-flags* z) 0.0)  ;; clone-anim — no jak2 equiv
+        (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0))
+        (set! *sm64-jak-dying* (if jak-dying #t #f)))
 
       ;; Pad bridge — push left stick + A/B/Z to libsm64.  Buttons via
       ;; cpad-hold? so they pick up the user's rebindings.

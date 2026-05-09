@@ -14,7 +14,11 @@ int gDiscordRpcEnabled;
 int64_t gStartTime;
 
 static const std::map<GameVersion, std::string> rpc_client_ids = {
-    {GameVersion::Jak1, "938876425585434654"},
+    // mario mod: Super Mario Legacy's own Discord application — the
+    // mod ships under its own branding (status text, art assets) so
+    // friends see "Playing Super Mario Legacy" under our logo, not
+    // upstream OpenGOAL Jak 1.
+    {GameVersion::Jak1, "1502530801148100760"},
     {GameVersion::Jak2, "1060390251694149703"},
     {GameVersion::Jak3, "1226307413355790416"}};
 

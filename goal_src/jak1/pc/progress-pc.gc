@@ -25,6 +25,108 @@
 
 (define *progress-scroll* (new 'static 'progress-scroll))
 
+;; ---------------------------------------------------------------------------
+;; mario mod: ROM-required dialog support.
+;;
+;; (pc-sm64-rom-loaded?) returns #t when libsm64 has a valid SM64 US ROM
+;; loaded.  init_autodetect at boot is now silent (game/libsm64/libsm64_
+;; integration.cpp) — it returns false if no ROM is found instead of
+;; popping the OS picker.  Instead, on the first NEW GAME / LOAD GAME
+;; click (see the menu-transition intercept further down) we route to
+;; (progress-screen mario-rom-required); the OK handler there calls
+;; (pc-sm64-prompt-for-rom) to fire the native picker, then continues
+;; to whatever menu the user originally requested.
+;;
+;; This fires UNCONDITIONALLY when the ROM is missing — even in
+;; speedrunner mode.  The mod will not run without an SM64 ROM, so
+;; there's no useful state where bypassing the prompt would help.
+;;
+;; *mario-rom-prompt-pending-menu* stores the progress-screen we WOULD
+;; have transitioned to (load-game / save-game-title) so the OK handler
+;; can pick up where the intercept left off.
+;; ---------------------------------------------------------------------------
+(define-extern pc-sm64-rom-loaded? (function symbol))
+(define-extern pc-sm64-prompt-for-rom (function symbol))
+
+(define-perm *mario-rom-prompt-pending-menu* int (the int (progress-screen invalid)))
+
+(defun mario-needs-rom-prompt? ()
+  "Should we block the user with the ROM-required dialog?  True iff
+   libsm64 isn't initialized.  Fires regardless of speedrunner mode —
+   the mod can't run without the ROM, so no bypass."
+  (not (pc-sm64-rom-loaded?)))
+
+(defbehavior mario-wait-for-rom-prompt process ()
+  "Boot-time gate: if the SM64 ROM hasn't been loaded yet, activate the
+   mario-rom-required progress dialog and suspend the calling coroutine
+   until the dialog dismisses (whether the user picked a ROM or
+   cancelled the picker).  Called from title-obs.gc's logo state :code
+   BEFORE the cinematic plays so the prompt is the first thing the
+   player sees on a fresh install — same in-engine UI on Windows and
+   Linux (no native MessageBox platform variation).  No-op if the ROM
+   is already present.
+
+   IMPORTANT: activate-progress (engine/ui/progress/progress.gc:415)
+   silently bails when *target* is #f, and progress-allowed? rejects
+   the call while bg-a is non-zero.  At first-boot entry to logo's
+   :code neither condition holds, so we pre-wait until both are ready
+   before triggering the dialog."
+  (when (mario-needs-rom-prompt?)
+    ;; Pre-condition wait — *target* must exist and bg-a must be 0.
+    ;; *target* spawns as the engine boots target-title; bg-a goes to
+    ;; 0 after the cinematic spool is loaded and the :code body runs
+    ;; `(set-setting! 'bg-a 'abs 0.0 0)`.  Cap at ~10 seconds so a hung
+    ;; boot can't pin us forever.  NOTE: do NOT call set-blackout-
+    ;; frames in this loop — that pushes *game-info* blackout-time
+    ;; ahead of current-time, and progress-allowed? rejects activation
+    ;; while blackout-time is in the future.
+    (let ((deadline (+ (-> *display* base-frame-counter) (seconds 10))))
+      (while (and (or (not *target*)
+                      (!= (-> *setting-control* current bg-a) 0.0))
+                  (< (-> *display* base-frame-counter) deadline))
+        (suspend)))
+    ;; Clear any stale blackout-time the cinematic-spool wait loops
+    ;; above us pushed in (set-blackout-frames 0 sets blackout-time =
+    ;; current-time, so the < check in progress-allowed? returns false).
+    (set-blackout-frames 0)
+    ;; Set + apply allow-progress BEFORE the diag print so we see the
+    ;; final state of every progress-allowed? input on one line.
+    (set-setting! 'allow-progress #t 0.0 0)
+    (apply-settings *setting-control*)
+    ;; Split across multiple format calls — GOAL caps function calls
+    ;; at 8 args (memory.md), so dump progress-allowed? inputs in groups.
+    (format #t "[DIAG][rom-prompt] progress-allowed?=~A talking=~A movie=~A movie?=~A pov=~A~%"
+            (progress-allowed?)
+            (-> *setting-control* current talking)
+            (-> *setting-control* current movie)
+            (movie?)
+            (handle->process (-> *game-info* pov-camera-handle)))
+    (format #t "[DIAG][rom-prompt]   othercam=~A letter-d=~D black-d=~D bg-a=~f bg-a-f=~f~%"
+            (handle->process (-> *game-info* other-camera-handle))
+            (- (-> *game-info* letterbox-time) (-> *display* base-frame-counter))
+            (- (-> *game-info* blackout-time) (-> *display* base-frame-counter))
+            (-> *setting-control* current bg-a)
+            (-> *setting-control* current bg-a-force))
+    (format #t "[DIAG][rom-prompt]   allow=~A auto-save=~A target=~A cheat=~A~%"
+            (-> *setting-control* current allow-progress)
+            (handle->process (-> *game-info* auto-save-proc))
+            *target*
+            *cheat-mode*)
+    ;; Fresh boot trigger — no pending menu to resume to.  The OK
+    ;; handler's `else` branch will set next-display-state to invalid,
+    ;; which is exactly what we want here: dialog closes, *progress-
+    ;; process* deactivates, our wait loop below exits.
+    (set! *mario-rom-prompt-pending-menu* (the int (progress-screen invalid)))
+    (activate-progress *dproc* (progress-screen mario-rom-required))
+    (format #t "[DIAG][rom-prompt] post-activate, *progress-process*=~A~%" *progress-process*)
+    (set-setting! 'allow-progress #f 0.0 0)
+    (apply-settings *setting-control*)
+    ;; Block the cinematic until the dialog process exits.  Same no-
+    ;; blackout reasoning as above — the dialog is drawing itself, no
+    ;; need to keep the screen forced black.
+    (while *progress-process*
+      (suspend))))
+
 (defmacro progress-scrolling? ()
   `(< (-> *progress-scroll* transition) 1.0))
 
@@ -2106,6 +2208,10 @@
   (set! (-> *options-remap* (progress-screen flava-player)) *temp-options*)
   (set! (-> *options-remap* (progress-screen memcard-disable-auto-save)) *yes-no-options*)
   (set! (-> *options-remap* (progress-screen memcard-auto-save-disabled)) *ok-options*)
+  ;; mario mod: ROM-required dialog uses the same one-button OK options
+  ;; as the autosave-disabled notice.  draw-mario-rom-required handles
+  ;; the actual layout; the OK confirm is wired in select-options below.
+  (set! (-> *options-remap* (progress-screen mario-rom-required)) *ok-options*)
   (set! (-> *options-remap* (progress-screen monitor)) *temp-options*)
   (set! (-> *options-remap* (progress-screen speedrun-options)) *speedrun-options*)
   (set! (-> *options-remap* (progress-screen speedrun-il-options)) *speedrun-il-options*)
@@ -2457,6 +2563,20 @@
                  ((and (not (-> *setting-control* default auto-save))
                        (= (text-id disable-auto-save) (-> options (-> obj option-index) name)))
                   (sound-play "cursor-options"))
+                 ;; mario mod: NEW GAME / LOAD GAME from title — if the SM64
+                 ;; ROM isn't loaded yet, show the ROM-required dialog FIRST.
+                 ;; Stash the menu the user actually wanted so the dialog's
+                 ;; OK handler can continue there after the picker runs.
+                 ;; Fires regardless of speedrunner mode — the mod can't run
+                 ;; without the ROM.
+                 ((and (or (= (text-id new-game)  (-> options (-> obj option-index) name))
+                           (= (text-id load-game) (-> options (-> obj option-index) name)))
+                       (mario-needs-rom-prompt?))
+                  (push! obj)
+                  (sound-play "select-option")
+                  (set! *mario-rom-prompt-pending-menu*
+                        (the int (-> options (-> obj option-index) param3)))
+                  (set! (-> obj next-display-state) (progress-screen mario-rom-required)))
                  (else
                   (push! obj)
                   (sound-play "select-option")
@@ -2963,7 +3083,30 @@
               (sound-play "start-options")
               (set! (-> *setting-control* default auto-save) #f)
               (set! (-> obj next-display-state) (progress-screen memcard-auto-save-disabled)))
-             (else (sound-play "cursor-options") (set! (-> obj next-display-state) (progress-screen invalid)))))))))
+             (else (sound-play "cursor-options") (set! (-> obj next-display-state) (progress-screen invalid)))))
+          ;; mario mod: ROM-required OK handler.  Fire the native picker
+          ;; (blocking; that's fine, we're paused on a dialog) and then
+          ;; continue to whatever menu the user originally clicked.
+          ;; pc-sm64-prompt-for-rom returns #t/#f for whether libsm64
+          ;; ended up initialized — we don't gate on that, since cancelling
+          ;; should still let the user reach the title submenu (Jak runs
+          ;; fine without Mario; they can re-trigger the prompt later).
+          (((progress-screen mario-rom-required))
+           (sound-play "start-options")
+           ;; pc-sm64-prompt-for-rom auto-restarts gk on successful ROM
+           ;; pick (libsm64_integration.cpp:relaunch_and_exit) so this
+           ;; bridge never returns on success — the only return path is
+           ;; #f (user cancelled the picker).  In that case we proceed
+           ;; to the originally intended menu (or just dismiss if we
+           ;; were boot-triggered).
+           (pc-sm64-prompt-for-rom)
+           (let ((target (the-as progress-screen *mario-rom-prompt-pending-menu*)))
+             (set! *mario-rom-prompt-pending-menu* (the int (progress-screen invalid)))
+             (case target
+               (((progress-screen load-game) (progress-screen save-game) (progress-screen save-game-title))
+                (set! (-> obj next-display-state) (set-memcard-screen obj target)))
+               (else
+                (set! (-> obj next-display-state) target)))))))))
   0
   (none))
 
@@ -3403,6 +3546,32 @@
                           128)
   0)
 
+;; mario mod: ROM-required dialog renderer.  Visual layout mirrors
+;; draw-memcard-auto-save-disabled — title at top, multi-line body
+;; in the middle, "OK" hint at the bottom (the OK option label comes
+;; from *ok-options* via the standard option drawer, so we just
+;; render the title + body here).
+(defun draw-mario-rom-required ((obj progress) (arg0 font-context))
+  (set-scale! arg0 0.6)
+  (set-flags! arg0 (font-flags shadow kerning middle middle-vert large))
+  (set-origin! arg0 (- 20 (-> obj left-x-offset)) 38)
+  (set-width! arg0 360)
+  (set-height! arg0 20)
+  (print-game-text-scaled (lookup-text! *common-text* (text-id mario-rom-required-title) #f)
+                          (-> obj transition-percentage-invert)
+                          arg0
+                          128)
+  (set! (-> arg0 origin y) 80.0)
+  (set-width! arg0 360)
+  (set-height! arg0 80)
+  (print-game-text-scaled (lookup-text! *common-text* (text-id mario-rom-required-msg) #f)
+                          (-> obj transition-percentage-invert)
+                          arg0
+                          128)
+  0)
+
+
+
 (defmethod draw-notice-screen ((obj progress))
   (hide-progress-icons)
   (when *common-text*
@@ -3443,6 +3612,8 @@
         (((progress-screen quit) (progress-screen quit-title)) (draw-quit obj a1-1))
         (((progress-screen memcard-disable-auto-save)) (draw-memcard-disable-auto-save obj a1-1))
         (((progress-screen memcard-auto-save-disabled)) (draw-memcard-auto-save-disabled obj a1-1))
+        ;; mario mod: ROM-required dialog (NEW GAME / LOAD GAME with no SM64 ROM yet).
+        (((progress-screen mario-rom-required)) (draw-mario-rom-required obj a1-1))
         (((progress-screen speedrun-options)) (draw-memcard-speedrun-options obj a1-1)))))
   0
   (none))
@@ -3507,7 +3678,10 @@
             (((progress-screen memcard-removed) (progress-screen memcard-auto-save-error))
              (draw-notice-screen self)
              (draw-options self 192 0 0.82))
-            (((progress-screen memcard-no-data) (progress-screen memcard-auto-save-disabled))
+            (((progress-screen memcard-no-data) (progress-screen memcard-auto-save-disabled)
+              ;; mario mod: same layout as the autosave-disabled notice
+              ;; (title + body + single OK option).
+              (progress-screen mario-rom-required))
              (draw-notice-screen self)
              (draw-options self 165 0 0.82))
             (((progress-screen memcard-format)) (draw-notice-screen self) (draw-options self 172 0 0.82))
@@ -3672,7 +3846,10 @@
                    (= v1-74 (progress-screen quit))
                    (= v1-74 (progress-screen quit-title))
                    (= v1-74 (progress-screen memcard-auto-save-disabled))
-                   (= v1-74 (progress-screen memcard-disable-auto-save)))
+                   (= v1-74 (progress-screen memcard-disable-auto-save))
+                   ;; mario mod: route input on the ROM-required dialog
+                   ;; through respond-memcard so the OK handler fires.
+                   (= v1-74 (progress-screen mario-rom-required)))
                (respond-memcard self))))
           (suspend))
         (none)))

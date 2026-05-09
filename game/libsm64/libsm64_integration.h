@@ -237,6 +237,14 @@ u64 pc_sm64_finalize_last_mario_corpse();
 u64 pc_sm64_clear_mario_corpse();
 u64 pc_sm64_set_mario_color(u32 preset);
 u64 pc_sm64_set_corpse_render_enabled(u32 enabled);
+// ROM-presence bridges, used by the in-game "ROM required" dialog
+// (progress-screen mario-rom-required, see goal_src/jak1/pc/progress-
+// pc.gc).  rom_loaded returns a GOAL symbol (#t/#f); prompt_for_rom
+// triggers the native file picker, copies the ROM into the user
+// config dir on success, calls init(), and returns #t/#f for the
+// caller to know whether libsm64 is now usable.
+u64 pc_sm64_rom_loaded();
+u64 pc_sm64_prompt_for_rom();
 // Health sync — see mario.gc "Health synchronization" block for design.
 u64 pc_sm64_set_mario_wedges(u32 wedges);
 u64 pc_sm64_knockback_mario(u32 wedges);
@@ -278,12 +286,28 @@ class LibSM64Manager {
   // US ROM size (8,388,608 bytes). Returns true on successful init. Use this
   // for default-on-launch initialization.
   bool init_autodetect();
+  // Pop the native OS file-picker dialog, validate ROM size, copy to the
+  // user config dir, and call init() on the result.  Returns true on
+  // successful init.  Wired to (pc-sm64-prompt-for-rom) for the in-game
+  // ROM-required dialog OK handler.  Blocks the calling thread until the
+  // user picks a file or cancels — fine because callers are paused on a
+  // dialog screen anyway.
+  bool prompt_for_rom_and_init();
   // Returns the detected ROM path if init_autodetect() or a successful init()
   // has run, otherwise empty. Exposed so the debug GUI can show what was
   // picked.
   const std::string& last_rom_path() const { return m_last_rom_path; }
   void shutdown();
-  bool is_initialized() const { return m_initialized; }
+  // Acquire-load: any thread that observes m_initialized==true is also
+  // guaranteed to see every write done before init() flipped it true
+  // (sm64_global_init globals, audio engine setup, shell mesh extraction,
+  // etc.).  Without this ordering the renderer thread could see the flag
+  // flip but still read stale uninitialized libsm64 globals on its next
+  // tick, and crash — exactly what happened when prompt_for_rom_and_init
+  // ran init() mid-runtime instead of at boot.
+  bool is_initialized() const {
+    return m_initialized.load(std::memory_order_acquire);
+  }
 
   // Mario instance management
   int32_t create_mario(float x, float y, float z);
@@ -880,7 +904,13 @@ class LibSM64Manager {
   LibSM64Manager(const LibSM64Manager&) = delete;
   LibSM64Manager& operator=(const LibSM64Manager&) = delete;
 
-  bool m_initialized = false;
+  // Atomic so init() can flip it true mid-runtime safely — the renderer
+  // thread's tick_mario_sm64 reads this every frame via is_initialized()
+  // (acquire) and pairs with the release-store in init() (line ~145) to
+  // see a consistent libsm64 internal state.  Other reads/writes in this
+  // file use the default seq_cst implicit conversions — fine for guard
+  // checks that aren't on the hot path.
+  std::atomic<bool> m_initialized{false};
   std::string m_last_rom_path;  // path of the ROM passed to the last successful init
   int32_t m_mario_id = -1;
   // Set by pc-sm64-delete-mario; cleared by auto-spawn on success.  See

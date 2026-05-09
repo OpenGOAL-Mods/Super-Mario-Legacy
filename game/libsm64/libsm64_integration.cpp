@@ -163,6 +163,65 @@ namespace sm64 {
   return s7.offset + true_symbol_offset(g_game_version);
 }
 
+// ---------------------------------------------------------------------------
+// Version-aware GOAL struct field offsets.
+//
+// process / process-drawable layouts diverge between jak 1 and jak 2 because
+// jak 2 adds two fields to process: `level` (4) and `pad-unknown-0` (8).
+// All offsets are RUNTIME offsets (i.e. relative to the basic-pointer that
+// `intern_from_c(name)->value()` returns — the basic header tag is at -4
+// from this pointer).
+//
+// Layouts (computed by stepping through gkernel-h.gc field-by-field):
+//
+//                  jak1   jak2   delta
+//   process.state    52     56    +4   (jak2 inserts `level` before state)
+//   pd.root         108    120   +12   (above + 8-byte pad-unknown-0)
+//   pd.node-list    112    124   +12
+//   trsqv.trans      12     12    0    (engine struct, identical layout)
+//   trsqv.quat       28     28    0
+//
+// Use these helpers everywhere — never hardcode 108 / 52 etc.  The wrong
+// offset on jak 2 reads garbage out of EE memory and either crashes
+// (out-of-bounds) or quietly desyncs Mario from Jak.
+// ---------------------------------------------------------------------------
+struct TargetOffsets {
+  u32 process_state;               // process.state runtime offset
+  u32 process_drawable_root;       // process-drawable.root runtime offset
+  u32 process_drawable_node_list;  // process-drawable.node-list runtime offset
+  u32 process_drawable_water;      // process-drawable.water runtime offset
+                                   //   (root + 44, since water is the 11th
+                                   //   field after root in both versions)
+  u32 trsqv_trans;                 // trsqv.trans runtime offset
+  u32 trsqv_quat;                  // trsqv.quat (overlay rot.x) runtime offset
+};
+
+[[maybe_unused]] static TargetOffsets sm64_target_offsets() {
+  if (g_game_version == GameVersion::Jak2) {
+    // jak 2: process is 12 bytes larger than jak 1 (extra `level` ptr +
+    // `pad-unknown-0` uint32[2]).  Engine struct trsqv is unchanged.
+    // process-drawable's own fields shift by the same +12 since they all
+    // sit after the process header.
+    return TargetOffsets{
+        /*process_state=*/56,
+        /*process_drawable_root=*/120,
+        /*process_drawable_node_list=*/124,
+        /*process_drawable_water=*/164,  // root(120) + 44 (11th 4-byte field)
+        /*trsqv_trans=*/12,
+        /*trsqv_quat=*/28,
+    };
+  }
+  // Jak 1 (and fallback for any version we haven't computed yet).
+  return TargetOffsets{
+      /*process_state=*/52,
+      /*process_drawable_root=*/108,
+      /*process_drawable_node_list=*/112,
+      /*process_drawable_water=*/152,  // root(108) + 44
+      /*trsqv_trans=*/12,
+      /*trsqv_quat=*/28,
+  };
+}
+
 [[maybe_unused]] static void sm64_debug_print(const char* msg) {
   // libsm64's audio engine (audio/load.c, audio/external.c) fires DEBUG_PRINT
   // from the cubeb worker thread on every audio tick. Routing any of that
@@ -2416,10 +2475,11 @@ bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,
                                                 const math::Vector3f& mario_pos) {
   if (!ee_mem || target_ptr == 0 || target_ptr == false_val) return false;
 
-  // process-drawable.root is declared at GOAL :offset 112, but for boxed (basic) types
-  // the runtime offset is (declared - 4) — see goalc/compiler/compilation/Type.cpp:1632.
-  // So root lives at target_ptr + 108. Reading 4 bytes there → need target_ptr + 112 in bounds.
-  constexpr u32 ROOT_RUNTIME_OFF = 108;
+  // process-drawable.root: jak1 runtime 108, jak2 runtime 120 (jak2 process
+  // has +12 extra fields).  See sm64_target_offsets() comment block for the
+  // full layout breakdown.
+  const auto offs = sm64_target_offsets();
+  const u32 ROOT_RUNTIME_OFF = offs.process_drawable_root;
   if (target_ptr + ROOT_RUNTIME_OFF + 4 > ee_mem_size) {
     lg::warn("[libsm64] write: target_ptr 0x{:X} + {} > mem_size 0x{:X}",
              target_ptr, ROOT_RUNTIME_OFF + 4, ee_mem_size);
@@ -2433,9 +2493,9 @@ bool LibSM64Manager::write_mario_pos_to_target(u8* ee_mem,
     return false;
   }
 
-  // trs.trans is declared at GOAL :offset 16 → runtime offset 12 (boxed adjustment).
-  // The vector is 16 bytes (x,y,z,w floats).
-  constexpr u32 TRANS_RUNTIME_OFF = 12;
+  // trsqv.trans: 16-byte vector (x,y,z,w floats).  Engine struct, same
+  // runtime offset (12) on both jak 1 and jak 2.
+  const u32 TRANS_RUNTIME_OFF = offs.trsqv_trans;
   if (root_ptr + TRANS_RUNTIME_OFF + 16 > ee_mem_size) {
     lg::warn("[libsm64] write: root_ptr 0x{:X} + {} > mem_size 0x{:X}",
              root_ptr, TRANS_RUNTIME_OFF + 16, ee_mem_size);
@@ -3359,19 +3419,14 @@ bool LibSM64Manager::read_target_transform(u8* ee_mem,
   u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
-  // Same offset walk as write_mario_pos_to_target: process-drawable.root is
-  // declared at GOAL :offset 112 → runtime 108, then trsqv.trans at GOAL
-  // :offset 16 → runtime 12, and quat overlays rot.x at GOAL :offset 32 →
-  // runtime 28 (16 bytes, x/y/z/w floats).
-  //
-  // **Jak 2 note**: process-drawable's `root` field offset matches jak 1
-  // (it's the first non-process field in both versions, and the process
-  // header layout is the same).  trsqv.trans / .quat offsets are common
-  // engine struct layouts.  If a future GOAL refactor moves things, the
-  // offsets here need updating per game version.
-  constexpr u32 ROOT_RUNTIME_OFF = 108;
-  constexpr u32 TRANS_RUNTIME_OFF = 12;
-  constexpr u32 QUAT_RUNTIME_OFF = 28;
+  // Pull version-aware offsets — jak 2's process is 12 bytes larger than
+  // jak 1's (extra `level` ptr + `pad-unknown-0` uint32[2]), so root /
+  // node-list shift down accordingly.  trsqv.trans and quat are engine
+  // struct fields and stay put.
+  const auto offs = sm64_target_offsets();
+  const u32 ROOT_RUNTIME_OFF = offs.process_drawable_root;
+  const u32 TRANS_RUNTIME_OFF = offs.trsqv_trans;
+  const u32 QUAT_RUNTIME_OFF = offs.trsqv_quat;
   if (target_ptr + ROOT_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
 
   u32 root_ptr;
@@ -3514,10 +3569,12 @@ bool LibSM64Manager::read_cutscene_track_position(u8* ee_mem,
   u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
-  // Same offsets teleport_mario_to_jak uses — keep them in sync.
-  constexpr u32 ROOT_RUNTIME_OFF      = 108;
-  constexpr u32 NODE_LIST_RUNTIME_OFF = 112;
-  constexpr u32 TRANS_RUNTIME_OFF     = 12;
+  // Version-aware process-drawable offsets.  cspace-array is engine struct
+  // and identical between versions.
+  const auto offs = sm64_target_offsets();
+  const u32 ROOT_RUNTIME_OFF      = offs.process_drawable_root;
+  const u32 NODE_LIST_RUNTIME_OFF = offs.process_drawable_node_list;
+  const u32 TRANS_RUNTIME_OFF     = offs.trsqv_trans;
   constexpr u32 CSPACE_ARRAY_DATA_OFF = 12;
   constexpr u32 CSPACE_SIZE           = 32;
   constexpr u32 CSPACE_BONE_OFF       = 16;
@@ -3585,15 +3642,13 @@ void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
 
   ++m_teleport_call_count;  // diagnostic — see teleport_call_count()
 
-  // Field offsets:
-  //   process-drawable.root          — GOAL :offset 112 → runtime 108
-  //   process-drawable.node-list     — GOAL :offset 116 → runtime 112
-  //   trsqv.trans                    — GOAL :offset 16  → runtime 12
-  //   trsqv.quat (overlays rot.x)    — GOAL :offset 32  → runtime 28
-  constexpr u32 ROOT_RUNTIME_OFF      = 108;
-  constexpr u32 NODE_LIST_RUNTIME_OFF = 112;
-  constexpr u32 TRANS_RUNTIME_OFF     = 12;
-  constexpr u32 QUAT_RUNTIME_OFF      = 28;
+  // Field offsets — version-aware (jak2 process is +12 bytes vs jak1).
+  // See sm64_target_offsets() for the per-version table.
+  const auto offs = sm64_target_offsets();
+  const u32 ROOT_RUNTIME_OFF      = offs.process_drawable_root;
+  const u32 NODE_LIST_RUNTIME_OFF = offs.process_drawable_node_list;
+  const u32 TRANS_RUNTIME_OFF     = offs.trsqv_trans;
+  const u32 QUAT_RUNTIME_OFF      = offs.trsqv_quat;
   // cspace-array layout (same as update_actor_collision uses):
   //   data starts at runtime offset 12 (GOAL :offset 16 minus 4 basic tag)
   //   cspace entries are 32 bytes each
@@ -3765,11 +3820,10 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return;
 
-  // process-drawable field layout from goal_src/jak1/engine/game/game-h.gc:
-  //   root(112), node-list(116), draw(120), skel(124), nav(128), align(132),
-  //   path(136), vol(140), fact(144), link(148), part(152), water(156).
-  // All 4-byte basic pointers; subtract 4 for runtime offsets.
-  constexpr u32 WATER_FIELD_RUNTIME_OFF = 152;
+  // process-drawable.water — runtime offset is root + 44 (water is the
+  // 11th 4-byte field after root, identical layout in jak 1 and jak 2;
+  // only the base shifts because of jak 2's larger process header).
+  const u32 WATER_FIELD_RUNTIME_OFF = sm64_target_offsets().process_drawable_water;
   if (target_ptr + WATER_FIELD_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return;
 
   u32 water_ctrl_ptr;

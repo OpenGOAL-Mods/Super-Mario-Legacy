@@ -101,10 +101,36 @@ build target may be `gk` with a flag, not a separate binary.)
       goal-src steps from gd entries via goal-src-sequence.  game.gp
       has comment-only block.
 - [x] **`(build-game)` succeeds for Jak 2 with mario sources included**
-      844 targets all green; mario .o files produced cleanly under
-      `out/jak2/obj/`.  No iso assets extracted yet so `(mi)` blocked.
+      845 targets all green; mario .o files produced cleanly under
+      `out/jak2/obj/`.
 - [x] **jak1 build path still works** — no regressions from jak2 changes
       (`(mi)` for jak1 still produces GAME.CGO clean, 553 targets).
+- [x] **`(mi)` succeeds for Jak 2** — once iso_data/jak2 was populated
+      and `task extract` produced decompiler_out/jak2, the full ISO
+      pack-in built clean: 2676 targets, GAME.CGO + KERNEL.CGO landed
+      under `out/jak2/iso/`.
+- [x] **gk_jak2 boot test PASSED** — `task boot-game` with GAME=jak2
+      loads all four mario files in order and the top-level
+      initialization runs to completion:
+      ```
+      [libsm64] Initialized successfully
+      link finish: mario-settings
+      [mario] no settings at 'C:\…\OpenGOAL\jak2\settings/mario-settings.gc', writing defaults
+      mario settings file write: "C:\…\OpenGOAL\jak2\settings/mario-settings.gc"
+      link finish: mario-menu-h
+      link finish: mario
+      [mario] applied settings: color=0 corpses=#t music-vol=30.0000
+      [mario] Jak 2 mario.gc loaded — skeleton + music helpers, see JAK2_PORT_PLAN.md
+      link finish: mario-music
+      [mario] mario-music.gc loaded — simplified jak2 port
+      ```
+      Confirms: kmachine bridges register correctly (color / corpse-
+      render / music-volume calls all execute), GOAL files load in the
+      configured order from game.gd, settings persistence writes to
+      `%APPDATA%/OpenGOAL/jak2/settings/mario-settings.gc` on first
+      boot, and the on-disk format is byte-identical to jak 1's
+      (settings file roams between versions).  No crash, no GOAL
+      runtime errors — boot proceeds to the title screen.
 
 ## What still needs porting (depends on runtime testing)
 

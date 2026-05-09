@@ -3384,6 +3384,43 @@ u64 pc_sm64_teleport_mario(u32 x_bits, u32 y_bits, u32 z_bits) {
 }
 
 // ---------------------------------------------------------------------------
+// pc-sm64-spawn-mario-at-jak — read Jak's position from EE memory and call
+// create_mario.  No-op if libsm64 isn't ready, *target* doesn't exist yet,
+// or Mario already exists (avoid double-spawn — caller should pc-sm64-
+// delete-mario first if they want to relocate).  Lifts the inline logic
+// from sm64_debug_gui's "Spawn at Jak" button so both UIs share one path.
+// ---------------------------------------------------------------------------
+u64 pc_sm64_spawn_mario_at_jak() {
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.is_initialized() || !g_ee_main_mem) {
+    // debug-level: GOAL-side polls this every frame until success, so a
+    // libsm64-not-ready bail isn't a real warning.
+    return 0;
+  }
+  if (mgr.has_mario()) {
+    // Same — silent no-op when Mario already exists.  The id+log path is
+    // useful from the C++ debug GUI button but noisy for GOAL polling.
+    return 0;
+  }
+  math::Vector3f jak_pos;
+  if (!mgr.read_target_transform(g_ee_main_mem, &jak_pos, nullptr)) {
+    // *target* binding not yet pointing at a real process — GOAL polls
+    // this every frame until it stabilises, so don't spam warn-level.
+    return 0;
+  }
+  // create_mario takes Jak units directly — it does the JAK_TO_SM64_SCALE
+  // conversion internally.
+  int32_t id = mgr.create_mario(jak_pos.x(), jak_pos.y(), jak_pos.z());
+  if (id < 0) {
+    lg::warn("[libsm64] spawn-at-jak: create_mario failed");
+    return 0;
+  }
+  lg::info("[libsm64] spawn-at-jak: Mario spawned at ({:.1f}, {:.1f}, {:.1f}) id={}",
+           jak_pos.x(), jak_pos.y(), jak_pos.z(), id);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
 // GOAL-callable "shove Mario" (knockback only, no HP loss).  Registered as
 // "pc-sm64-shove-mario".  Takes the shove SOURCE point in Jak units (the
 // thing Mario should be knocked away from — e.g. the snow-bumper's root

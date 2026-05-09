@@ -583,6 +583,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-set-music-volume", (void*)sm64::pc_sm64_set_music_volume);
   make_function_symbol_from_c("pc-sm64-teleport-mario", (void*)sm64::pc_sm64_teleport_mario);
   make_function_symbol_from_c("pc-sm64-shove-mario", (void*)sm64::pc_sm64_shove_mario);
+  make_function_symbol_from_c("pc-sm64-spawn-mario-at-jak", (void*)sm64::pc_sm64_spawn_mario_at_jak);
 
   // setup string constants
   // TODO - these may be able to be moved into `init_common_pc_port_functions` but it's trickier

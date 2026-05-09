@@ -274,6 +274,12 @@ u64 pc_sm64_teleport_mario(u32 x, u32 y, u32 z);
 // losing HP or playing the hurt sound.  Used by level actors (e.g.
 // snow-bumper) that shove Jak and want Mario to feel the same impact.
 u64 pc_sm64_shove_mario(u32 x, u32 y, u32 z);
+// Spawn Mario at the current Jak (*target*) position.  No-op if libsm64
+// isn't initialised, *target* doesn't exist yet, or Mario is already
+// spawned.  Returns 1 on success, 0 on no-op/failure.  Used as the
+// "summon Mario" entry point for both the C++ debug GUI button and a
+// GOAL-callable bridge — same logic in both, no duplication.
+u64 pc_sm64_spawn_mario_at_jak();
 
 class LibSM64Manager {
  public:

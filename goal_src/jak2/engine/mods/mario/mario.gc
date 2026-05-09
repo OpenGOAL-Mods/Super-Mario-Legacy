@@ -60,6 +60,9 @@
 (define-extern pc-sm64-set-music-volume (function float none))
 (define-extern pc-sm64-teleport-mario (function float float float none))
 (define-extern pc-sm64-shove-mario (function float float float none))
+;; Returns 1 if Mario was spawned, 0 if libsm64 isn't ready / *target*
+;; isn't bound / Mario already exists.
+(define-extern pc-sm64-spawn-mario-at-jak (function int))
 ;; pc-sm64-set-input takes float-bit-packed sticks (-1.0..1.0) + button mask
 ;; — the C++ bridge reinterprets the u32 args as floats.  Declaring as int
 ;; would cause GOAL to truncate any float passed to it.
@@ -352,10 +355,25 @@
   (:state-methods
     idle))
 
+;; Track whether we've already auto-spawned Mario this session.  Reset
+;; on file load (this is a fresh global), so a hot-reload of mario.gc
+;; will auto-spawn again — useful while iterating.
+(define *sm64-jak2-auto-spawned* #f)
+
 (defstate idle (sm64-mario-col)
   :virtual #t
   :code (behavior ()
     (loop
+      ;; Auto-spawn Mario the first frame *target* exists.  Without this
+      ;; the user has to manually click the debug-menu "Spawn at Jak"
+      ;; button every session — having a default-on auto-spawn for the
+      ;; jak 2 mod is friendlier.  Bridge returns 1 on success, 0 on
+      ;; no-op (libsm64 not ready / Mario already alive).
+      (when (and (not *sm64-jak2-auto-spawned*) *target*)
+        (when (= (pc-sm64-spawn-mario-at-jak) 1)
+          (set! *sm64-jak2-auto-spawned* #t)
+          (format #t "[sm64] Auto-spawned Mario at Jak's position~%")))
+
       ;; Music orchestration (mute Jak's music + pick libsm64 track).
       (update-mario-music!)
 

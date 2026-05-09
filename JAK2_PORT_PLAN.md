@@ -132,6 +132,68 @@ build target may be `gk` with a flag, not a separate binary.)
       (settings file roams between versions).  No crash, no GOAL
       runtime errors — boot proceeds to the title screen.
 
+## Overnight pass 2 — implemented runtime functionality
+
+These items moved from "needs runtime testing" to "implemented + boot-
+test verified":
+
+### Automated boot test loop (`scripts/boot-test-jak2.sh`)
+End-to-end smoke test: switches GAME=jak2, runs (mi), launches gk_jak2,
+waits BOOT_WAIT_SECS for it to settle, scans stdout for required
+indicators ("[libsm64] Initialized successfully", "link finish:
+mario-*", "[mario] *", "[sm64] Mario collision process started"),
+fails fast on forbidden substrings (Compiler Exception, FATAL ERROR,
+segfault, panic), and cleans up gk + goalc on exit (trap EXIT).
+Flags: `--rebuild-cpp` for runtime changes, `--skip-mi` for relaunch
+only, `--boot-wait N` for slow boots, `--log PATH` to keep the
+boot log.
+
+### libsm64_integration.cpp version-aware
+All 28 `jak1::intern_from_c` / `jak1::find_symbol_from_c` /
+`jak1_symbols::FIX_SYM_TRUE` call sites now branch on
+`g_game_version` via six new helpers (`sm64_get_symbol_value`,
+`sm64_find_symbol_value`, `sm64_set_symbol_value`,
+`sm64_get_symbol_offset`, `sm64_find_symbol_offset`,
+`sm64_true_offset`).  Three jak 1-only features (yakow grab,
+target-tube, target-ice, glue-state) explicitly bail out on jak 2
+to avoid futile symbol-table scans.
+
+### Version-aware GOAL struct field offsets
+Jak 2's process is +12 bytes vs jak 1 (extra `level` ptr +
+`pad-unknown-0` uint32[2]).  `sm64_target_offsets()` returns the
+right runtime offsets for `g_game_version`:
+
+                jak1   jak2
+  process.state    52     56
+  pd.root         108    120
+  pd.node-list    112    124
+  pd.water        152    164
+
+Used by `read_target_transform`, `write_mario_pos_to_target`,
+`teleport_mario_to_jak`, `read_cutscene_track_position`, and
+`update_mario_water`.
+
+### sm64-mario-col watcher process (minimal jak2 port)
+Spawns at file-load, ticks every frame.  Drives:
+- *mario-settings* push to libsm64 each frame (color, render-corpses)
+- update-mario-music! (level-aware track + volume)
+- Pad bridge (left stick + A/B/Z buttons via cpad-hold?)
+- *sm64-target-flags* w = (movie?), *sm64-jak-dying* = #f
+- Auto-spawn on first frame *target* exists (calls
+  pc-sm64-spawn-mario-at-jak; tracked via *sm64-jak2-auto-spawned*)
+
+NOT ported (need jak2-specific work — see "What still needs porting"
+below): death/respawn cycle, corpse capture, state-flags grabbed/
+periscope/clone-anim writes (jak 2 state-flags enum is different).
+
+### pc-sm64-spawn-mario-at-jak bridge
+New GOAL-callable bridge (registered in both jak1/kmachine.cpp and
+jak2/kmachine.cpp).  Reads *target* via the version-aware offset
+table, calls create_mario.  Returns 1 on success, 0 on no-op
+(libsm64 not ready, *target* not bound, Mario already exists).
+The watcher's auto-spawn lambda polls this every frame until it
+returns 1.
+
 ## What still needs porting (depends on runtime testing)
 
 These were intentionally not done overnight because they need

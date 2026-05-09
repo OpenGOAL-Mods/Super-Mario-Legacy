@@ -1,0 +1,143 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-music.gc
+;; name in dgo: mario-music
+;; dgos: GAME
+
+;; NOTE: no (bundles ...) — Jak 2 build is descriptor-driven.
+
+;; ---------------------------------------------------------------------------
+;; mario-music — per-frame music orchestration for the Mario mod (Jak 2).
+;;
+;; Stripped-down port of jak1/mario-music.gc.  Intentionally simplified
+;; while the Jak 2 watcher process is unported:
+;;
+;;   - Default volume push (matches jak1)
+;;   - Title state gate uses jak2's single `target-title` state (jak1 had
+;;     a `target-title-play` / `target-title-wait` split)
+;;   - File-select detection (whoosh, okey-dokey on slot pick) is
+;;     SKIPPED — jak2's `progress` type uses symbol fields rather than
+;;     an enum, needs separate porting
+;;   - Tube-slide forced-track detection is SKIPPED — jak2 doesn't have
+;;     the target-tube family of states
+;;   - Level → music map defaults everything to 'bob-omb until we have
+;;     proper per-level mood mapping for jak2's level set (atoll, city,
+;;     forest, mountain, …)
+;;
+;; To re-enable file-select / slide-tube logic, look at the jak1 file
+;; for the patterns and adapt to jak2's progress / state machine.
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; mario-music-for-level
+;;
+;; Map the current jak 2 level symbol to an SM64 track symbol.  Most
+;; entries default to 'bob-omb pending mood-by-mood verification.
+;; Refer to jak1/mario-music.gc for the original SM64 track palette.
+;; ---------------------------------------------------------------------------
+(defun mario-music-for-level ((lev symbol))
+  "Return the sm64-music symbol that should play in the given Jak 2 level.
+   Default: 'bob-omb everywhere — fill in per level as desired."
+  (case lev
+    ;; Story / menu screens
+    (('title)        'title)
+    (('intro 'demo)  'bob-omb)
+    (('outro)        'credits)
+    ;; Hub world
+    (('city)         'inside-castle)
+    ;; Water-themed
+    (('atoll 'sewer 'under) 'water)
+    ;; Stronghold / palace
+    (('palace 'fortress 'stadium) 'inside-castle)
+    ;; Underground / spooky
+    (('tomb 'ruins 'consite) 'underground)
+    ;; Outdoor / mountain / forest
+    (('forest 'mountain) 'bob-omb)
+    ;; Mech / boss-y
+    (('nest)         'boss)
+    ;; Default — fill in the rest as you discover what fits
+    (else 'bob-omb)))
+
+;; True for screens where Jak's master-mode is intentionally NOT 'game
+;; (so a normal sm64-music call would get pause-gated).  In jak2, only
+;; the title / intro / demo / outro screens fit — gameplay levels all
+;; run with master-mode 'game.
+(defun mario-music-level-is-forced? ((lev symbol))
+  (or (= lev 'title) (= lev 'intro) (= lev 'demo) (= lev 'outro)))
+
+;; Cache: last track we asked libsm64 to play.  Edge-detected so a
+;; level transition triggers a single switch, not a per-frame restart.
+(define *mario-music-last-track* (the symbol #f))
+
+;; Cache: were we muting Jak's music last frame?  Edge-detection so
+;; add-setting! / remove-setting! fire exactly once per transition.
+(define *mario-music-was-active* #f)
+
+;; Cache: last volume we pushed to C++.  -1.0 sentinel forces first
+;; frame to always push.
+(define *mario-music-last-volume* -1.0)
+
+;; ---------------------------------------------------------------------------
+;; update-mario-music!
+;;
+;; Called from the watcher process's idle tick (once that's ported to
+;; jak2).  Until the watcher exists, calling this from anywhere is safe
+;; — it short-circuits when *mario-settings* is #f or *level* / *target*
+;; aren't initialised.
+;;
+;; defbehavior process so add-setting! / remove-setting! resolve their
+;; (with-pp pp) inside a behavior context.
+;; ---------------------------------------------------------------------------
+(defbehavior update-mario-music! process ()
+  (when *mario-settings*
+    ;; Push the effective volume down to libsm64 whenever it changes.
+    (let ((vol (if (-> *mario-settings* play-sm64-music?)
+                   (-> *mario-settings* sm64-music-volume)
+                   (-> *mario-settings* sm64-sfx-volume))))
+      (when (!= vol *mario-music-last-volume*)
+        (pc-sm64-set-music-volume vol)
+        (set! *mario-music-last-volume* vol)))
+    (cond
+      ;; Music ON path: when not on the title level, allow.  When on
+      ;; title, require *target* state to be `target-title` (post-NDI).
+      ;; Anything else on the title level — pre-spawn (*target* #f),
+      ;; transient states — keeps us silent.
+      ((and (-> *mario-settings* play-sm64-music?)
+            *level*
+            (let* ((cur-lev (-> (level-get-target-inside *level*) name))
+                   (target-state-name
+                     (and *target*
+                          (-> *target* state)
+                          (-> *target* state name))))
+              (or (!= cur-lev 'title)
+                  (= target-state-name 'target-title))))
+       ;; Rising edge: register mute overrides so Jak's vanilla music
+       ;; sits at volume 0 / song nil while libsm64 plays its track.
+       (when (not *mario-music-was-active*)
+         (add-setting! 'music-volume 'abs 0.0 0)
+         (add-setting! 'music #f 0.0 0))
+       ;; Pick the desired track for this frame, queue if changed.
+       (when *level*
+         (let* ((cur-lev (-> (level-get-target-inside *level*) name))
+                (track (mario-music-for-level cur-lev))
+                (forced? (mario-music-level-is-forced? cur-lev)))
+           (when (!= track *mario-music-last-track*)
+             (set! *mario-music-last-track* track)
+             (if forced?
+                 (sm64-music-forced track)
+                 (sm64-music track)))))
+       (set! *mario-music-was-active* #t))
+      (else
+       ;; Falling edge: drop overrides so Jak's setting flow resumes
+       ;; on the next ambient tick, and stop whatever SM64 track was
+       ;; playing.
+       (when *mario-music-was-active*
+         (remove-setting! 'music-volume)
+         (remove-setting! 'music)
+         (pc-sm64-stop-music)
+         (set! *mario-music-last-track* #f)
+         (set! *mario-music-was-active* #f)))))
+  (none))
+
+(format 0 "[mario] mario-music.gc loaded — simplified jak2 port~%")

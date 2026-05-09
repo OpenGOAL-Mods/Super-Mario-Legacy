@@ -469,4 +469,5 @@
   "mario-settings.o" ;; added
   "mario-menu-h.o" ;; added
   "mario.o" ;; added
+  "mario-music.o" ;; added
  ))

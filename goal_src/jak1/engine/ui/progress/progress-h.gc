@@ -131,6 +131,13 @@
      (speedrun-cat-ext-options)
      ;; mario mod
      (mario-options)
+     ;; mario mod: ROM-required dialog screen.  Shown when the user
+     ;; tries to NEW GAME or LOAD GAME from the title menu and the
+     ;; SM64 ROM hasn't been loaded yet.  OK confirms and triggers
+     ;; the native file picker via (pc-sm64-prompt-for-rom).  Always
+     ;; fires when the ROM is missing — the mod can't run without it,
+     ;; so even speedrunner mode goes through this prompt.
+     (mario-rom-required)
      ;; the last one!
      (max))
    (defenum game-option-type

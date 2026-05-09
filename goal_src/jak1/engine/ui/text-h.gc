@@ -803,6 +803,10 @@
   (mario-opts-clear-corpses #x161d)
   (mario-opts-render-corpses #x161e)
   (mario-opts-sfx-volume #x161f)
+  ;; mario mod: ROM-required dialog (progress-screen mario-rom-required).
+  ;; Strings live in game/assets/jak1/text/game_custom_text_*.json.
+  (mario-rom-required-title #x1700)
+  (mario-rom-required-msg   #x1701)
   ;; GAME-TEXT-ID ENUM ENDS
   )
 

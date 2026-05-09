@@ -171,7 +171,32 @@
         (pc-sm64-set-music-volume vol)
         (set! *mario-music-last-volume* vol)))
     (cond
-      ((-> *mario-settings* play-sm64-music?)
+      ;; mario mod: silence Mario music during the title-screen intro
+      ;; cinematic.  POSITIVELY gate on known-good states — when on
+      ;; the title level we require *target* to have reached target-
+      ;; title-play (post-cinematic, "PRESS START" prompt) or target-
+      ;; title-wait.  Anything else on the title level (including the
+      ;; brief pre-spawn window where *target* is #f, transient
+      ;; intermediate states, AND the cinematic state target-title
+      ;; itself) keeps us silent.  Outside the title level we allow
+      ;; music unconditionally — gameplay states are too varied to
+      ;; enumerate, and there's no cinematic to interrupt.
+      ;;
+      ;; Folded INTO the cond predicate (rather than as an early
+      ;; `return` inside the true branch) so the else-branch cleanup
+      ;; ALSO fires if a track somehow started during a transient
+      ;; tick where conditions briefly aligned — without that, music
+      ;; that snuck in for a frame would have no clean stop path.
+      ((and (-> *mario-settings* play-sm64-music?)
+            *level*
+            (let* ((cur-lev (-> (level-get-target-inside *level*) name))
+                   (target-state-name
+                     (and *target*
+                          (-> *target* state)
+                          (-> *target* state name))))
+              (or (!= cur-lev 'title)
+                  (= target-state-name 'target-title-play)
+                  (= target-state-name 'target-title-wait))))
        ;; Register the mute overrides on the rising edge.  We override
        ;; both `music` (the "what to play" symbol — prevents new tracks
        ;; from loading) and `music-volume` (clamps the sound-group-music

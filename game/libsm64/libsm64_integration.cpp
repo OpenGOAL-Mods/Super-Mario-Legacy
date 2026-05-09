@@ -8,10 +8,25 @@
 #include "sm64_audio.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <thread>
+
+#ifdef _WIN32
+// windows.h defines min/max as macros which clash with std::numeric_limits
+// <T>::max() further down the file — NOMINMAX disables them.  WIN32_LEAN_
+// AND_MEAN trims the kitchen-sink Windows include set down to what we
+// actually need (HWND, FindWindowA, SetWindowPos, Sleep, CreateProcessA).
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
 
 #include "common/goal_constants.h"
 #include "common/log/log.h"
@@ -130,8 +145,16 @@ bool LibSM64Manager::init(const std::string& rom_path) {
   // drops it back to the vanilla SM64 threshold (0.01).
   sm64_set_wall_ny_threshold(0.25f);
 
-  m_initialized = true;
   m_last_rom_path = rom_path;
+  // Release-store: must be the LAST write in init().  Any thread that
+  // sees m_initialized==true via the acquire-load in is_initialized()
+  // is guaranteed to also see every write done before this line — the
+  // sm64_global_init internals, audio engine setup, shell extraction,
+  // wall_ny_threshold, m_last_rom_path.  This is the right correctness
+  // fix even though init() now only runs at cold boot (single-threaded
+  // context) — defensive against any future call site that runs init
+  // while other threads are alive.
+  m_initialized.store(true, std::memory_order_release);
   lg::info("[libsm64] Initialized successfully");
   return true;
 }
@@ -208,50 +231,178 @@ bool LibSM64Manager::init_autodetect() {
   }
 
   if (picked.empty()) {
-    lg::warn("[libsm64] Auto-detect: no matching .z64 found in user config dir, next to gk, or in iso_data/mario");
-
-    // Prompt the user to pick a .z64 ROM file
-    char const* filter_patterns[] = {"*.z64", "*.Z64"};
-    char const* selection = tinyfd_openFileDialog(
-        "Select SM64 US ROM (.z64)", "", 2, filter_patterns, "SM64 ROM files (*.z64)", 0);
-    if (!selection) {
-      lg::warn("[libsm64] User cancelled ROM file selection");
-      return false;
-    }
-
-    fs::path selected_rom(selection);
-    std::error_code ec;
-    auto sz = fs::file_size(selected_rom, ec);
-    if (ec || sz != kExpectedSm64RomSize) {
-      lg::error("[libsm64] Selected ROM has wrong size ({} bytes, expected {})",
-                ec ? 0 : static_cast<size_t>(sz), static_cast<size_t>(kExpectedSm64RomSize));
-      return false;
-    }
-
-    // Copy the ROM to %APPDATA%/OpenGOAL/mario so future launches find it
-    // automatically.  This is the persistent location — it survives
-    // build-tree wipes, mod updates that nuke iso_data/, and reinstalls of
-    // the launcher, so once the user picks a ROM they never have to re-pick.
-    try {
-      fs::path user_cfg = file_util::get_user_config_dir();
-      fs::path dest_dir = user_cfg / "mario";
-      fs::create_directories(dest_dir, ec);
-      fs::path dest = dest_dir / selected_rom.filename();
-      fs::copy_file(selected_rom, dest, fs::copy_options::overwrite_existing, ec);
-      if (ec) {
-        lg::warn("[libsm64] Could not copy ROM to {}: {}", dest.string(), ec.message());
-        // Still try to init from the original location
-        return init(selected_rom.string());
-      }
-      lg::info("[libsm64] Copied ROM to {}", dest.string());
-      picked = dest;
-    } catch (...) {
-      // If copy fails, just use the ROM from where the user picked it
-      return init(selected_rom.string());
-    }
+    // SILENT failure — do NOT pop any OS-level prompt here.  The
+    // GOAL-side ROM-required dialog (progress-screen mario-rom-required
+    // in progress-pc.gc) handles user-facing prompting via the in-game
+    // pause-style UI, fired from title-obs.gc's startup / ndi state
+    // :code BEFORE the cinematic plays.  Going through GOAL keeps the
+    // experience identical on Windows and Linux (no native MessageBox
+    // platform differences) and stays in-engine for immersion.
+    lg::warn("[libsm64] Auto-detect: no matching .z64 found in user config dir, next to gk, or in iso_data/mario "
+             "(silent — GOAL boot prompt will trigger pc-sm64-prompt-for-rom when user-facing UI is ready)");
+    return false;
   }
   lg::info("[libsm64] Auto-detected ROM: {}", picked.string());
   return init(picked.string());
+}
+
+// Spawn a fresh gk process with the same exe + cwd as the current one,
+// then exit the current process.  Called after successfully copying a
+// ROM to %APPDATA%/OpenGOAL/mario/ in prompt_for_rom_and_init — auto-
+// restart so the new process's init_autodetect picks up the saved ROM
+// at boot (where init() runs single-threaded and works cleanly), since
+// initializing libsm64 mid-runtime crashes downstream of the
+// m_initialized flip and we couldn't pin the exact cause.
+//
+// Marked [[noreturn]] but its return path is technically reachable on
+// CreateProcessA / fork failure — those still fall through to a hard
+// std::exit(1).  The user gets nothing useful in that case but at
+// least gk doesn't hang.
+[[noreturn]] static void relaunch_and_exit() {
+  std::string exe = file_util::get_current_executable_path();
+  if (exe.empty()) {
+    lg::error("[libsm64] relaunch_and_exit: could not determine current exe path");
+    std::exit(1);
+  }
+  lg::info("[libsm64] relaunch_and_exit: spawning new gk @ {}", exe);
+
+#ifdef _WIN32
+  STARTUPINFOA si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  // CreateProcessA may modify the lpCommandLine buffer; pass a writable
+  // std::string buffer.  We don't forward argv — gk almost never takes
+  // user-facing args (the few that exist are dev-only) and a simple
+  // bare exe spawn matches the user's typical launch path.
+  std::string cmd = exe;
+  if (!CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                      0, nullptr, nullptr, &si, &pi)) {
+    lg::error("[libsm64] CreateProcess failed (err {})", GetLastError());
+    std::exit(1);
+  }
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  lg::info("[libsm64] new gk spawned (pid {}); exiting current", pi.dwProcessId);
+  // ExitProcess instead of std::exit: bypass the static destructor /
+  // atexit chain because GOAL is mid-coroutine and the renderer thread
+  // is still ticking — graceful std::exit can hang or crash trying to
+  // join those.  The new gk has its own clean state.
+  ExitProcess(0);
+#else
+  // POSIX: fork, child execv into the new gk, parent exits.
+  pid_t child = fork();
+  if (child < 0) {
+    lg::error("[libsm64] fork failed; cannot auto-restart");
+    std::exit(1);
+  }
+  if (child == 0) {
+    // child — replace process image with fresh gk
+    char* argv[] = {const_cast<char*>(exe.c_str()), nullptr};
+    execv(exe.c_str(), argv);
+    _exit(1);  // execv only returns on failure
+  }
+  lg::info("[libsm64] new gk spawned (pid {}); exiting current", child);
+  _exit(0);
+#endif
+}
+
+bool LibSM64Manager::prompt_for_rom_and_init() {
+  // If we're already initialized, nothing to do.  Caller (the GOAL ROM-
+  // required dialog OK handler) checks rom_loaded? before calling, but
+  // belt-and-suspenders against double-prompt during a race.
+  if (m_initialized) {
+    return true;
+  }
+
+  // Native OS file picker.  This BLOCKS the calling thread until the
+  // user picks a file or cancels.  That's fine — we're called from the
+  // GOAL UI thread while the user is sitting on a paused dialog screen,
+  // so the game loop is already waiting.
+  //
+  // tinyfd hardcodes hwndOwner=0 on Windows (see tinyfiledialogs.c:1317),
+  // so the picker has no parent and Windows happily lets gk's window
+  // cover it when the user clicks gk.  Workaround: spawn a watchdog
+  // thread that polls for the picker's window class ("#32770" — the
+  // standard Win32 dialog class) and forces it HWND_TOPMOST every 50 ms
+  // while the picker is up.  TOPMOST is sticky against other normal
+  // windows but Windows may briefly demote it on focus changes, so we
+  // re-apply continuously for the lifetime of the picker.  Thread exits
+  // immediately once tinyfd returns.
+  static const char kPickerTitle[] = "Select SM64 US ROM (.z64)";
+  char const* filter_patterns[] = {"*.z64", "*.Z64"};
+#ifdef _WIN32
+  std::atomic<bool> picker_active{true};
+  std::thread topmost_watcher([&picker_active]() {
+    while (picker_active.load(std::memory_order_acquire)) {
+      HWND dlg = FindWindowA("#32770", kPickerTitle);
+      if (dlg) {
+        SetWindowPos(dlg, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      }
+      Sleep(50);
+    }
+  });
+#endif
+  char const* selection = tinyfd_openFileDialog(
+      kPickerTitle, "", 2, filter_patterns, "SM64 ROM files (*.z64)", 0);
+#ifdef _WIN32
+  picker_active.store(false, std::memory_order_release);
+  topmost_watcher.join();
+#endif
+  if (!selection) {
+    lg::warn("[libsm64] User cancelled ROM file selection");
+    return false;
+  }
+
+  fs::path selected_rom(selection);
+  std::error_code ec;
+  auto sz = fs::file_size(selected_rom, ec);
+  if (ec || sz != kExpectedSm64RomSize) {
+    lg::error("[libsm64] Selected ROM has wrong size ({} bytes, expected {})",
+              ec ? 0 : static_cast<size_t>(sz), static_cast<size_t>(kExpectedSm64RomSize));
+    return false;
+  }
+
+  // Copy the ROM to %APPDATA%/OpenGOAL/mario so future launches find it
+  // automatically.  This is the persistent location — it survives
+  // build-tree wipes, mod updates that nuke iso_data/, and reinstalls of
+  // the launcher, so once the user picks a ROM they never have to re-pick.
+  try {
+    fs::path user_cfg = file_util::get_user_config_dir();
+    fs::path dest_dir = user_cfg / "mario";
+    fs::create_directories(dest_dir, ec);
+    fs::path dest = dest_dir / selected_rom.filename();
+    fs::copy_file(selected_rom, dest, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+      lg::warn("[libsm64] Could not copy ROM to {}: {}", dest.string(), ec.message());
+      return false;
+    }
+    lg::info("[libsm64] Copied ROM to {}; auto-restarting gk", dest.string());
+  } catch (const std::exception& e) {
+    lg::error("[libsm64] Exception copying ROM: {}", e.what());
+    return false;
+  }
+
+  // Auto-restart gk so init_autodetect picks up the saved ROM cleanly
+  // at boot.  We deliberately do NOT call init() here mid-runtime —
+  // even with m_initialized as std::atomic<bool> (release/acquire
+  // ordering, the right correctness fix for the flag itself), mid-
+  // runtime init still crashes the process: something downstream of
+  // the flag flip (renderer first tick, audio worker, GOAL OK-handler
+  // resume, or some interaction between them) terminates gk.  Diag
+  // prints confirmed init() returns cleanly to the GOAL bridge — the
+  // crash happens AFTER pc_sm64_prompt_for_rom returns and before any
+  // subsequent log line lands, with both renderer and GOAL threads
+  // going silent simultaneously.
+  //
+  // relaunch_and_exit() spawns a fresh gk with the saved ROM in its
+  // search path and exits the current process.  The user sees a brief
+  // window flicker; the new gk loads the ROM via init_autodetect on
+  // its first frame (single-threaded, no race) and proceeds to the
+  // logo / NDI cinematic and title menu as if Mario had been there
+  // from the start.
+  relaunch_and_exit();
+  // not reached
 }
 
 void LibSM64Manager::set_audio_volume(int volume) {
@@ -1046,7 +1197,10 @@ void LibSM64Manager::shutdown() {
   m_respawn_pending = false;
 
   sm64_global_terminate();
-  m_initialized = false;
+  // Release-store on shutdown: pairs with the acquire-load in is_
+  // initialized() so threads observing the flip-to-false also see all
+  // the cleanup writes above (mario delete, audio teardown, etc.).
+  m_initialized.store(false, std::memory_order_release);
   lg::info("[libsm64] Shutdown complete");
 }
 
@@ -2806,6 +2960,23 @@ u64 pc_sm64_set_mario_color(u32 preset) {
 u64 pc_sm64_set_corpse_render_enabled(u32 enabled) {
   LibSM64Manager::instance().set_corpse_render_enabled(enabled != 0);
   return 0;
+}
+
+// GOAL #t/#f from a C++ bool.  Mirrors common/kmachine.cpp's bool_to_
+// symbol but is local to libsm64 so we don't need to expose a kernel
+// helper just for this one bridge pair.  Anchored to GameVersion::Jak1
+// since this whole project is jak1.
+static inline u64 sm64_bool_to_symbol(bool val) {
+  return val ? static_cast<u64>(s7.offset) + true_symbol_offset(GameVersion::Jak1)
+             : static_cast<u64>(s7.offset);
+}
+
+u64 pc_sm64_rom_loaded() {
+  return sm64_bool_to_symbol(LibSM64Manager::instance().is_initialized());
+}
+
+u64 pc_sm64_prompt_for_rom() {
+  return sm64_bool_to_symbol(LibSM64Manager::instance().prompt_for_rom_and_init());
 }
 
 // ---------------------------------------------------------------------------

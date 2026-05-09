@@ -562,6 +562,10 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-clear-mario-corpse", (void*)sm64::pc_sm64_clear_mario_corpse);
   make_function_symbol_from_c("pc-sm64-set-mario-color", (void*)sm64::pc_sm64_set_mario_color);
   make_function_symbol_from_c("pc-sm64-set-corpse-render-enabled", (void*)sm64::pc_sm64_set_corpse_render_enabled);
+  // ROM-presence bridges for the in-game ROM-required dialog (see
+  // progress-screen mario-rom-required in progress-pc.gc).
+  make_function_symbol_from_c("pc-sm64-rom-loaded?", (void*)sm64::pc_sm64_rom_loaded);
+  make_function_symbol_from_c("pc-sm64-prompt-for-rom", (void*)sm64::pc_sm64_prompt_for_rom);
   make_function_symbol_from_c("pc-sm64-set-input", (void*)sm64::pc_sm64_set_input);
   make_function_symbol_from_c("pc-sm64-set-mario-wedges", (void*)sm64::pc_sm64_set_mario_wedges);
   make_function_symbol_from_c("pc-sm64-knockback-mario", (void*)sm64::pc_sm64_knockback_mario);

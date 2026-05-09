@@ -173,6 +173,14 @@
         (suspend))
       (set! (-> *setting-control* current bg-a) 1.0)
       (set-setting! 'bg-a 'abs 0.0 0)
+      ;; mario mod: gate the cinematic on the SM64 ROM being present.
+      ;; Has to be AFTER the bg-a setting above — activate-progress
+      ;; (engine/ui/progress/progress.gc:415) bails when bg-a != 0
+      ;; via progress-allowed?, so calling earlier just no-ops silently.
+      ;; mario-wait-for-rom-prompt itself pre-waits for *target* + bg-a
+      ;; to reach a state where activate-progress will succeed.  No-op
+      ;; if the ROM is already loaded.
+      (mario-wait-for-rom-prompt)
       (set! (-> self camera-anim) (ppointer->handle (process-spawn logo-slave (-> self entity) *logo-cam-sg* :to self)))
       (set! (-> self camera)
             (ppointer->handle (process-spawn othercam (handle->process (-> self camera-anim)) 4 #t 'logo :to (handle->process (-> self camera-anim)))))
@@ -292,6 +300,12 @@
         trans)
   :code
     (behavior ()
+      ;; mario mod: gate the cinematic on the SM64 ROM being present.
+      ;; idle is where ja-play-spooled-anim actually plays the cinematic
+      ;; and on first boot the path startup -> hidden -> idle is taken
+      ;; (startup's :trans go-virtual's to hidden when art is reserved),
+      ;; so the startup/ndi :code hooks alone don't catch this case.
+      (mario-wait-for-rom-prompt)
       (loop
         (set! (-> self anim) (-> self next-anim))
         (if (not (handle->process (-> self camera)))
@@ -321,6 +335,12 @@
       (if (nonzero? (-> self next-anim)) (spool-push *art-control* (-> self next-anim name) 0 self -1.0)))
   :code
     (behavior ()
+      ;; mario mod: gate the cinematic on the SM64 ROM being present.
+      ;; hidden is the bridge state between startup and idle on first
+      ;; boot (when art is still reserved); idle picks up after this.
+      ;; Catching it here too is belt-and-suspenders so the dialog can
+      ;; come up even if the user lingers in hidden state.
+      (mario-wait-for-rom-prompt)
       (ja-channel-set! 0)
       (ja-post)
       (let ((gp-0 *master-mode*)) (set! *master-mode* 'game) (clear-rec *art-control*) (set! *master-mode* gp-0))
@@ -374,6 +394,11 @@
       (if *time-of-day-proc* (set! (-> *time-of-day-proc* 0 hour) 12)))
   :code
     (behavior ()
+      ;; mario mod: gate the NDI cinematic on the SM64 ROM being
+      ;; present (same as the startup/logo-intro state above).  Covers
+      ;; the post-game return-to-title path where target-title spawns
+      ;; with arg2='ndi' and skips the startup state entirely.
+      (mario-wait-for-rom-prompt)
       (while (!= (file-status *art-control* (-> self next-anim name) 0) 'active)
         (set-blackout-frames (seconds 0.05))
         (suspend))

@@ -36,6 +36,9 @@
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/kernel/jak2/kscheme.h"
+#include "game/runtime.h"  // g_game_version
+#include "common/versions/versions.h"  // GameVersion enum
 
 #include "third-party/libtinyfiledialogs/tinyfiledialogs.h"
 
@@ -57,6 +60,108 @@ extern "C" {
 }
 
 namespace sm64 {
+
+// ---------------------------------------------------------------------------
+// Version-aware symbol-table helpers.
+//
+// jak1 and jak2 have different Symbol layouts:
+//   - jak1: Ptr<Symbol> with `value` field (u32)
+//   - jak2: Ptr<Symbol4<u32>> with `value()` method
+//
+// Plus FIX_SYM_TRUE differs (0x8 in jak1, 0x4 in jak2/3/X).  These helpers
+// pick the right path based on g_game_version so the caller can stay
+// version-agnostic.  Returns 0 when the symbol doesn't exist yet (e.g.
+// the watcher process hasn't linked mario.gc), or when s7 isn't ready,
+// or when the version isn't supported here.  All callers were already
+// guarding against the 0 case so this preserves their semantics.
+//
+// Same applies for find_symbol_from_c — it doesn't intern, so safe to use
+// for "is this symbol defined?" checks.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static u32 sm64_get_symbol_value(const char* name) {
+  if (s7.offset == 0) return 0;
+  if (g_game_version == GameVersion::Jak1) {
+    auto sym = jak1::intern_from_c(name);
+    if (sym.offset == 0) return 0;
+    return sym->value;
+  } else if (g_game_version == GameVersion::Jak2) {
+    auto sym = jak2::intern_from_c(name);
+    if (sym.offset == 0) return 0;
+    return sym->value();
+  }
+  return 0;
+}
+
+[[maybe_unused]] static u32 sm64_find_symbol_value(const char* name) {
+  if (s7.offset == 0) return 0;
+  if (g_game_version == GameVersion::Jak1) {
+    auto sym = jak1::find_symbol_from_c(name);
+    if (sym.offset == 0) return 0;
+    return sym->value;
+  } else if (g_game_version == GameVersion::Jak2) {
+    auto sym = jak2::find_symbol_from_c(name);
+    if (sym.offset == 0) return 0;
+    return sym->value();
+  }
+  return 0;
+}
+
+// Set a symbol's value.  Returns true if the symbol existed.  Uses
+// find_ rather than intern_ so we don't accidentally create a symbol
+// in the table just because GOAL hasn't defined it yet.
+[[maybe_unused]] static bool sm64_set_symbol_value(const char* name, u32 value) {
+  if (s7.offset == 0) return false;
+  if (g_game_version == GameVersion::Jak1) {
+    auto sym = jak1::find_symbol_from_c(name);
+    if (sym.offset == 0) return false;
+    sym->value = value;
+    return true;
+  } else if (g_game_version == GameVersion::Jak2) {
+    auto sym = jak2::find_symbol_from_c(name);
+    if (sym.offset == 0) return false;
+    sym->value() = value;
+    return true;
+  }
+  return false;
+}
+
+// Address of the symbol itself in EE memory (NOT the symbol's value).
+// Used when caching "where does this symbol live" for later quick reads.
+// Returns 0 if the symbol doesn't exist or s7 isn't ready.
+[[maybe_unused]] static u32 sm64_get_symbol_offset(const char* name) {
+  if (s7.offset == 0) return 0;
+  if (g_game_version == GameVersion::Jak1) {
+    auto sym = jak1::intern_from_c(name);
+    return sym.offset;
+  } else if (g_game_version == GameVersion::Jak2) {
+    auto sym = jak2::intern_from_c(name);
+    return sym.offset;
+  }
+  return 0;
+}
+
+// find-only variant — does NOT intern a new symbol slot if the name
+// isn't already in the table.  Use when comparing symbol identity
+// (e.g. *master-mode* against 'movie) where a missing symbol means
+// "not interesting" rather than "needs to exist for this code path".
+[[maybe_unused]] static u32 sm64_find_symbol_offset(const char* name) {
+  if (s7.offset == 0) return 0;
+  if (g_game_version == GameVersion::Jak1) {
+    auto sym = jak1::find_symbol_from_c(name);
+    return sym.offset;
+  } else if (g_game_version == GameVersion::Jak2) {
+    auto sym = jak2::find_symbol_from_c(name);
+    return sym.offset;
+  }
+  return 0;
+}
+
+// EE-memory offset of #t for the current game version (s7 + FIX_SYM_TRUE).
+// Returns 0 if s7 isn't ready.
+[[maybe_unused]] static u32 sm64_true_offset() {
+  if (s7.offset == 0) return 0;
+  return s7.offset + true_symbol_offset(g_game_version);
+}
 
 [[maybe_unused]] static void sm64_debug_print(const char* msg) {
   // libsm64's audio engine (audio/load.c, audio/external.c) fires DEBUG_PRINT
@@ -2370,9 +2475,9 @@ void LibSM64Manager::resolve_target_symbol() {
     return;
   }
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset != 0) {
-    m_cached_target_sym_offset = target_sym.offset;
+  u32 target_sym_off = sm64_get_symbol_offset("*target*");
+  if (target_sym_off != 0) {
+    m_cached_target_sym_offset = target_sym_off;
     lg::info("[libsm64] Cached *target* symbol at offset 0x{:X}", m_cached_target_sym_offset);
   } else {
     lg::warn("[libsm64] resolve_target_symbol: could not find *target*");
@@ -2386,9 +2491,7 @@ void LibSM64Manager::sync_jak_to_mario(u8* ee_mem, u32 s7_offset) {
   if (false_val == 0) return;
 
   // Look up *target* directly via kernel (called every tick, but only a read)
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return;
 
   auto mario_pos = get_state().position;
@@ -2408,9 +2511,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   auto state = get_state();
 
   // ---- *sm64-mario-pos*: vector with x,y,z = position, w = face angle (GOAL degrees) ----
-  auto pos_sym = jak1::intern_from_c("*sm64-mario-pos*");
-  if (pos_sym.offset != 0) {
-    u32 vec_ptr = pos_sym->value;
+  {
+    u32 vec_ptr = sm64_get_symbol_value("*sm64-mario-pos*");
     if (vec_ptr != 0 && vec_ptr != false_val && vec_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       // Convert radians → GOAL angle units (65536 = full revolution).
       float goal_angle = state.face_angle * (65536.0f / (2.0f * 3.14159265358979f));
@@ -2420,9 +2522,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   }
 
   // ---- *sm64-mario-info*: x = attacking (1.0 / 0.0) ----
-  auto info_sym = jak1::intern_from_c("*sm64-mario-info*");
-  if (info_sym.offset != 0) {
-    u32 info_ptr = info_sym->value;
+  {
+    u32 info_ptr = sm64_get_symbol_value("*sm64-mario-info*");
     if (info_ptr != 0 && info_ptr != false_val && info_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       // ACT_FLAG_ATTACKING = (1 << 23) is set on all punch/kick/dive/ground-pound actions.
       constexpr uint32_t ACT_FLAG_ATTACKING = 0x00800000;
@@ -2460,9 +2561,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   }
 
   // ---- *sm64-mario-health*: x = wedge count (0.0–8.0, integer steps) ----
-  auto health_sym = jak1::intern_from_c("*sm64-mario-health*");
-  if (health_sym.offset != 0) {
-    u32 health_ptr = health_sym->value;
+  {
+    u32 health_ptr = sm64_get_symbol_value("*sm64-mario-health*");
     if (health_ptr != 0 && health_ptr != false_val && health_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       // SM64 health: 0xHHSS — high byte low nibble = wedge count.
       float wedges = static_cast<float>((static_cast<uint16_t>(state.health) >> 8) & 0xF);
@@ -2478,9 +2578,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   // y = invincibility (1.0 if libsm64's invincTimer is running)
   // z = air supply (m->health, 0..2176) for the underwater air HUD
   // w = submerged (1.0 if Mario is in a submerged action)
-  auto damage_sym = jak1::intern_from_c("*sm64-mario-damage*");
-  if (damage_sym.offset != 0) {
-    u32 dmg_ptr = damage_sym->value;
+  {
+    u32 dmg_ptr = sm64_get_symbol_value("*sm64-mario-damage*");
     if (dmg_ptr != 0 && dmg_ptr != false_val && dmg_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       constexpr uint32_t kActLavaBoost          = 0x010208B7;
       constexpr uint32_t kActDrowning           = 0x300032C4;
@@ -2539,9 +2638,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   //                                  (m_clone_anim_snapshot_valid: Mario is on
   //                                   shell OR is in a cell-pickup cutscene
   //                                   that started while on shell) ----
-  auto shell_sym = jak1::intern_from_c("*sm64-mario-on-shell*");
-  if (shell_sym.offset != 0) {
-    u32 shell_ptr = shell_sym->value;
+  {
+    u32 shell_ptr = sm64_get_symbol_value("*sm64-mario-on-shell*");
     if (shell_ptr != 0 && shell_ptr != false_val && shell_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       constexpr uint32_t ACT_FLAG_RIDING_SHELL = 0x00010000;
       bool on_shell = (state.action & ACT_FLAG_RIDING_SHELL) != 0;
@@ -2553,9 +2651,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   }
 
   // ---- *sm64-mario-velocity*: x = forward velocity, y = slide-kick, z = jump-kick, w = butt-slide ----
-  auto vel_sym = jak1::intern_from_c("*sm64-mario-velocity*");
-  if (vel_sym.offset != 0) {
-    u32 vel_ptr = vel_sym->value;
+  {
+    u32 vel_ptr = sm64_get_symbol_value("*sm64-mario-velocity*");
     if (vel_ptr != 0 && vel_ptr != false_val && vel_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       // Reuse the action booleans computed above in the info block.
       constexpr uint32_t ACT_SLIDE_KICK_V = 0x018008AA;
@@ -2576,9 +2673,8 @@ void LibSM64Manager::write_mario_bridge_data(u8* ee_mem) {
   }
 
   // ---- *sm64-mario-hit*: read x, if > 0.5 Mario was struck by Jak, clear it ----
-  auto hit_sym = jak1::intern_from_c("*sm64-mario-hit*");
-  if (hit_sym.offset != 0) {
-    u32 hit_ptr = hit_sym->value;
+  {
+    u32 hit_ptr = sm64_get_symbol_value("*sm64-mario-hit*");
     if (hit_ptr != 0 && hit_ptr != false_val && hit_ptr + 16 <= EE_MAIN_MEM_SIZE) {
       float hit_flag;
       std::memcpy(&hit_flag, ee_mem + hit_ptr, 4);
@@ -3260,15 +3356,19 @@ bool LibSM64Manager::read_target_transform(u8* ee_mem,
   u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return false;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
   // Same offset walk as write_mario_pos_to_target: process-drawable.root is
   // declared at GOAL :offset 112 → runtime 108, then trsqv.trans at GOAL
   // :offset 16 → runtime 12, and quat overlays rot.x at GOAL :offset 32 →
   // runtime 28 (16 bytes, x/y/z/w floats).
+  //
+  // **Jak 2 note**: process-drawable's `root` field offset matches jak 1
+  // (it's the first non-process field in both versions, and the process
+  // header layout is the same).  trsqv.trans / .quat offsets are common
+  // engine struct layouts.  If a future GOAL refactor moves things, the
+  // offsets here need updating per game version.
   constexpr u32 ROOT_RUNTIME_OFF = 108;
   constexpr u32 TRANS_RUNTIME_OFF = 12;
   constexpr u32 QUAT_RUNTIME_OFF = 28;
@@ -3309,27 +3409,25 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
   if (!ee_mem) return;
   u32 false_val = s7.offset;
   if (false_val == 0) return;
-  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 true_val = sm64_true_offset();
 
-  auto sym = jak1::intern_from_c("*sm64-target-flags*");
-  if (sym.offset != 0) {
-    u32 ptr = sym->value;
-    if (ptr != 0 && ptr != false_val && ptr + 16 <= EE_MAIN_MEM_SIZE) {
-      float data[4];
-      std::memcpy(data, ee_mem + ptr, 16);
-      target_grabbed = data[0] > 0.5f;
-      target_periscope = data[1] > 0.5f;
-      target_clone_anim = data[2] > 0.5f;
-      target_in_movie = data[3] > 0.5f;
-    }
+  u32 ptr = sm64_get_symbol_value("*sm64-target-flags*");
+  if (ptr != 0 && ptr != false_val && ptr + 16 <= EE_MAIN_MEM_SIZE) {
+    float data[4];
+    std::memcpy(data, ee_mem + ptr, 16);
+    target_grabbed = data[0] > 0.5f;
+    target_periscope = data[1] > 0.5f;
+    target_clone_anim = data[2] > 0.5f;
+    target_in_movie = data[3] > 0.5f;
   }
 
   // *sm64-jak-dying* is a plain symbol holding #t/#f — a separate channel from
   // the float-flags vector so it's robust to the vector being zero-initialized
-  // before mario.gc's watcher loop has run for the first time.
-  auto dying_sym = jak1::find_symbol_from_c("*sm64-jak-dying*");
-  if (dying_sym.offset != 0) {
-    target_dying = (dying_sym->value == true_val);
+  // before mario.gc's watcher loop has run for the first time.  Use the
+  // helper so the symbol-value access stays version-agnostic; 0 means
+  // "symbol doesn't exist yet" → keep target_dying=false.
+  if (true_val != 0) {
+    target_dying = (sm64_find_symbol_value("*sm64-jak-dying*") == true_val);
   }
 }
 
@@ -3362,15 +3460,13 @@ bool LibSM64Manager::is_game_paused(u8* ee_mem) {
   if (false_val == 0) return false;
 
   // Get *master-mode* symbol (contains current game state mode)
-  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
-  if (master_mode_sym.offset == 0) return false;
-  u32 master_mode_ptr = master_mode_sym->value;
+  u32 master_mode_ptr = sm64_get_symbol_value("*master-mode*");
   if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
 
-  // Get the game mode symbol to compare against (normal gameplay)
-  auto game_sym = jak1::intern_from_c("game");
-  if (game_sym.offset == 0) return false;
-  u32 game_ptr = game_sym.offset;
+  // Get the game mode symbol to compare against (normal gameplay).  We want
+  // its symbol-table address (sym.offset), not its value.
+  u32 game_ptr = sm64_get_symbol_offset("game");
+  if (game_ptr == 0) return false;
 
   // Mario should freeze when NOT in 'game mode (pause, menu, freeze, progress, etc.)
   return master_mode_ptr != game_ptr;
@@ -3381,15 +3477,13 @@ bool LibSM64Manager::is_progress_screen_paused(u8* ee_mem) {
   u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
-  if (master_mode_sym.offset == 0) return false;
-  u32 master_mode_ptr = master_mode_sym->value;
+  u32 master_mode_ptr = sm64_get_symbol_value("*master-mode*");
   if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
 
-  auto progress_sym = jak1::intern_from_c("progress");
-  if (progress_sym.offset == 0) return false;
+  u32 progress_off = sm64_get_symbol_offset("progress");
+  if (progress_off == 0) return false;
 
-  return master_mode_ptr == progress_sym.offset;
+  return master_mode_ptr == progress_off;
 }
 
 bool LibSM64Manager::is_in_movie(u8* ee_mem) {
@@ -3397,19 +3491,16 @@ bool LibSM64Manager::is_in_movie(u8* ee_mem) {
   u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  auto master_mode_sym = jak1::intern_from_c("*master-mode*");
-  if (master_mode_sym.offset == 0) return false;
-  u32 master_mode_ptr = master_mode_sym->value;
+  u32 master_mode_ptr = sm64_get_symbol_value("*master-mode*");
   if (master_mode_ptr == 0 || master_mode_ptr > EE_MAIN_MEM_SIZE) return false;
 
   // Compare *master-mode* against the 'movie symbol.  Symbol pointers in
   // GOAL live in the symbol table relative to s7, same pattern as the
   // 'game comparison in is_game_paused.
-  auto movie_sym = jak1::intern_from_c("movie");
-  if (movie_sym.offset == 0) return false;
-  u32 movie_ptr = movie_sym.offset;
+  u32 movie_off = sm64_get_symbol_offset("movie");
+  if (movie_off == 0) return false;
 
-  return master_mode_ptr == movie_ptr;
+  return master_mode_ptr == movie_off;
 }
 
 bool LibSM64Manager::read_cutscene_track_position(u8* ee_mem,
@@ -3420,9 +3511,7 @@ bool LibSM64Manager::read_cutscene_track_position(u8* ee_mem,
   u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return false;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
   // Same offsets teleport_mario_to_jak uses — keep them in sync.
@@ -3491,9 +3580,7 @@ void LibSM64Manager::teleport_mario_to_jak(u8* ee_mem) {
   u32 false_val = s7.offset;
   if (false_val == 0) return;
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return;
 
   ++m_teleport_call_count;  // diagnostic — see teleport_call_count()
@@ -3668,14 +3755,14 @@ void LibSM64Manager::update_mario_water(u8* ee_mem) {
   if (false_val == 0) return;
 
   // Skip water sync while the fishing minigame is active — same effect as
-  // toggling water_sync off.  find_symbol_from_c is a no-op when the jungle
-  // level isn't loaded and the symbol doesn't exist yet.
-  auto fishing_sym = jak1::find_symbol_from_c("*sm64-fishing*");
-  if (fishing_sym.offset != 0 && fishing_sym->value != false_val) return;
+  // toggling water_sync off.  *sm64-fishing* is a jak1-only symbol from the
+  // jungle level; on jak2 the find returns 0 (not-defined) → fall through.
+  {
+    u32 fishing_val = sm64_find_symbol_value("*sm64-fishing*");
+    if (fishing_val != 0 && fishing_val != false_val) return;
+  }
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return;
 
   // process-drawable field layout from goal_src/jak1/engine/game/game-h.gc:
@@ -5147,133 +5234,57 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
   // allocate new symbol slots). Any missing symbol → silently bail; we'll retry
   // next frame.
   if (!m_type_cache.ready) {
-    auto pd = jak1::find_symbol_from_c("process-drawable");
-    auto cs = jak1::find_symbol_from_c("collide-shape");
-    auto pm = jak1::find_symbol_from_c("collide-shape-prim-mesh");
-    auto pg = jak1::find_symbol_from_c("collide-shape-prim-group");
-    auto ps = jak1::find_symbol_from_c("collide-shape-prim-sphere");
-    auto ap = jak1::find_symbol_from_c("*active-pool*");
-    if (pd.offset == 0 || cs.offset == 0 || pm.offset == 0 || pg.offset == 0 ||
-        ps.offset == 0 || ap.offset == 0) {
-      return;  // symbol table doesn't have one of our keys yet; retry next frame
-    }
-    u32 pd_val = pd->value;
-    u32 cs_val = cs->value;
-    u32 pm_val = pm->value;
-    u32 pg_val = pg->value;
-    u32 ps_val = ps->value;
+    u32 pd_val = sm64_find_symbol_value("process-drawable");
+    u32 cs_val = sm64_find_symbol_value("collide-shape");
+    u32 pm_val = sm64_find_symbol_value("collide-shape-prim-mesh");
+    u32 pg_val = sm64_find_symbol_value("collide-shape-prim-group");
+    u32 ps_val = sm64_find_symbol_value("collide-shape-prim-sphere");
+    // For *active-pool* we want the symbol-table address (the value field
+    // points to the active-pool object, which we then chase later).  Keep
+    // the offset around so the walker can re-read its value freshly each
+    // frame (the GOAL-level *active-pool* binding may change as processes
+    // come and go).  find_ rather than intern_ because if *active-pool*
+    // hasn't been bound yet we want to retry next frame, not allocate a
+    // dangling slot.
+    u32 ap_off = sm64_find_symbol_offset("*active-pool*");
     if (pd_val == 0 || pd_val == false_val || cs_val == 0 || cs_val == false_val ||
         pm_val == 0 || pm_val == false_val || pg_val == 0 || pg_val == false_val ||
-        ps_val == 0 || ps_val == false_val) {
-      return;  // types symbols exist but haven't been bound to Type structs yet
+        ps_val == 0 || ps_val == false_val || ap_off == 0) {
+      return;  // type symbols exist but haven't been bound to Type structs yet,
+               // OR *active-pool* isn't defined — retry next frame
     }
     m_type_cache.process_drawable = pd_val;
     m_type_cache.collide_shape = cs_val;
     m_type_cache.prim_mesh = pm_val;
     m_type_cache.prim_group = pg_val;
     m_type_cache.prim_sphere = ps_val;
-    m_type_cache.active_pool_sym = ap.offset;
+    m_type_cache.active_pool_sym = ap_off;
     m_type_cache.ready = true;
     lg::info("[libsm64] Actor collision type cache ready: pd=0x{:X} cs=0x{:X} pm=0x{:X} pg=0x{:X} ps=0x{:X} ap_sym=0x{:X} false=0x{:X}",
-             pd_val, cs_val, pm_val, pg_val, ps_val, ap.offset, false_val);
+             pd_val, cs_val, pm_val, pg_val, ps_val, ap_off, false_val);
   }
 
-  // Retry pov-camera / citadelcam lookup every frame until both are bound.
-  // pov-camera lives in ENGINE so it's usually ready on the first successful
-  // tick; citadelcam only shows up once the citadel level is loaded, and a
-  // 0 here is fine — `type_is_descendant` with needle==0 returns false,
-  // which disables that specific filter.
-  if (m_type_cache.pov_camera == 0) {
-    auto pc = jak1::find_symbol_from_c("pov-camera");
-    if (pc.offset != 0) {
-      u32 v = pc->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.pov_camera = v;
-        lg::info("[libsm64] Actor collision: cached pov-camera type @0x{:X}", v);
-      }
+  // Retry the per-type lookups every frame until each is bound.  These
+  // lookups are level-specific (most don't exist until the relevant level
+  // is loaded), so a missing symbol → leave the cache slot 0 → that filter
+  // is silently disabled by `type_is_descendant`.
+  auto cache_type = [&](u32& slot, const char* name) {
+    if (slot != 0) return;
+    u32 v = sm64_find_symbol_value(name);
+    if (v != 0 && v != false_val) {
+      slot = v;
+      lg::info("[libsm64] Actor collision: cached {} type @0x{:X}", name, v);
     }
-  }
-  if (m_type_cache.citadelcam == 0) {
-    auto cc = jak1::find_symbol_from_c("citadelcam");
-    if (cc.offset != 0) {
-      u32 v = cc->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.citadelcam = v;
-        lg::info("[libsm64] Actor collision: cached citadelcam type @0x{:X}", v);
-      }
-    }
-  }
-  // Bouncy trampoline types — level-specific, retry each frame like citadelcam.
-  if (m_type_cache.springbox == 0) {
-    auto sb = jak1::find_symbol_from_c("springbox");
-    if (sb.offset != 0) {
-      u32 v = sb->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.springbox = v;
-        lg::info("[libsm64] Actor collision: cached springbox type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.spiderwebs == 0) {
-    auto sw = jak1::find_symbol_from_c("spiderwebs");
-    if (sw.offset != 0) {
-      u32 v = sw->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.spiderwebs = v;
-        lg::info("[libsm64] Actor collision: cached spiderwebs type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.teetertotter == 0) {
-    auto tt = jak1::find_symbol_from_c("teetertotter");
-    if (tt.offset != 0) {
-      u32 v = tt->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.teetertotter = v;
-        lg::info("[libsm64] Actor collision: cached teetertotter type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.sm64_mario_col == 0) {
-    auto mc = jak1::find_symbol_from_c("sm64-mario-col");
-    if (mc.offset != 0) {
-      u32 v = mc->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.sm64_mario_col = v;
-        lg::info("[libsm64] Actor collision: cached sm64-mario-col type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.touch_tracker == 0) {
-    auto tt = jak1::find_symbol_from_c("touch-tracker");
-    if (tt.offset != 0) {
-      u32 v = tt->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.touch_tracker = v;
-        lg::info("[libsm64] Actor collision: cached touch-tracker type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.projectile == 0) {
-    auto pj = jak1::find_symbol_from_c("projectile");
-    if (pj.offset != 0) {
-      u32 v = pj->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.projectile = v;
-        lg::info("[libsm64] Actor collision: cached projectile type @0x{:X}", v);
-      }
-    }
-  }
-  if (m_type_cache.cavetrapdoor == 0) {
-    auto ct = jak1::find_symbol_from_c("cavetrapdoor");
-    if (ct.offset != 0) {
-      u32 v = ct->value;
-      if (v != 0 && v != false_val) {
-        m_type_cache.cavetrapdoor = v;
-        lg::info("[libsm64] Actor collision: cached cavetrapdoor type @0x{:X}", v);
-      }
-    }
-  }
+  };
+  cache_type(m_type_cache.pov_camera,    "pov-camera");
+  cache_type(m_type_cache.citadelcam,    "citadelcam");
+  cache_type(m_type_cache.springbox,     "springbox");
+  cache_type(m_type_cache.spiderwebs,    "spiderwebs");
+  cache_type(m_type_cache.teetertotter,  "teetertotter");
+  cache_type(m_type_cache.sm64_mario_col,"sm64-mario-col");
+  cache_type(m_type_cache.touch_tracker, "touch-tracker");
+  cache_type(m_type_cache.projectile,    "projectile");
+  cache_type(m_type_cache.cavetrapdoor,  "cavetrapdoor");
 
   // Resolve *target* every frame. Jak's process-drawable pointer changes
   // any time the player is re-spawned (e.g. death), and there's no upside
@@ -5281,16 +5292,8 @@ void LibSM64Manager::update_actor_collision(u8* ee_mem) {
   // means *target* isn't bound yet, which disables the filter (the walker
   // will treat Jak as any other actor for one or two frames while the
   // kernel finishes wiring him up).
-  u32 target_ptr_now = 0;
-  {
-    auto target_sym = jak1::find_symbol_from_c("*target*");
-    if (target_sym.offset != 0) {
-      u32 v = target_sym->value;
-      if (v != 0 && v != false_val) {
-        target_ptr_now = v;
-      }
-    }
-  }
+  u32 target_ptr_now = sm64_find_symbol_value("*target*");
+  if (target_ptr_now == false_val) target_ptr_now = 0;
 
   TestSweepResult result;
   WalkCtx ctx{
@@ -5613,13 +5616,15 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
   u32 false_val = s7.offset;
   if (false_val == 0) return;
 
+  // Yakow grab is a jak 1-only feature — `yakow` actor type doesn't exist
+  // in jak 2.  Bail before the symbol-table thrash on other versions.
+  if (g_game_version != GameVersion::Jak1) return;
+
   // Lazy yakow-type resolve. The symbol may not exist yet on the first few
   // frames (e.g. before the village1 level has loaded its code), so a failed
   // lookup is silent and retried next frame.
   if (m_yakow_type == 0) {
-    auto y_sym = jak1::find_symbol_from_c("yakow");
-    if (y_sym.offset == 0) return;
-    u32 y_val = y_sym->value;
+    u32 y_val = sm64_find_symbol_value("yakow");
     if (y_val == 0 || y_val == false_val) return;
     m_yakow_type = y_val;
     lg::info("[libsm64] Yakow grab type cache ready: yakow=0x{:X}", y_val);
@@ -5629,9 +5634,8 @@ void LibSM64Manager::update_yakow_grab(u8* ee_mem) {
   // collision walker has already populated it, otherwise look it up ourselves.
   u32 active_pool_sym = m_type_cache.active_pool_sym;
   if (active_pool_sym == 0) {
-    auto ap = jak1::find_symbol_from_c("*active-pool*");
-    if (ap.offset == 0) return;
-    active_pool_sym = ap.offset;
+    active_pool_sym = sm64_find_symbol_offset("*active-pool*");
+    if (active_pool_sym == 0) return;
   }
 
   // Walk the process tree and collect all live yakows.
@@ -5998,19 +6002,21 @@ void LibSM64Manager::update_shell_preserve_across_cell_grab() {
 void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
   if (!m_initialized || m_mario_id < 0 || !ee_mem) return;
 
-  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
-  const u32 false_val = s7.offset + jak1_symbols::FIX_SYM_FALSE;
+  const u32 true_val = sm64_true_offset();
+  const u32 false_val = s7.offset;  // FIX_SYM_FALSE is 0 on every version
   if (s7.offset == 0) return;
 
   // Keep *sm64-skip-zoomer* in sync with our toggle every frame — GOAL
   // reads it synchronously from the 'racing event handler, so writing it
   // each tick is the simplest way to ensure it's current. If the symbol
   // doesn't exist yet (target-handler not linked), do nothing.
-  auto skip_sym = jak1::find_symbol_from_c("*sm64-skip-zoomer*");
-  if (skip_sym.offset != 0) {
+  {
     const u32 desired = (zoomer_shell && has_mario()) ? true_val : false_val;
-    if (skip_sym->value != desired) {
-      skip_sym->value = desired;
+    u32 cur = sm64_find_symbol_value("*sm64-skip-zoomer*");
+    if (cur != desired) {
+      // Only write if the symbol exists.  set_symbol_value silently
+      // no-ops when the symbol isn't defined.
+      sm64_set_symbol_value("*sm64-skip-zoomer*", desired);
     }
   }
 
@@ -6019,13 +6025,13 @@ void LibSM64Manager::update_zoomer_shell(u8* ee_mem) {
   // Check whether GOAL just swallowed a 'racing event — that's our cue
   // that the player tried to hop on a zoomer. Clear the flag and put
   // Mario into shell mode.
-  auto req_sym = jak1::find_symbol_from_c("*sm64-zoomer-requested*");
-  if (req_sym.offset == 0) return;                  // GOAL bridge not linked
-  if (req_sym->value != true_val) return;           // no pending request
+  u32 req_val = sm64_find_symbol_value("*sm64-zoomer-requested*");
+  if (req_val == 0) return;                  // GOAL bridge not linked
+  if (req_val != true_val) return;           // no pending request
 
   // Clear first so subsequent requests (e.g. tapping attack again after
   // exiting shell) retrigger cleanly, even if we bail out below.
-  req_sym->value = false_val;
+  sm64_set_symbol_value("*sm64-zoomer-requested*", false_val);
 
   // Snapshot Mario's current action under the geo mutex. If he's already
   // in any shell sub-action (ground / jump / fall), don't re-issue the
@@ -6079,14 +6085,20 @@ void LibSM64Manager::update_target_tube(u8* ee_mem) {
     return;
   }
 
-  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 true_val = sm64_true_offset();
   const u32 false_val = s7.offset;
   if (false_val == 0) return;
 
+  // target-tube state family is jak 1-only (no equivalent target state in
+  // jak 2's state machine).  Skip the whole detection on other versions —
+  // saves a few symbol-table thrashes per frame and keeps in_tube=false.
+  if (g_game_version != GameVersion::Jak1) {
+    m_prev_in_tube_slide = false;
+    return;
+  }
+
   // Read *target*'s state.name — same pattern as update_launcher_glue.
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   bool in_tube = false;
   if (target_ptr != 0 && target_ptr != false_val) {
     constexpr u32 STATE_RUNTIME_OFF = 52;  // process.state, basic-deref offset
@@ -6099,17 +6111,13 @@ void LibSM64Manager::update_target_tube(u8* ee_mem) {
           u32 state_name;
           std::memcpy(&state_name, ee_mem + state_ptr, 4);
 
-          auto sym_of = [](const char* name) -> u32 {
-            auto s = jak1::find_symbol_from_c(name);
-            return s.offset;
-          };
           // Resolved lazily each tick — cheap hash-table reads; the syms
           // might not exist until sunken's DGO is loaded, in which case
-          // sym_of returns 0 and the compare short-circuits to false.
-          const u32 sym_tube       = sym_of("target-tube");
-          const u32 sym_tube_start = sym_of("target-tube-start");
-          const u32 sym_tube_jump  = sym_of("target-tube-jump");
-          const u32 sym_tube_hit   = sym_of("target-tube-hit");
+          // the lookup returns 0 and the compare short-circuits to false.
+          const u32 sym_tube       = sm64_get_symbol_offset("target-tube");
+          const u32 sym_tube_start = sm64_get_symbol_offset("target-tube-start");
+          const u32 sym_tube_jump  = sm64_get_symbol_offset("target-tube-jump");
+          const u32 sym_tube_hit   = sm64_get_symbol_offset("target-tube-hit");
           in_tube =
               (sym_tube       && state_name == sym_tube)       ||
               (sym_tube_start && state_name == sym_tube_start) ||
@@ -6121,13 +6129,13 @@ void LibSM64Manager::update_target_tube(u8* ee_mem) {
   }
 
   // Push current state to the GOAL bridge symbol so update-mario-music!
-  // can see it without re-reading *target*.  find_symbol_from_c returns
-  // offset=0 until target-handler.gc is linked — harmless, just skip.
-  auto bridge = jak1::find_symbol_from_c("*sm64-in-tube-slide*");
-  if (bridge.offset != 0) {
+  // can see it without re-reading *target*.  Returns false silently if
+  // the symbol doesn't exist yet (target-handler.gc not linked).
+  {
     const u32 desired = in_tube ? true_val : false_val;
-    if (bridge->value != desired) {
-      bridge->value = desired;
+    u32 cur = sm64_find_symbol_value("*sm64-in-tube-slide*");
+    if (cur != desired) {
+      sm64_set_symbol_value("*sm64-in-tube-slide*", desired);
     }
   }
 
@@ -6216,15 +6224,23 @@ void LibSM64Manager::update_target_ice(u8* ee_mem) {
     return;
   }
 
-  const u32 true_val = s7.offset + jak1_symbols::FIX_SYM_TRUE;
+  const u32 true_val = sm64_true_offset();
   const u32 false_val = s7.offset;
   if (false_val == 0) return;
 
+  // target-ice family is jak 1-only (snow level state machine).
+  if (g_game_version != GameVersion::Jak1) {
+    m_prev_on_ice = false;
+    {
+      std::scoped_lock lock(m_sm64_lock);
+      sm64_set_force_ice(0);
+    }
+    return;
+  }
+
   // Read *target*'s state.name — same pattern as update_target_tube /
   // update_launcher_glue.
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return;
-  u32 target_ptr = target_sym->value;
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   bool on_ice = false;
   if (target_ptr != 0 && target_ptr != false_val) {
     constexpr u32 STATE_RUNTIME_OFF = 52;
@@ -6236,15 +6252,11 @@ void LibSM64Manager::update_target_ice(u8* ee_mem) {
           u32 state_name;
           std::memcpy(&state_name, ee_mem + state_ptr, 4);
 
-          auto sym_of = [](const char* name) -> u32 {
-            auto s = jak1::find_symbol_from_c(name);
-            return s.offset;
-          };
           // Lazy lookup — symbols don't exist until target-ice.gc (snow
-          // DGO) is loaded, so sym_of returns 0 on other levels and the
-          // short-circuit keeps on_ice=false.
-          const u32 sym_ice_stance = sym_of("target-ice-stance");
-          const u32 sym_ice_walk   = sym_of("target-ice-walk");
+          // DGO) is loaded, so the symbol-offset returns 0 on other
+          // levels and the short-circuit keeps on_ice=false.
+          const u32 sym_ice_stance = sm64_get_symbol_offset("target-ice-stance");
+          const u32 sym_ice_walk   = sm64_get_symbol_offset("target-ice-walk");
           on_ice =
               (sym_ice_stance && state_name == sym_ice_stance) ||
               (sym_ice_walk   && state_name == sym_ice_walk);
@@ -6255,11 +6267,11 @@ void LibSM64Manager::update_target_ice(u8* ee_mem) {
 
   // GOAL bridge — for any GOAL-side consumers that want to react (music
   // overrides, HUD, etc.).  C++'s own behaviour doesn't read it back.
-  auto bridge = jak1::find_symbol_from_c("*sm64-on-ice*");
-  if (bridge.offset != 0) {
+  {
     const u32 desired = on_ice ? true_val : false_val;
-    if (bridge->value != desired) {
-      bridge->value = desired;
+    u32 cur = sm64_find_symbol_value("*sm64-on-ice*");
+    if (cur != desired) {
+      sm64_set_symbol_value("*sm64-on-ice*", desired);
     }
   }
 
@@ -6315,9 +6327,15 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   const u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  auto target_sym = jak1::intern_from_c("*target*");
-  if (target_sym.offset == 0) return false;
-  u32 target_ptr = target_sym->value;
+  // Launcher / warp / continue glue is built around jak 1's target state
+  // names — jak 2 has different states, so skip the whole detection.
+  if (g_game_version != GameVersion::Jak1) {
+    m_in_launcher = false;
+    m_post_glue_settle_frames = 0;
+    return false;
+  }
+
+  u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
   // process.state is at GOAL offset 56 → runtime offset 52.
@@ -6336,26 +6354,22 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   u32 state_name;
   std::memcpy(&state_name, ee_mem + state_ptr, 4);
 
-  // Resolve state symbols. find_symbol_from_c is read-only (won't create
-  // new symbols), safer than intern_from_c during state transitions.
-  // A 0 offset means the symbol isn't linked yet — it just won't match.
-  auto sym_of = [](const char* name) -> u32 {
-    auto s = jak1::find_symbol_from_c(name);
-    return s.offset;
-  };
+  // Resolve state symbols. sm64_get_symbol_offset returns 0 if the symbol
+  // isn't linked yet (e.g. before the level's DGO is loaded) — the
+  // short-circuits below treat that as "no match".
 
   // Launcher states
-  const u32 sym_launch    = sym_of("target-launch");
-  const u32 sym_high_jump = sym_of("target-high-jump");
-  const u32 sym_duck_hj   = sym_of("target-duck-high-jump");
-  const u32 sym_duck_hj_j = sym_of("target-duck-high-jump-jump");
+  const u32 sym_launch    = sm64_get_symbol_offset("target-launch");
+  const u32 sym_high_jump = sm64_get_symbol_offset("target-high-jump");
+  const u32 sym_duck_hj   = sm64_get_symbol_offset("target-duck-high-jump");
+  const u32 sym_duck_hj_j = sm64_get_symbol_offset("target-duck-high-jump-jump");
 
   // Warp gate states
-  const u32 sym_warp_in   = sym_of("target-warp-in");
-  const u32 sym_warp_out  = sym_of("target-warp-out");
+  const u32 sym_warp_in   = sm64_get_symbol_offset("target-warp-in");
+  const u32 sym_warp_out  = sm64_get_symbol_offset("target-warp-out");
 
   // Continue point state
-  const u32 sym_continue  = sym_of("target-continue");
+  const u32 sym_continue  = sm64_get_symbol_offset("target-continue");
 
   const bool jak_in_glue_state =
       (sym_launch    && state_name == sym_launch)    ||

@@ -75,18 +75,120 @@ build target may be `gk` with a flag, not a separate binary.)
 
 ## Phase progress
 
-- [x] Branch `Vzero-Jak2` created off VZero
+- [x] Branch `Vzero-Jak2` created off VZero (pushed to origin)
 - [x] This plan written
-- [x] **kmachine.cpp Jak 2 bridge registrations** (commit pending) — all 30
-      `pc-sm64-*` bridges now register inside `InitMachine_PCPort` for jak 2.
+- [x] **kmachine.cpp Jak 2 bridge registrations** — all 30 `pc-sm64-*`
+      bridges register inside `InitMachine_PCPort` for jak 2.
       `#include "game/libsm64/libsm64_integration.h"` added.
-- [ ] libsm64_integration.cpp compiles for Jak 2 — **expected to compile
-      already** since the bridge function bodies don't directly use
-      jak1-specific kscheme.h types in their public C signatures.  Build
-      verification in progress.
-- [ ] Jak 2 mario skeleton GOAL files
-- [ ] mario sources added to Jak 2 game.gp / game.gd
-- [ ] `(mi)` succeeds for Jak 2 with mario sources included
+- [x] **libsm64_integration.cpp compiles for Jak 2** — bridge bodies have
+      no jak1-specific types in their public C signatures, so the same
+      compilation unit serves both versions.  EE-memory readers (e.g.
+      `read_target_flags` at line 3303) still call `jak1::intern_from_c`
+      which silently no-ops in a jak 2 build — these are documented to
+      need degating once the watcher process is ported.
+- [x] **Jak 2 mario skeleton GOAL files**
+      - `mario-settings.gc` — load + write *mario-settings* singleton.
+        On-disk format identical to jak1 so settings transfer between
+        builds.
+      - `mario-menu-h.gc` — 411-row sound-preview list, byte-identical
+        to jak1 (pure SM64 sound IDs).
+      - `mario.gc` — bridge externs + music helpers (`sm64-music`,
+        `sm64-music-forced`, `sm64-music-id`, `sm64-sound`,
+        `sm64-set-music-enabled!`) + state globals
+        (`*sm64-mario-pos*` etc).
+- [x] **mario sources added to Jak 2 game.gp / game.gd**
+      Just `dgos/game.gd` actually — the `cgo-file` macro auto-generates
+      goal-src steps from gd entries via goal-src-sequence.  game.gp
+      has comment-only block.
+- [x] **`(build-game)` succeeds for Jak 2 with mario sources included**
+      844 targets all green; mario .o files produced cleanly under
+      `out/jak2/obj/`.  No iso assets extracted yet so `(mi)` blocked.
+- [x] **jak1 build path still works** — no regressions from jak2 changes
+      (`(mi)` for jak1 still produces GAME.CGO clean, 553 targets).
+
+## What still needs porting (depends on runtime testing)
+
+These were intentionally not done overnight because they need
+visual / boot verification, which isn't possible without extracted
+Jak 2 iso assets.
+
+### Watcher process (sm64-mario-col)
+The Jak 1 file has a long `defbehavior sm64-mario-col-init` (~lines
+600–1300) plus `sm64-mario-col-start` / `-stop` driver functions.
+The Jak 2 port needs:
+- `*target*` accessors that match jak2's `target` type (in
+  `goal_src/jak2/engine/target/target-h.gc:123`).  `(-> *target*
+  control trans)` works the same way (control is overlaid at
+  root), so the position read pattern transfers directly.
+- State name checks updated: jak2 only has `target-title` (not
+  jak1's `target-title-play` / `target-title-wait` split).
+- `*game-info*` → `*game-info*` (same global name in jak2, but
+  field layout changed — jak2 has `game-info-jak2` deftype with
+  different fields than jak1 `game-info`).
+- Yakow grab feature is jak1-only; gate out via
+  `(if (= *game-version* 'jak1) ...)`.
+
+### mario-music.gc
+The level→music map has 25 entries hardcoded for jak1 levels
+(village1, beach, jungle, …).  Jak 2 has a totally different set
+(see `goal_src/jak2/levels/`): atoll, castle, city, consite, dig,
+drill, forest, fortress, gungame, hideout, hiphog, intro, mountain,
+nest, outro, palace, ruins, sewer, stadium, strip, test-zone, title,
+tomb, under.  Map mood-by-mood:
+- city → 'inside-castle (hub feel)
+- forest → 'bob-omb
+- water levels (atoll, sewer, under) → 'water
+- volcano / hot levels → 'hot
+- spooky / underground → 'spooky / 'underground
+- snow → 'snow (if any snow level exists)
+- title → 'title
+
+The progress-screen file-select detection needs a different
+approach for jak2 — jak2's `progress` type uses `current` /
+`next` symbol fields rather than an enum-driven `display-state`.
+Reasonable first cut: skip file-select detection entirely on
+jak2 and just play the level track.
+
+### mario-menu.gc
+Hooks the pause menu and sound-options.  Jak 2 has `progress`
+not `progress2` per the field layout above.  Menu integration
+points are different — needs scoping with a fresh pass through
+`goal_src/jak2/pc/progress/progress-pc.gc`.
+
+### Yakow grab + crab-test + ROM-required dialog
+Jak-1-only features.  Yakow / lurkercrab actor types don't
+exist in jak 2; gate the entire path off via game-version check.
+The ROM-required dialog needs porting to jak2's progress menu
+flow — currently fires from `target-title-play` :code in jak1.
+
+### libsm64_integration.cpp degating
+Specific lines that need `g_game_version`-aware branching:
+- `jak1::intern_from_c` calls (lines 2411, 2423, 2463, 2481,
+  2542, 2556, 2579, 3314) — should resolve through a
+  `version_intern_from_c` helper.
+- Type-specific layouts (target, game-info, setting-control,
+  pc-settings) — most read paths gate on
+  `g_game_version == GameVersion::Jak1` already; need parallel
+  jak 2 readers.
+
+## What did happen overnight (commits on Vzero-Jak2)
+
+1. `87c5b1785` — jak2 mario port: foundation skeleton (Vzero-Jak2)
+   - kmachine.cpp registrations
+   - mario-settings.gc + mario.gc skeleton
+   - game.gd / game.gp wiring
+   - This plan
+2. `04ce95b86` — jak2 mario: music helpers + sound preview list
+   - sm64-music / sm64-music-forced / sm64-music-id / sm64-sound /
+     sm64-set-music-enabled! lifted into mario.gc
+   - State globals (*sm64-mario-pos* etc) defined
+   - mario-menu-h.gc (411-entry sound preview list)
+
+To resume: `git checkout Vzero-Jak2 && git pull`.  Build is
+described in `CLAUDE.md` (root + global).  Quick sanity check:
+`task set-game-jak2` then `printf '(build-game)\n(e)\n' | task
+repl` should give "Successfully built all 844 targets" — that
+confirms the foundation is intact.
 
 ## Findings during recon (Jak 1 vs Jak 2 build)
 

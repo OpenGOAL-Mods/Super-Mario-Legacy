@@ -60,9 +60,241 @@
 (define-extern pc-sm64-set-music-volume (function float none))
 (define-extern pc-sm64-teleport-mario (function float float float none))
 (define-extern pc-sm64-shove-mario (function float float float none))
-(define-extern pc-sm64-set-input (function int int int none))
+;; pc-sm64-set-input takes float-bit-packed sticks (-1.0..1.0) + button mask
+;; — the C++ bridge reinterprets the u32 args as floats.  Declaring as int
+;; would cause GOAL to truncate any float passed to it.
+(define-extern pc-sm64-set-input (function float float int none))
 (define-extern pc-sm64-rom-loaded? (function symbol))
 (define-extern pc-sm64-prompt-for-rom (function symbol))
+
+;; ---------------------------------------------------------------------------
+;; Music + sound helpers.  These are 1:1 with the Jak 1 implementations —
+;; their only deps are *mario-settings* and the pc-sm64-* bridges, both of
+;; which are version-agnostic.  Lifted from goal_src/jak1/engine/mods/mario/
+;; mario.gc so other Jak 2 GOAL files (eventual mario-music.gc / mario-
+;; menu.gc) can call them.
+;; ---------------------------------------------------------------------------
+
+;; Map a friendly track symbol to libsm64's music sequence id.  The numeric
+;; values come from third-party/libsm64/src/decomp/include/seq_ids.h —
+;; SEQ_MENU_TITLE_SCREEN = 0x02, SEQ_LEVEL_GRASS = 0x03, etc.  Keep this
+;; table identical to the Jak 1 file so a settings-driven track choice
+;; behaves the same in both ports.
+(defun sm64-music-id ((track symbol))
+  (case track
+    (('none 'stop #f)             0)
+    (('collect-star)              #x01)
+    (('title)                     #x02)
+    (('bob-omb 'grass)            #x03)
+    (('inside-castle 'castle)     #x04)
+    (('water 'dire-dire)          #x05)
+    (('hot 'lava)                 #x06)
+    (('boss-koopa 'bowser)        #x07)
+    (('snow)                      #x08)
+    (('slide)                     #x09)
+    (('spooky 'bbh)               #x0A)
+    (('piranha-plant)             #x0B)
+    (('underground 'cave)         #x0C)
+    (('star-select)               #x0D)
+    (('powerup)                   #x0E)
+    (('metal-cap)                 #x0F)
+    (('koopa-message)             #x10)
+    (('koopa-road)                #x11)
+    (('high-score)                #x12)
+    (('merry-go-round)            #x13)
+    (('race)                      #x14)
+    (('star-spawn)                #x15)
+    (('boss 'mini-boss)           #x16)
+    (('collect-key)               #x17)
+    (('endless-stairs)            #x18)
+    (('final-bowser 'bowser-final) #x19)
+    (('credits)                   #x1A)
+    (('solve-puzzle)              #x1B)
+    (('toad-message)              #x1C)
+    (('peach-message)             #x1D)
+    (('intro)                     #x1E)
+    (('victory)                   #x1F)
+    (('ending)                    #x20)
+    (('file-select)               #x21)
+    (('lakitu)                    #x22)
+    (else -1)))
+
+;; Play a track that respects Jak's pause state (default behavior).  No-op
+;; (and stops anything already playing) if the user has disabled SM64
+;; music via *mario-settings*.
+(defun sm64-music ((track symbol))
+  (cond
+    ((not (-> *mario-settings* play-sm64-music?))
+     (pc-sm64-stop-music))
+    (else
+     (let ((id (sm64-music-id track)))
+       (cond
+         ((zero? id) (pc-sm64-stop-music))
+         ((> id 0)   (pc-sm64-play-music id))
+         (else
+           (format 0 "sm64-music: unknown track ~A — stopping music~%" track)
+           (pc-sm64-stop-music))))))
+  (none))
+
+;; Play a track that keeps going even while Jak's game is paused (title,
+;; menus, file-select).  Switch back to `sm64-music` for in-game music.
+;; Same disabled-by-settings short circuit as `sm64-music`.
+(defun sm64-music-forced ((track symbol))
+  (cond
+    ((not (-> *mario-settings* play-sm64-music?))
+     (pc-sm64-stop-music))
+    (else
+     (let ((id (sm64-music-id track)))
+       (cond
+         ((zero? id) (pc-sm64-stop-music))
+         ((> id 0)   (pc-sm64-play-music-forced id))
+         (else
+           (format 0 "sm64-music-forced: unknown track ~A — stopping music~%" track)
+           (pc-sm64-stop-music))))))
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; sm64-sound — friendly-name wrapper around pc-sm64-play-sound.
+;;
+;; Maps a GOAL symbol to the 32-bit SOUND_ARG_LOAD-encoded id libsm64
+;; expects in sm64_play_sound_global.  Packing order (from audio_defines.h):
+;;   bank      << 28
+;;   playFlags << 24
+;;   soundID   << 16
+;;   priority  << 8
+;;   flags2    << 4
+;;   status         ← SOUND_STATUS_STARTING (= 1) OR'd into the low nibble
+;;
+;; **Important**: the low status nibble MUST be 1 (SOUND_STATUS_STARTING),
+;; not 0.  The SM64 audio engine's dispatch rejects sounds whose status
+;; byte is STOPPED, so e.g. `#x24218080` silently no-ops while
+;; `#x24218081` plays — that one-bit difference is the whole reason
+;; sounds may appear broken.
+;;
+;; Most Mario voice clips live in bank 2 with playFlags=4, priority=0x80,
+;; flags2=8 → encoded as `#x24NN8081` where NN is the 2-digit hex soundID
+;; (from audio_defines.h).  Clips with a different priority/flags use the
+;; full SOUND_ARG_LOAD expansion + 1.  Menu / system sounds live in bank
+;; 7 → `#x70NNFF81` for playFlags=0, priority=0xFF, flags2=8.
+;;
+;; Note: audio_defines.h itself defines SOUND_MARIO_OKEY_DOKEY as the
+;; half-word 0x2021 — that value is the bank+soundID bits shifted into
+;; the low half and will NOT play correctly if passed to libsm64.  We
+;; use the full 32-bit encoding that matches every neighbouring Mario
+;; sound in the bank-2 voice group.
+;;
+;; Extend by adding more cases below — each is a one-liner.  Remember
+;; the trailing `1` status bit.
+;; ---------------------------------------------------------------------------
+(defun sm64-sound ((snd symbol))
+  (case snd
+    ;; ---- Iconic Mario voice (bank 2, standard priority) -----------------
+    (('yahoo)                    (pc-sm64-play-sound #x24048081))  ;; classic "Yahoo!"
+    (('hoo-hoo)                  (pc-sm64-play-sound #x24038081))  ;; short "Hoo hoo!"
+    (('here-we-go)               (pc-sm64-play-sound #x240C8081))  ;; "Here we go!"
+    (('mama-mia)                 (pc-sm64-play-sound #x24208081))
+    (('oki-doki 'okey-dokey)     (pc-sm64-play-sound #x24218081))
+    (('ground-pound-wah 'gp-wah) (pc-sm64-play-sound #x24228081))
+    (('punch-yah)                (pc-sm64-play-sound #x241E8081))
+    (('punch-hoo)                (pc-sm64-play-sound #x241F8081))
+    (('punch-wah)                (pc-sm64-play-sound #x24248081))
+    (('yahoo-waha-yippee 'jump)  (pc-sm64-play-sound #x242B8081))  ;; random Yahoo/Waha/Yippee
+    (('doh)                      (pc-sm64-play-sound #x24308081))
+    (('twirl-bounce)             (pc-sm64-play-sound #x24348081))
+    (('so-long-bowser 'so-long-gay-bowser)
+                                 (pc-sm64-play-sound #x24368081))
+    (('ima-tired)                (pc-sm64-play-sound #x24378081))
+    ;; ---- Mario voice with custom priority -------------------------------
+    (('whoa)                     (pc-sm64-play-sound #x2408C081))  ;; priority 0xC0
+    (('waaaoooow 'long-fall)     (pc-sm64-play-sound #x2410C081))  ;; falling scream, priority 0xC0
+    (('on-fire)                  (pc-sm64-play-sound #x2414A081))  ;; priority 0xA0
+    (('dying)                    (pc-sm64-play-sound #x2415FF81))  ;; priority 0xFF
+    (('drowning)                 (pc-sm64-play-sound #x2423F081))  ;; priority 0xF0
+    (('attacked)                 (pc-sm64-play-sound #x240AFF81))  ;; priority 0xFF
+    (('game-over)                (pc-sm64-play-sound #x2431FF81))  ;; priority 0xFF
+    (('hello 'its-a-me 'mario-hello)
+                                 (pc-sm64-play-sound #x2432FF81))  ;; "It's-a me, Mario!" / "Hello"
+    (('press-start)              (pc-sm64-play-sound #x2433FFA1))  ;; priority 0xFF, flags2 0xA
+    ;; ---- Menu / system sounds (bank 7) ----------------------------------
+    (('lets-a-go 'lets-go)       (pc-sm64-play-sound #x7024FF81))  ;; star-select "Let's-a go!"
+    (('star-okey-dokey)          (pc-sm64-play-sound #x7023FF81))  ;; star-select "Okey dokey"
+    ;; SOUND_MENU_CLICK_FILE_SELECT — the classic "whoosh" that plays on
+    ;; the SM64 file-select / save-slot screen when a file is picked or
+    ;; the screen itself whooshes in.  Encoded as
+    ;; SOUND_ARG_LOAD(7, 0, 0x11, 0x00, 8) | SOUND_STATUS_STARTING.
+    (('whoosh 'file-select-click) (pc-sm64-play-sound #x70110081))
+    (else
+      (format 0 "sm64-sound: unknown sound ~A~%" snd)))
+  (none))
+
+;; Toggle persistence for the `play-sm64-music?` setting.  Flips the flag,
+;; commits *mario-settings* to disk, and stops any currently-playing track
+;; if music was just turned off.  Returns the new (normalised) value.
+(defun sm64-set-music-enabled! ((enabled? symbol))
+  (set! (-> *mario-settings* play-sm64-music?) (if enabled? #t #f))
+  (commit-to-file *mario-settings*)
+  (when (not (-> *mario-settings* play-sm64-music?))
+    (pc-sm64-stop-music))
+  (-> *mario-settings* play-sm64-music?))
+
+;; ---------------------------------------------------------------------------
+;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.
+;; All data is packed into vectors (raw floats) to avoid fixnum/tag encoding.
+;;
+;; **Jak 2 caveat**: libsm64_integration.cpp currently looks these up via
+;; `jak1::intern_from_c(...)`.  In a Jak 2 build that resolves against the
+;; Jak 1 symbol table which isn't loaded, so the C++ side silently no-ops
+;; on read.  Defining them here is still useful — it documents the wire
+;; format and lets later GOAL ports compile against these symbols even
+;; before the C++ side is degated.  See JAK2_PORT_PLAN.md ("Specific Jak
+;; 1-isms to gate" section) for the cleanup needed on the C++ side.
+;; ---------------------------------------------------------------------------
+
+;; C++ writes: x,y,z = Mario world position (Jak units), w = face angle (GOAL degrees).
+(define *sm64-mario-pos* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = punching/kicking (not dive/gp), y = ground-pound impact, z = ground-pound falling, w = diving.
+(define *sm64-mario-info* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = health wedges (0.0–8.0).
+(define *sm64-mario-health* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; GOAL writes: x = 1.0 if target grabbed (cutscene/periscope), y = 1.0 if periscope.
+(define *sm64-target-flags* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; GOAL writes: #t while Jak is dying / being eaten / respawning.  C++ reads
+;; this each frame and the renderer hides Mario for the duration so we don't
+;; see Mario hanging in mid-air on a phantom shell while Jak's death animation
+;; plays.  Cleared when the target's `dying` state-flag clears (post-respawn).
+(define *sm64-jak-dying* #f)
+
+;; GOAL writes x = 1.0 when Jak strikes Mario.  C++ reads + clears each tick.
+(define *sm64-mario-hit* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = forward velocity (Jak units/frame), y = slide-kick active,
+;;              z = jump-kick active, w = butt-slide active.
+(define *sm64-mario-velocity* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: x = 1.0 if Mario is riding the koopa shell, 0.0 otherwise.
+(define *sm64-mario-on-shell* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; C++ writes: damage-state info for the health sync.
+;;   x = current damage mode (0=none, 1=lava, 2=drown, 3=endlessfall, 4=generic)
+;;   y = 1.0 if libsm64 invincibility frames are active (post-hit grace period)
+;;   z = air supply (m->health, 0..2176) for the underwater air HUD
+;;   w = 1.0 if Mario is in a submerged action (HUD shows air bar instead of HP)
+(define *sm64-mario-damage* (new 'static 'vector :x 0.0 :y 0.0 :z 0.0 :w 0.0))
+
+;; Time-frame deadline used by the "Mario just killed an enemy" sound hook
+;; (in Jak 1's target-handler.gc 'get-attack-count case).  Jak 2 doesn't
+;; touch this yet but the var is harmless to define.
+(define *sm64-mario-attack-until* (the time-frame 0))
+
+;; Other state used by the music gating / level transitions.  Pre-declared
+;; here so mario-music.gc (when ported) compiles without circular-dep
+;; gymnastics.
+(define *sm64-in-final-credits* #f)
+(define *sm64-in-tube-slide* #f)
 
 ;; ---------------------------------------------------------------------------
 ;; Apply persisted Mario settings to libsm64 once at file-load time.
@@ -80,4 +312,4 @@
           (-> *mario-settings* render-corpses?)
           (-> *mario-settings* sm64-music-volume)))
 
-(format 0 "[mario] Jak 2 mario.gc loaded — skeleton only, see JAK2_PORT_PLAN.md~%")
+(format 0 "[mario] Jak 2 mario.gc loaded — skeleton + music helpers, see JAK2_PORT_PLAN.md~%")

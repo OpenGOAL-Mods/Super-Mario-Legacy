@@ -467,5 +467,6 @@
   "entity-debug.o" ;; added
   ;; mario mod (Jak 2 port — skeleton, see JAK2_PORT_PLAN.md at repo root)
   "mario-settings.o" ;; added
+  "mario-menu-h.o" ;; added
   "mario.o" ;; added
  ))

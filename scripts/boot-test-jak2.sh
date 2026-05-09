@@ -123,6 +123,7 @@ declare -a REQUIRED=(
   "\[mario\] applied settings:"
   "\[mario\] Jak 2 mario.gc loaded"
   "\[mario\] mario-music.gc loaded"
+  "\[sm64\] Mario collision process started"
 )
 
 declare -a FORBIDDEN=(

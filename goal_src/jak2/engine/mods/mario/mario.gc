@@ -67,6 +67,15 @@
 (define-extern pc-sm64-rom-loaded? (function symbol))
 (define-extern pc-sm64-prompt-for-rom (function symbol))
 
+;; Forward decl — update-mario-music! is defined in mario-music.gc which
+;; loads AFTER this file (per game.gd order).  The watcher's idle loop
+;; calls it every frame, so we need the symbol bound at compile time.
+;; mario-music.gc itself depends on sm64-music / sm64-music-forced
+;; defined below in this file, so the dep cycle is broken by load order
+;; on those (mario.o → mario-music.o means mario-music sees them) and
+;; this forward-decl on the other side.
+(define-extern update-mario-music! (function none))
+
 ;; ---------------------------------------------------------------------------
 ;; Music + sound helpers.  These are 1:1 with the Jak 1 implementations —
 ;; their only deps are *mario-settings* and the pc-sm64-* bridges, both of
@@ -312,4 +321,111 @@
           (-> *mario-settings* render-corpses?)
           (-> *mario-settings* sm64-music-volume)))
 
-(format 0 "[mario] Jak 2 mario.gc loaded — skeleton + music helpers, see JAK2_PORT_PLAN.md~%")
+;; ---------------------------------------------------------------------------
+;; sm64-mario-col — minimal Jak 2 watcher process.
+;;
+;; Spawned at file-load time and ticks every frame.  Drives:
+;;   1. Per-frame settings push to libsm64 (color / corpse-render)
+;;   2. update-mario-music! tick (level-aware track + volume)
+;;   3. Pad bridge (left stick + A/B/Z buttons → libsm64 input)
+;;   4. *sm64-target-flags* w = (movie?) flag so the C++ side knows
+;;      when to skip pause-gating during cinematics
+;;   5. *sm64-jak-dying* always #f for now — Jak 2 lacks state-flags
+;;      `dying` so we can't detect Jak's death the same way.  C++ will
+;;      treat Mario as always-visible until that's wired up properly.
+;;
+;; Intentionally NOT ported from jak1 yet (each line item needs jak2-
+;; specific verification — see JAK2_PORT_PLAN.md):
+;;   - Mario death → kill Jak (uses *target* attack-info / fact health)
+;;   - Corpse capture / update / finalize on death
+;;   - state-flags grabbed / periscope / clone-anim writes (different
+;;     state-flags enum in jak2)
+;;   - Health sync / attack tracker / knockback bridging
+;;
+;; The process clears pause/menu/progress mask bits (same trick as
+;; Jak 1) so it keeps ticking when the start menu is up — without
+;; this, music orchestration would freeze whenever the user paused.
+;; ---------------------------------------------------------------------------
+
+(deftype sm64-mario-col (process)
+  ()
+  (:state-methods
+    idle))
+
+(defstate idle (sm64-mario-col)
+  :virtual #t
+  :code (behavior ()
+    (loop
+      ;; Music orchestration (mute Jak's music + pick libsm64 track).
+      (update-mario-music!)
+
+      ;; Push persisted settings to libsm64 each frame — cheap idempotent
+      ;; stores.  Means a settings change (debug menu, pause menu,
+      ;; settings file reload) takes effect on the next tick without
+      ;; per-toggle plumbing.
+      (when *mario-settings*
+        (pc-sm64-set-mario-color (-> *mario-settings* mario-color))
+        (pc-sm64-set-corpse-render-enabled
+          (if (-> *mario-settings* render-corpses?) 1 0)))
+
+      ;; Target flags — the only fields we can populate cleanly on jak 2
+      ;; right now.  grabbed / periscope / clone-anim need state-flags
+      ;; bits that jak 2 doesn't expose; w = (movie?) is universal.
+      (set! (-> *sm64-target-flags* x) 0.0)
+      (set! (-> *sm64-target-flags* y) 0.0)
+      (set! (-> *sm64-target-flags* z) 0.0)
+      (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0))
+      (set! *sm64-jak-dying* #f)
+
+      ;; Pad bridge — push left stick + A/B/Z to libsm64.  Buttons via
+      ;; cpad-hold? so they pick up the user's rebindings.
+      (let* ((pad      (-> *cpad-list* cpads 0))
+             (raw-x    (* 0.0078125 (the float (- (the int (-> pad leftx)) 127))))
+             (raw-y    (* 0.0078125 (the float (- (the int (-> pad lefty)) 127))))
+             (deadzone (-> *pc-settings* stick-deadzone))
+             (mag      (sqrtf (+ (* raw-x raw-x) (* raw-y raw-y))))
+             (out-x    0.0)
+             (out-y    0.0))
+        (when (< deadzone mag)
+          (let ((scale (/ (- mag deadzone) (* mag (- 1.0 deadzone)))))
+            (set! out-x (* raw-x scale))
+            (set! out-y (* raw-y scale))))
+        (let ((buttons 0))
+          (when (cpad-hold? 0 x)        (set! buttons (logior buttons 1)))   ;; A / cross
+          (when (cpad-hold? 0 square)   (set! buttons (logior buttons 2)))   ;; B
+          (when (cpad-hold? 0 circle)   (set! buttons (logior buttons 2)))   ;; B
+          (when (cpad-hold? 0 l1)       (set! buttons (logior buttons 4)))   ;; Z
+          (when (cpad-hold? 0 l2)       (set! buttons (logior buttons 4)))   ;; Z
+          (pc-sm64-set-input out-x out-y buttons)))
+
+      (suspend))))
+
+(defbehavior sm64-mario-col-init sm64-mario-col ()
+  "Initialize the Mario collision tracker and enter idle.
+   Bumps stack-size for format calls; clears pause/menu/progress
+   mask bits so the loop keeps ticking through pauses (same pattern
+   as jak1's mario.gc and jak2's anim-tester-x.gc)."
+  (logclear! (-> self mask) (process-mask pause menu progress))
+  (stack-size-set! (-> self main-thread) 1024)
+  (go-virtual idle))
+
+(defun sm64-mario-col-start ()
+  "Spawn the Mario watcher process.  Safe to call multiple times —
+   any existing instance is deactivated first."
+  (let ((existing (process-by-name "sm64-mario-col" *active-pool*)))
+    (when existing
+      (deactivate existing)))
+  (process-spawn sm64-mario-col :init sm64-mario-col-init :name "sm64-mario-col")
+  (format #t "[sm64] Mario collision process started (jak 2)~%"))
+
+(defun sm64-mario-col-stop ()
+  "Kill the Mario watcher process if it's running."
+  (let ((proc (process-by-name "sm64-mario-col" *active-pool*)))
+    (when proc
+      (deactivate proc)
+      (format #t "[sm64] Mario collision process stopped~%"))))
+
+;; Auto-start on load.
+(sm64-mario-col-start)
+
+(format 0 "[mario] Jak 2 mario.gc loaded — watcher live, see JAK2_PORT_PLAN.md~%")

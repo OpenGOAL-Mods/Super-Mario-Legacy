@@ -1,0 +1,146 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-settings.gc
+;; name in dgo: mario-settings
+;; dgos: GAME
+
+;; NOTE: no (bundles ...) or (require ...) — Jak 2's build system drives
+;; compilation entirely from goal_src/jak2/game.gp + dgos/game.gd.  Adding
+;; a (bundles ...) form here causes goalc to error out on load-project.
+
+;; ---------------------------------------------------------------------------
+;; mario-settings (Jak 2 port) — persistent Mario-mod options.
+;;
+;; Mirrors goal_src/jak1/engine/mods/mario/mario-settings.gc.  Same field
+;; layout, same on-disk format (so a user could even share their settings
+;; file across Jak 1 and Jak 2 installs).  File lands at
+;; %APPDATA%/OpenGOAL/jak2/settings/mario-settings.gc thanks to
+;; *pc-settings-folder* picking up Jak 2's user_config_dir.
+;;
+;; Differences from the Jak 1 file:
+;;   - Jak 2 doesn't have *pc-temp-string-1* (Jak 1 only); we allocate a
+;;     local string buffer for the path instead.
+;;   - The `(bundles ...)` line lists only GAME.CGO — Jak 2 doesn't have
+;;     a separate ENGINE.CGO like Jak 1 does.
+;;
+;; Adding a new field follows the same recipe as the Jak 1 file.  Keep
+;; field names + serialization format identical to the Jak 1 file so the
+;; on-disk format stays portable.
+;; ---------------------------------------------------------------------------
+
+(deftype mario-settings (basic)
+  ((play-sm64-music? symbol)
+   (sm64-music-volume float)
+   (sm64-sfx-volume float)
+   (mario-color int)
+   (render-corpses? symbol))
+  (:methods
+    (reset (_type_) _type_)
+    (load-settings (_type_) none)
+    (commit-to-file (_type_) none)
+    (read-from-file (_type_ string) symbol)
+    (write-to-file (_type_ string) symbol)
+    (initialize (_type_) _type_)))
+
+(defmethod reset ((obj mario-settings))
+  "Populate default values — call before load to guarantee fresh fields."
+  (set! (-> obj play-sm64-music?) #t)
+  (set! (-> obj sm64-music-volume) 30.0)
+  (set! (-> obj sm64-sfx-volume) 40.0)
+  (set! (-> obj mario-color) 0)
+  (set! (-> obj render-corpses?) #t)
+  obj)
+
+(defun mario-settings-filename ()
+  "Build the absolute save path into a fresh string and return it.
+   Jak 1 reuses *pc-temp-string-1* for this — Jak 2 doesn't expose
+   that string, so we allocate one each call.  Cheap (~2 KB stack)."
+  (let ((s (new 'global 'string 512 (the string #f))))
+    (format (clear s) "~S/mario-settings.gc" *pc-settings-folder*)
+    s))
+
+(defmethod write-to-file ((obj mario-settings) (filename string))
+  "Serialize obj to filename.  Returns #t on success."
+  (if (not filename) (return #f))
+  (let ((file (new 'stack 'file-stream filename 'write)))
+    (if (not (file-stream-valid? file)) (return #f))
+    (format file "(mario-settings~%")
+    (format file "  (play-sm64-music? ~A)~%" (-> obj play-sm64-music?))
+    (format file "  (sm64-music-volume ~f)~%" (-> obj sm64-music-volume))
+    (format file "  (sm64-sfx-volume ~f)~%" (-> obj sm64-sfx-volume))
+    (format file "  (mario-color ~D)~%" (-> obj mario-color))
+    (format file "  (render-corpses? ~A)~%" (-> obj render-corpses?))
+    (format file "  )~%")
+    (file-stream-close file))
+  (format 0 "mario settings file write: ~A~%" filename)
+  #t)
+
+(defmethod commit-to-file ((obj mario-settings))
+  "Persist obj to the canonical mario-settings.gc path."
+  (write-to-file obj (mario-settings-filename))
+  (none))
+
+(defmethod read-from-file ((obj mario-settings) (filename string))
+  "Parse filename into obj.  Returns #t on success.  Uses with-settings-
+   scope / dosettings / case-str — those macros are defined in Jak 1's
+   pckernel-common.gc which Jak 2's build pulls in via the special-
+   case in goal_src/jak2/lib/project-lib.gp:68."
+  (if (not filename) (return #f))
+  (let ((file (new 'stack 'file-stream filename 'read)))
+    (when (not (file-stream-valid? file)) (return #f))
+    (with-settings-scope (file)
+      (case-str (file-stream-read-word file)
+        (("mario-settings")
+         (dosettings (file)
+           (case-str *pc-temp-string*
+             (("play-sm64-music?")
+              (set! (-> obj play-sm64-music?) (file-stream-read-symbol file)))
+             (("sm64-music-volume")
+              (set! (-> obj sm64-music-volume) (file-stream-read-float file)))
+             (("sm64-sfx-volume")
+              (set! (-> obj sm64-sfx-volume) (file-stream-read-float file)))
+             (("mario-color")
+              (set! (-> obj mario-color) (file-stream-read-int file)))
+             (("render-corpses?")
+              (set! (-> obj render-corpses?) (file-stream-read-symbol file))))))))
+    (file-stream-close file))
+  (format 0 "mario settings file read: ~A~%" filename)
+  #t)
+
+(defmethod load-settings ((obj mario-settings))
+  "Load from disk, or write defaults if the file doesn't exist yet."
+  (let ((path (mario-settings-filename)))
+    (cond
+      ((pc-filepath-exists? path)
+       (format 0 "[mario] settings found at '~S', loading...~%" path)
+       (unless (read-from-file obj path)
+         (format 0 "[mario] settings parse failed at '~S', using defaults~%" path)
+         (reset obj)))
+      (else
+       (format 0 "[mario] no settings at '~S', writing defaults~%" path)
+       (reset obj)
+       (commit-to-file obj))))
+  (none))
+
+(defmethod initialize ((obj mario-settings))
+  "Prime with defaults, then overlay on-disk values if present."
+  (reset obj)
+  (load-settings obj)
+  obj)
+
+(defmethod new mario-settings ((allocation symbol) (type-to-make type))
+  (let ((obj (object-new allocation type-to-make (the-as int (-> type-to-make size)))))
+    (initialize obj)
+    obj))
+
+;; The singleton.  Forward-declared to #f so the define-once freshness
+;; check below can read the symbol on first load.
+(define *mario-settings* (the mario-settings #f))
+(define-once *mario-settings* (new 'global 'mario-settings))
+
+(defun mario-sm64-music-enabled? ()
+  "True when the SM64 audio override is turned on in *mario-settings*.
+   Predicate used by engine-level code that wants to know whether to
+   reroute audio through libsm64."
+  (the symbol (and *mario-settings* (-> *mario-settings* play-sm64-music?))))

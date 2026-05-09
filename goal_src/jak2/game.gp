@@ -303,6 +303,16 @@
 (goal-src "levels/test-zone/test-zone-obs.gc" "process-focusable")
 (custom-level-cgo "TSZ.DGO" "test-zone/testzone.gd")
 
+;;;;;;;;;;;;;;;;;;;;;;;;
+;; MARIO MOD (Jak 2 port — skeleton, see JAK2_PORT_PLAN.md at repo root)
+;;;;;;;;;;;;;;;;;;;;;;;;
+;; Jak 2's cgo-file macro (lib/project-lib.gp:193) auto-generates
+;; build steps for every .o listed in dgos/game.gd, chaining each as
+;; a goal-src-sequence element.  So just listing mario-settings.o /
+;; mario.o in game.gd is enough — explicit (goal-src ...) calls here
+;; would conflict (duplicate-output error from goalc).  This is the
+;; opposite of Jak 1 where game.gp drives compilation explicitly.
+
 ;; generate the art group for a custom actor.
 ;; requires a .glb model file in custom_assets/jak1/models/custom_levels
 ;; to also generate a collide-mesh, add :gen-mesh #t

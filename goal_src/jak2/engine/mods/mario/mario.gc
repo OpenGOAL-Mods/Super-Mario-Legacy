@@ -1,0 +1,83 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario.gc
+;; name in dgo: mario
+;; dgos: GAME
+
+;; NOTE: no (bundles ...) / (require ...) here — Jak 2 drives compile order
+;; from goal_src/jak2/game.gp.  See the (goal-src "engine/mods/mario/...")
+;; calls there; mario-settings is listed first so its types are available
+;; by the time this file compiles.
+
+;; ---------------------------------------------------------------------------
+;; mario.gc (Jak 2 port — SKELETON)
+;;
+;; This file is a starting beachhead for the Jak 2 port of the Mario / libsm64
+;; integration.  Most of the Jak 1 mario.gc (~1500 lines) is heavily Jak-1
+;; specific: target state machine, *game-info* fields, level names, progress
+;; menu integration, hint subtitles, etc.  Porting it directly would require
+;; rewriting most of the body for Jak 2's different types and states.
+;;
+;; Status: declares the C++ → GOAL bridge externs so other Jak 2 GOAL files
+;; can call them.  No watcher process spawned yet — Mario-spawn / position
+;; sync / health sync etc. all need Jak 2 versions of read-target-transform,
+;; *target* state checks, etc.
+;;
+;; See JAK2_PORT_PLAN.md at the repo root for the porting checklist and
+;; the specific Jak 1 → Jak 2 deltas discovered so far.
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; C++ → GOAL bridge externs.  All registered via make_function_symbol_from_c
+;; in game/kernel/jak2/kmachine.cpp inside InitMachine_PCPort.  Function
+;; signatures must match exactly or the call site won't type-check.
+;; ---------------------------------------------------------------------------
+(define-extern pc-sm64-damage-mario (function none))
+(define-extern pc-sm64-delete-mario (function none))
+(define-extern pc-sm64-heal-mario (function none))
+(define-extern pc-sm64-full-heal-mario (function none))
+(define-extern pc-sm64-star-dance-mario (function none))
+(define-extern pc-sm64-set-mario-color (function int none))
+(define-extern pc-sm64-set-corpse-render-enabled (function int none))
+(define-extern pc-sm64-set-mario-wedges (function int none))
+(define-extern pc-sm64-knockback-mario (function int none))
+(define-extern pc-sm64-burn-mario (function int none))
+(define-extern pc-sm64-drown-mario (function none))
+(define-extern pc-sm64-endlessfall-mario (function none))
+(define-extern pc-sm64-kill-mario (function none))
+(define-extern pc-sm64-stomp-bounce-mario (function none))
+(define-extern pc-sm64-hover-mario (function none))
+(define-extern pc-sm64-get-mario-air (function int))
+(define-extern pc-sm64-capture-mario-corpse (function none))
+(define-extern pc-sm64-update-last-mario-corpse (function none))
+(define-extern pc-sm64-finalize-last-mario-corpse (function none))
+(define-extern pc-sm64-clear-mario-corpse (function none))
+(define-extern pc-sm64-play-sound (function int none))
+(define-extern pc-sm64-play-music (function int none))
+(define-extern pc-sm64-play-music-forced (function int none))
+(define-extern pc-sm64-stop-music (function none))
+(define-extern pc-sm64-set-music-volume (function float none))
+(define-extern pc-sm64-teleport-mario (function float float float none))
+(define-extern pc-sm64-shove-mario (function float float float none))
+(define-extern pc-sm64-set-input (function int int int none))
+(define-extern pc-sm64-rom-loaded? (function symbol))
+(define-extern pc-sm64-prompt-for-rom (function symbol))
+
+;; ---------------------------------------------------------------------------
+;; Apply persisted Mario settings to libsm64 once at file-load time.
+;; This is the minimum hookup needed for the settings file to actually do
+;; something.  Without it the file loads from disk but the values just sit
+;; in *mario-settings*.
+;; ---------------------------------------------------------------------------
+(when *mario-settings*
+  (pc-sm64-set-mario-color (-> *mario-settings* mario-color))
+  (pc-sm64-set-corpse-render-enabled
+    (if (-> *mario-settings* render-corpses?) 1 0))
+  (pc-sm64-set-music-volume (-> *mario-settings* sm64-music-volume))
+  (format 0 "[mario] applied settings: color=~D corpses=~A music-vol=~f~%"
+          (-> *mario-settings* mario-color)
+          (-> *mario-settings* render-corpses?)
+          (-> *mario-settings* sm64-music-volume)))
+
+(format 0 "[mario] Jak 2 mario.gc loaded — skeleton only, see JAK2_PORT_PLAN.md~%")

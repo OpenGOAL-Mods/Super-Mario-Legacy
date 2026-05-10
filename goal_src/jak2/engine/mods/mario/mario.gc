@@ -522,11 +522,24 @@
       ;; state-flags bits like jak 1 does, but we can fall back to state-
       ;; NAME comparisons against the equivalent state machine entries:
       ;;   grabbed         → state name = 'target-grab
-      ;;   jak-dying       → state name = 'target-death
       ;;   in-movie        → (movie?) — universal across versions
+      ;;
+      ;; *sm64-jak-dying* (drives C++ render-hide + sync-skip) is set
+      ;; whenever EITHER:
+      ;;   - Jak is in 'target-death state (normal play-mode death), OR
+      ;;   - our death-timer is running (we just sent the kill-Jak event
+      ;;     and are waiting for Jak to recover).
+      ;; The state-name path catches play-mode deaths that go (go target-
+      ;; death) directly.  The death-timer path catches the **debug-mode
+      ;; endlessfall path** (target-death.gc:985-998) which suspends 1s
+      ;; then teleports Jak to last-trans-on-ground via target-stance —
+      ;; never visits target-death, so a state-name-only check would
+      ;; miss it entirely and let sync_jak_to_mario keep yanking Jak.
+      ;; This is the difference vs jak 1 where 'state-flags dying' was
+      ;; the universal signal regardless of debug/play.
+      ;;
       ;; periscope and clone-anim have no obvious jak2 equivalents and
-      ;; stay 0 for now.  Setting these correctly lets the C++ side
-      ;; pause Mario / hide him at the right moments.
+      ;; stay 0 for now.
       (let ((grabbed   #f)
             (jak-dying #f)
             (state-name (and *target*
@@ -535,6 +548,11 @@
         (when state-name
           (set! grabbed (= state-name 'target-grab))
           (set! jak-dying (= state-name 'target-death)))
+        ;; Death-timer-driven half: any time we're inside the death/
+        ;; respawn window we want sync skipped, even if Jak's state has
+        ;; already settled back to target-stance.
+        (when (> (-> self death-timer) 0)
+          (set! jak-dying #t))
         (set! (-> *sm64-target-flags* x) (if grabbed 1.0 0.0))
         (set! (-> *sm64-target-flags* y) 0.0)  ;; periscope — no jak2 equiv
         (set! (-> *sm64-target-flags* z) 0.0)  ;; clone-anim — no jak2 equiv

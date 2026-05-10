@@ -1282,7 +1282,23 @@ void OpenGLRenderer::tick_mario_sm64() {
     // Jak respawns and exits target-death, target_dying clears and
     // the sync resumes — Mario auto-respawn picks up at Jak's new
     // continue position, normal play resumes.
-    if (wedges > 0 && !on_sunken_elev_up && !mgr.target_dying) {
+    //
+    // ALSO gate on Mario being above a sane Y threshold.  When Mario
+    // walks off a ledge into endless air, libsm64 doesn't kill him
+    // until he reaches the freefall-Y threshold (~10000 SM64 units
+    // below origin).  In the meantime he's just falling — wedges still
+    // > 0, target_dying still false (he hasn't sent the kill-Jak event
+    // yet) — so without this gate sync would drag Jak through a
+    // multi-second freefall before either of them dies.  The threshold
+    // is generous (-5000 SM64u ≈ -73m in Jak units) so normal jumps,
+    // bounces, drops down stairs etc. don't trigger it; only "Mario
+    // is far below any reasonable level geometry" does.  When Mario
+    // climbs back into normal Y range, sync resumes automatically.
+    constexpr float kSyncMinMarioY_SM64 = -5000.0f;
+    const bool mario_in_void = cur_state.position.y() * sm64::JAK_TO_SM64_SCALE
+                                 < kSyncMinMarioY_SM64;
+    if (wedges > 0 && !on_sunken_elev_up && !mgr.target_dying &&
+        !mario_in_void) {
       mgr.sync_jak_to_mario(g_ee_main_mem, 0);
     }
   }

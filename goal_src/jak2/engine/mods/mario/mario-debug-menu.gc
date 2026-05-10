@@ -139,6 +139,47 @@
       (pc-sm64-teleport-mario (-> trans x) (-> trans y) (-> trans z))))
   (none))
 
+;; Helper: print *target*'s position so we can confirm what coords the
+;; auto-spawn would feed to libsm64.  If Mario isn't appearing, the
+;; first thing to check is whether these numbers look sane (i.e. you
+;; recognise them as your current level position).
+(defun mario-print-target-trans ()
+  "Print Jak's current position to the console.  No-op if *target*
+   isn't bound — prints a 'no target' line so you know that's why."
+  (cond
+    ((and *target* (-> *target* control))
+     (let ((trans (-> *target* control trans)))
+       (format #t "[mario-debug] *target* trans = (~F ~F ~F)~%"
+               (-> trans x) (-> trans y) (-> trans z))))
+    (else
+     (format #t "[mario-debug] *target* not bound (or no control)~%")))
+  (none))
+
+;; Helper: spawn Mario at Jak's position + 50m up.  Useful when the
+;; spawn at exact Jak coords is being rejected by libsm64 (no floor) —
+;; +50m above usually has open air, and Mario will fall to the nearest
+;; floor below thanks to find_floor.  If even THIS fails to spawn,
+;; either *target* has garbage coords or the level collision isn't
+;; loaded around Jak.
+(defun mario-spawn-above-jak ()
+  "Spawn Mario at Jak's position + 50m of altitude."
+  (when (and *target* (-> *target* control))
+    (let* ((trans (-> *target* control trans))
+           (x (-> trans x))
+           (y-up50 (+ (-> trans y) (* 50.0 4096.0)))  ;; +50m in Jak units (4096 = 1m)
+           (z (-> trans z)))
+      (format #t "[mario-debug] spawn-above-jak: requesting Mario at (~F ~F ~F)~%"
+              x y-up50 z)
+      (pc-sm64-spawn-mario-at x y-up50 z)))
+  (none))
+
+;; Toggle helpers — flip *sm64-force-input* by name.  These just write
+;; the global; the watcher reads it next tick.
+(defun mario-force-input-off ()    (set! *sm64-force-input* (the symbol #f)) (none))
+(defun mario-force-input-forward () (set! *sm64-force-input* 'forward)        (none))
+(defun mario-force-input-jump ()    (set! *sm64-force-input* 'jump)           (none))
+(defun mario-force-input-wave ()    (set! *sm64-force-input* 'wave)           (none))
+
 (when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
   (debug-menu-append-item
     (-> *debug-menu-context* root-menu)
@@ -147,6 +188,7 @@
       '(menu "Mario"
              (function "Sound Previewer"  #f ,(lambda () (start-sm64-sound-previewer) (none)))
              (function "Spawn at Jak"     #f ,(lambda () (pc-sm64-spawn-mario-at-jak) (none)))
+             (function "Spawn +50m above" #f ,(lambda () (mario-spawn-above-jak) (none)))
              (function "Teleport to Jak"  #f ,(lambda () (mario-teleport-to-jak) (none)))
              (function "Delete Mario"     #f ,(lambda () (pc-sm64-delete-mario) (none)))
              (function "Heal Mario"       #f ,(lambda () (pc-sm64-full-heal-mario) (none)))
@@ -155,6 +197,19 @@
              (function "Hover (R2)"       #f ,(lambda () (pc-sm64-hover-mario) (none)))
              (function "Star Dance"       #f ,(lambda () (pc-sm64-star-dance-mario) (none)))
              (function "Print Status"     #f ,(lambda () (mario-status) (none)))
+             (function "Print Mario state" #f ,(lambda () (pc-sm64-log-mario-state) (none)))
+             (function "Print *target* trans" #f ,(lambda () (mario-print-target-trans) (none)))
+             ;; Force-input submenu — pin the watcher's pad bridge to a
+             ;; canned input pattern so Mario moves without anyone holding
+             ;; a controller.  "Off" returns to live pad input.  Use this
+             ;; when investigating "is Mario actually alive and ticking?"
+             ;; — if forward / wave moves him, he's working; if not,
+             ;; spawn or render is borked.
+             (menu "Force Input"
+                   (function "Off"      #f ,(lambda () (mario-force-input-off)     (none)))
+                   (function "Forward"  #f ,(lambda () (mario-force-input-forward) (none)))
+                   (function "Jump"     #f ,(lambda () (mario-force-input-jump)    (none)))
+                   (function "Wave"     #f ,(lambda () (mario-force-input-wave)    (none))))
              (menu "Colors"
                    (function "Red"     #f ,(lambda () (mario-set-color! 0) (none)))
                    (function "Orange"  #f ,(lambda () (mario-set-color! 1) (none)))

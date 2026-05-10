@@ -1041,6 +1041,14 @@ void OpenGLRenderer::tick_mario_sm64() {
   // Auto-spawn Mario at Jak's position if initialized but no Mario yet
   if (!mgr.has_mario()) {
     static int spawn_cooldown = 0;
+    // Diagnostic counters — once-per-second-ish telemetry so a developer
+    // looking at the boot log can see WHY auto-spawn isn't firing
+    // (target_ptr never bound? read_target_transform parses garbage?
+    // create_mario rejects every position?).  Silenced after the first
+    // few attempts to keep the log readable.
+    static int diag_target_missing = 0;
+    static int diag_create_failed = 0;
+    static int diag_attempts = 0;
     // During the save-load / death-chain respawn window, skip the
     // cooldown entirely so we retry every frame — the cooldown is
     // meant for "maybe Jak hasn't been created yet" startup polling,
@@ -1054,14 +1062,21 @@ void OpenGLRenderer::tick_mario_sm64() {
     math::Vector3f tpos;
     float tyaw = 0.f;
     if (mgr.read_target_transform(g_ee_main_mem, &tpos, &tyaw)) {
+      diag_attempts++;
       int32_t id = mgr.create_mario(tpos.x(), tpos.y(), tpos.z());
       if (id >= 0) {
         mgr.set_mario_face_angle(tyaw);
         mgr.set_respawn_pending(false);
         spawn_cooldown = 0;
-        lg::info("[sm64] Auto-spawned Mario at ({:.1f}, {:.1f}, {:.1f})",
-                 tpos.x(), tpos.y(), tpos.z());
+        lg::info("[sm64] Auto-spawned Mario at ({:.1f}, {:.1f}, {:.1f}) yaw={:.2f}",
+                 tpos.x(), tpos.y(), tpos.z(), tyaw);
       } else if (!respawn_urgent) {
+        diag_create_failed++;
+        if (diag_create_failed <= 5 || diag_create_failed % 10 == 0) {
+          lg::warn("[sm64] auto-spawn: create_mario rejected pos=({:.1f}, {:.1f}, {:.1f}) "
+                   "(attempt #{}, total fails {}); no floor under target?",
+                   tpos.x(), tpos.y(), tpos.z(), diag_attempts, diag_create_failed);
+        }
         // No collision at spawn point — retry after ~2s (for regular
         // startup polling, not the urgent respawn path; during urgent
         // we just keep retrying next frame — by the time *target* is
@@ -1069,6 +1084,13 @@ void OpenGLRenderer::tick_mario_sm64() {
         spawn_cooldown = 60;
       }
     } else if (!respawn_urgent) {
+      diag_target_missing++;
+      if (diag_target_missing == 1 || diag_target_missing == 30 ||
+          diag_target_missing == 300 || diag_target_missing % 1800 == 0) {
+        lg::info("[sm64] auto-spawn: read_target_transform failed (*target* not bound) "
+                 "— retry, total fails {}",
+                 diag_target_missing);
+      }
       // *target* not available yet — retry after ~1s (again, only
       // for non-urgent startup polling).
       spawn_cooldown = 30;

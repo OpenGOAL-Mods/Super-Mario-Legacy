@@ -63,6 +63,11 @@
 ;; Returns 1 if Mario was spawned, 0 if libsm64 isn't ready / *target*
 ;; isn't bound / Mario already exists.
 (define-extern pc-sm64-spawn-mario-at-jak (function int))
+;; Spawn at explicit coords — useful for debugging when auto-spawn
+;; rejects Jak's actual position (no floor under target etc).
+(define-extern pc-sm64-spawn-mario-at (function float float float int))
+;; Print Mario's current pos / action / health to the gk console.
+(define-extern pc-sm64-log-mario-state (function none))
 ;; Push camera forward vector (world-XZ projection) so Mario's stick rotates
 ;; with the camera.  Args are GOAL floats packed into u32 by the C++ bridge.
 ;; Pass (0, 1) to fall back to world-Z forward.
@@ -371,6 +376,25 @@
 ;; will auto-spawn again — useful while iterating.
 (define *sm64-jak2-auto-spawned* #f)
 
+;; Forced-input mode for debugging Mario presence/movement when the
+;; player can't actually hold a controller (unattended boot, etc).
+;; Recognised values:
+;;   #f         — normal pad input flows through unmodified.
+;;   'forward   — stick pinned to (0, +1) (full forward), no buttons.
+;;   'jump      — stick at (0, +1), button A held (continuous jumps).
+;;   'wave      — sin(time)-based stick wiggle so Mario walks in
+;;                circles; lets you see he's responsive without
+;;                running into walls.
+;;
+;; **DEFAULT: 'wave** — until visual confirmation that Mario is
+;; spawning + rendering on jak 2, the watcher pushes a circular
+;; canned input pattern so a remote observer can see him animate.
+;; Switch back to #f via the debug menu's Mario → Force Input → Off
+;; entry once Mario is verified working with live controller input.
+;; Toggle from the debug menu or the REPL: `(set! *sm64-force-input*
+;; 'forward)` etc.
+(define *sm64-force-input* (the symbol 'wave))
+
 (defstate idle (sm64-mario-col)
   :virtual #t
   :code (behavior ()
@@ -380,19 +404,22 @@
     (set! (-> self mario-dead?) #t)
     (set! (-> self death-timer) 0)
     (loop
-      ;; Auto-spawn Mario the first frame *target* exists.  Without this
-      ;; the user has to manually click the debug-menu "Spawn at Jak"
-      ;; button every session — having a default-on auto-spawn for the
-      ;; jak 2 mod is friendlier.  Bridge returns 1 on success, 0 on
-      ;; no-op (libsm64 not ready / *target* not bound / Mario already
-      ;; alive).  Auto-spawned flag stays sticky so we don't re-spawn
-      ;; every frame Mario is alive — but we DO clear it on *sm64-mario-
-      ;; health* x = 0 (Mario got deleted, e.g. via debug menu or our
-      ;; own death pipeline), letting the next *target* tick re-spawn.
-      (when (and (not *sm64-jak2-auto-spawned*) *target*)
-        (when (= (pc-sm64-spawn-mario-at-jak) 1)
-          (set! *sm64-jak2-auto-spawned* #t)
-          (format #t "[sm64] Auto-spawned Mario at Jak's position~%")))
+      ;; Mario spawning is handled by the C++ auto-spawn at
+      ;; OpenGLRenderer.cpp:1042 — it polls read_target_transform from
+      ;; the GL thread every render frame and calls create_mario the
+      ;; instant *target*'s root.trans is reachable.  Boot logs show
+      ;; "[libsm64] Mario created at (...)" when this fires.  We used to
+      ;; do a parallel GOAL-side auto-spawn here, but that was redundant
+      ;; (and buggy — the +50m fallback's float arithmetic didn't add
+      ;; the offset).  We just track whether Mario is alive on the
+      ;; *sm64-mario-health* x bridge field, which goes 0 → non-zero on
+      ;; the first frame after Mario spawns and the C++ side starts
+      ;; writing his state.
+      (when (and (not *sm64-jak2-auto-spawned*)
+                 (> (-> *sm64-mario-health* x) 0.0))
+        (set! *sm64-jak2-auto-spawned* #t)
+        (format #t "[sm64] Mario alive — wedges=~F (auto-spawn confirmed)~%"
+                (-> *sm64-mario-health* x)))
       ;; Clear the flag if Mario got deleted out from under us — the
       ;; debug menu Delete Mario button calls pc-sm64-delete-mario which
       ;; sets the C++ side's m_mario_id = -1, and *sm64-mario-health* x
@@ -497,24 +524,53 @@
 
       ;; Pad bridge — push left stick + A/B/Z to libsm64.  Buttons via
       ;; cpad-hold? so they pick up the user's rebindings.
-      (let* ((pad      (-> *cpad-list* cpads 0))
-             (raw-x    (* 0.0078125 (the float (- (the int (-> pad leftx)) 127))))
-             (raw-y    (* 0.0078125 (the float (- (the int (-> pad lefty)) 127))))
-             (deadzone (-> *pc-settings* stick-deadzone))
-             (mag      (sqrtf (+ (* raw-x raw-x) (* raw-y raw-y))))
-             (out-x    0.0)
-             (out-y    0.0))
-        (when (< deadzone mag)
-          (let ((scale (/ (- mag deadzone) (* mag (- 1.0 deadzone)))))
-            (set! out-x (* raw-x scale))
-            (set! out-y (* raw-y scale))))
-        (let ((buttons 0))
-          (when (cpad-hold? 0 x)        (set! buttons (logior buttons 1)))   ;; A / cross
-          (when (cpad-hold? 0 square)   (set! buttons (logior buttons 2)))   ;; B
-          (when (cpad-hold? 0 circle)   (set! buttons (logior buttons 2)))   ;; B
-          (when (cpad-hold? 0 l1)       (set! buttons (logior buttons 4)))   ;; Z
-          (when (cpad-hold? 0 l2)       (set! buttons (logior buttons 4)))   ;; Z
-          (pc-sm64-set-input out-x out-y buttons)))
+      ;;
+      ;; *sm64-force-input* override: when non-#f, replace the live pad
+      ;; read with a canned input pattern.  Useful when debugging "is
+      ;; Mario alive at all?" — set the toggle to 'forward, watch for
+      ;; movement.  See *sm64-force-input* doc-comment above for the
+      ;; recognised values.
+      (cond
+        ;; Forced-forward: stick pinned to (0, +1).  In SM64 stick coords
+        ;; (PS2 convention: down = +y, but libsm64's input layer is
+        ;; agnostic — we use the same coords mario.c reads), passing
+        ;; (sx=0, sy=1) means "stick pushed away from the player",
+        ;; which after camera-relative rotation becomes "forward in
+        ;; the camera's view".
+        ((= *sm64-force-input* 'forward)
+         (pc-sm64-set-input 0.0 -1.0 0))
+        ;; Forced jump: same stick + button A held continuously.
+        ((= *sm64-force-input* 'jump)
+         (pc-sm64-set-input 0.0 -1.0 1))
+        ;; Wave: stick rotates so Mario walks in a slow circle.  Uses
+        ;; current-time as a 60Hz counter — mod 360 frames = 6sec
+        ;; revolution.  Lets a remote observer see Mario react without
+        ;; running into walls.
+        ((= *sm64-force-input* 'wave)
+         (let* ((t      (the float (mod (current-time) 360)))
+                (theta  (* (/ t 360.0) (* 2.0 3.14159265)))
+                (sx     (sin theta))
+                (sy     (* -1.0 (cos theta))))
+           (pc-sm64-set-input sx sy 0)))
+        (else
+          (let* ((pad      (-> *cpad-list* cpads 0))
+                 (raw-x    (* 0.0078125 (the float (- (the int (-> pad leftx)) 127))))
+                 (raw-y    (* 0.0078125 (the float (- (the int (-> pad lefty)) 127))))
+                 (deadzone (-> *pc-settings* stick-deadzone))
+                 (mag      (sqrtf (+ (* raw-x raw-x) (* raw-y raw-y))))
+                 (out-x    0.0)
+                 (out-y    0.0))
+            (when (< deadzone mag)
+              (let ((scale (/ (- mag deadzone) (* mag (- 1.0 deadzone)))))
+                (set! out-x (* raw-x scale))
+                (set! out-y (* raw-y scale))))
+            (let ((buttons 0))
+              (when (cpad-hold? 0 x)        (set! buttons (logior buttons 1)))   ;; A / cross
+              (when (cpad-hold? 0 square)   (set! buttons (logior buttons 2)))   ;; B
+              (when (cpad-hold? 0 circle)   (set! buttons (logior buttons 2)))   ;; B
+              (when (cpad-hold? 0 l1)       (set! buttons (logior buttons 4)))   ;; Z
+              (when (cpad-hold? 0 l2)       (set! buttons (logior buttons 4)))   ;; Z
+              (pc-sm64-set-input out-x out-y buttons)))))
 
       (suspend))))
 

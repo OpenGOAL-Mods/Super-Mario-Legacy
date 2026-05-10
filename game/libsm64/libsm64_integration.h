@@ -280,12 +280,22 @@ u64 pc_sm64_shove_mario(u32 x, u32 y, u32 z);
 // "summon Mario" entry point for both the C++ debug GUI button and a
 // GOAL-callable bridge — same logic in both, no duplication.
 u64 pc_sm64_spawn_mario_at_jak();
+// Spawn Mario at the given Jak-units coords (x, y, z packed into u32
+// float-bits).  Bypasses the *target* read used by spawn-mario-at-jak,
+// so useful for "summon at a known-good test position" debug flows.
+// Returns 1 on success, 0 if libsm64 isn't ready or create_mario
+// rejected the position (no floor).
+u64 pc_sm64_spawn_mario_at(u32 x_bits, u32 y_bits, u32 z_bits);
 // Push the camera's forward vector in world XZ plane to libsm64 so
 // Mario's analog stick rotates with the camera.  Args are GOAL floats
 // packed into u32 (same ABI as pc-sm64-teleport-mario).  Caller can pass
 // a (0, 0) "no camera" sentinel — set_camera_look_from_goal will fall
 // back to (0, 1) world-Z forward.
 u64 pc_sm64_set_camera_look(u32 cam_x_bits, u32 cam_z_bits);
+// Print a one-line state dump of Mario's current position, action, health,
+// face angle, and bridge sym addresses.  Routes through lg::info so the
+// output lands in the gk console.  Returns 0 (GOAL doesn't read return).
+u64 pc_sm64_log_mario_state();
 
 class LibSM64Manager {
  public:

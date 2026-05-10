@@ -3390,6 +3390,51 @@ u64 pc_sm64_teleport_mario(u32 x_bits, u32 y_bits, u32 z_bits) {
 // delete-mario first if they want to relocate).  Lifts the inline logic
 // from sm64_debug_gui's "Spawn at Jak" button so both UIs share one path.
 // ---------------------------------------------------------------------------
+u64 pc_sm64_spawn_mario_at(u32 x_bits, u32 y_bits, u32 z_bits) {
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.is_initialized()) {
+    lg::warn("[libsm64] spawn-at: libsm64 not initialized");
+    return 0;
+  }
+  if (mgr.has_mario()) {
+    lg::info("[libsm64] spawn-at: Mario already spawned (id={}); ignoring",
+             mgr.get_mario_id());
+    return 0;
+  }
+  float x, y, z;
+  std::memcpy(&x, &x_bits, 4);
+  std::memcpy(&y, &y_bits, 4);
+  std::memcpy(&z, &z_bits, 4);
+  int32_t id = mgr.create_mario(x, y, z);
+  if (id < 0) {
+    lg::warn("[libsm64] spawn-at: create_mario rejected ({:.1f}, {:.1f}, {:.1f}) "
+             "— no floor under target?", x, y, z);
+    return 0;
+  }
+  lg::info("[libsm64] spawn-at: Mario spawned at explicit ({:.1f}, {:.1f}, {:.1f}) id={}",
+           x, y, z, id);
+  return 1;
+}
+
+u64 pc_sm64_log_mario_state() {
+  auto& mgr = LibSM64Manager::instance();
+  if (!mgr.is_initialized()) {
+    lg::info("[sm64] state: libsm64 not initialised");
+    return 0;
+  }
+  if (!mgr.has_mario()) {
+    lg::info("[sm64] state: no Mario alive (m_mario_id < 0)");
+    return 0;
+  }
+  auto state = mgr.get_state();
+  lg::info("[sm64] state: pos=({:.1f}, {:.1f}, {:.1f}) yaw={:.2f}rad "
+           "action=0x{:08X} health=0x{:04X} vel-fwd={:.2f}",
+           state.position.x(), state.position.y(), state.position.z(),
+           state.face_angle, state.action,
+           static_cast<uint16_t>(state.health), state.forward_velocity);
+  return 0;
+}
+
 u64 pc_sm64_spawn_mario_at_jak() {
   auto& mgr = LibSM64Manager::instance();
   if (!mgr.is_initialized() || !g_ee_main_mem) {

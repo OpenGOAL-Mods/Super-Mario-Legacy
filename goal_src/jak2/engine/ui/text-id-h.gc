@@ -848,6 +848,16 @@
   (progress-controller-options-enable-pressure-sensitivity #x134a)
   (progress-controller-options-swap-r1-r2 #x134b)
   (progress-controller-options-enable-trigger-effects #x134c)
+  ;; Mario mod menu strings — added by the Vzero-Jak2 port.  Keep at the
+  ;; end of the enum so we don't shift any existing IDs and break saved
+  ;; text-bank lookups.  Strings live in game/assets/jak2/text/
+  ;; game_custom_text_en-US.json under matching hex keys.
+  (mario-opts-page-title       #x1400)
+  (mario-opts-play-music       #x1401)
+  (mario-opts-music-volume     #x1402)
+  (mario-opts-sfx-volume       #x1403)
+  (mario-opts-render-corpses   #x1404)
+  (mario-opts-clear-corpses    #x1405)
 )
 ;; ---text-id
 

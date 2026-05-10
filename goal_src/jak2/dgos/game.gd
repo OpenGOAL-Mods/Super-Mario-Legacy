@@ -470,4 +470,5 @@
   "mario-menu-h.o" ;; added
   "mario.o" ;; added
   "mario-music.o" ;; added
+  "mario-menu.o" ;; added
  ))

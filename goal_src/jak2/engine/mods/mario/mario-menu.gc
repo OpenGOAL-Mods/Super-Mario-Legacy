@@ -1,0 +1,155 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-menu.gc
+;; name in dgo: mario-menu
+;; dgos: GAME
+
+;; NOTE: no (bundles ...) — Jak 2 build is descriptor-driven.
+
+;; ---------------------------------------------------------------------------
+;; mario-menu — Mario Options sub-page for Jak 2's progress / pause menu.
+;;
+;; Appends a "MARIO OPTIONS" link to the existing Sound Options page.  The
+;; user reaches it via:  pause → SOUND OPTIONS → MARIO OPTIONS.
+;;
+;; We don't touch progress-pc.gc's `set-menu-options` defmethod (which
+;; would require copying ~70 lines of unrelated case dispatch) — instead
+;; we use jak2's `menu-generic-link-option` (via the
+;; `progress-new-generic-link-to-scrolling-page` macro) which targets a
+;; menu-option-list directly without going through state dispatch.
+;; This keeps the integration surgical: we only redefine
+;; `*sound-options-pc*` itself.
+;;
+;; Static menu-option allocs can't reference each other across `define`
+;; boundaries — `:target *mario-options-pc*` won't compile because
+;; *mario-options-pc* isn't a compile-time constant.  So we inline the
+;; entire Mario page inside the link-to-scrolling-page macro call.
+;;
+;; Load order: this file lands at line 473 of dgos/game.gd, well after
+;; progress-static-pc.o (line 367), so our redefinition wins.
+;;
+;; Text strings: enum entries `mario-opts-*` were added to engine/ui/
+;; text-id-h.gc (#x1400..#x1405) with English strings in
+;; game/assets/jak2/text/game_custom_text_en-US.json.
+;; ---------------------------------------------------------------------------
+
+;; Replaces the original *sound-options-pc* (defined in progress-static-
+;; pc.gc:39).  Same four entries (sfx vol / music vol / dialog vol / format
+;; carousel) plus a new MARIO OPTIONS link at the bottom.  Page contents:
+;;   [0] PLAY SM64 MUSIC          (boolean toggle)
+;;   [1] SM64 MUSIC VOLUME        (slider 0..100)
+;;   [2] SM64 SOUNDS VOLUME       (slider 0..100)
+;;   [3] RENDER MARIO CORPSES     (boolean toggle)
+;;   [4] CLEAR ALL MARIO CORPSES  (button — fires pc-sm64-clear-mario-corpse)
+;; All on-confirm lambdas commit *mario-settings* to disk so changes
+;; persist across sessions.  The boolean toggle for music also stops any
+;; currently-playing track when the user turns music off.
+(define *sound-options-pc*
+  (progress-new-generic-scrolling-page (text-id progress-root-sound-options)
+
+    (new 'static 'menu-generic-slider-option
+        :name (text-id progress-sound-sfx-volume)
+        :min-value 0.0
+        :max-value 1.0
+        :step 0.01
+        :show-decimal? #t
+        :get-value-fn (lambda () (-> *pc-settings* memcard-volume-sfx))
+        :on-confirm (lambda ((val float))
+          (set! (-> *pc-settings* memcard-volume-sfx) val)
+          (pc-settings-save)
+          (set! (-> *setting-control* user-default sfx-volume) val)))
+
+    (new 'static 'menu-generic-slider-option
+        :name (text-id progress-sound-music-volume)
+        :min-value 0.0
+        :max-value 1.0
+        :step 0.01
+        :show-decimal? #t
+        :get-value-fn (lambda () (-> *pc-settings* memcard-volume-music))
+        :on-confirm (lambda ((val float))
+          (set! (-> *pc-settings* memcard-volume-music) val)
+          (pc-settings-save)
+          (set! (-> *setting-control* user-default music-volume) val)))
+
+    (new 'static 'menu-generic-slider-option
+        :name (text-id progress-sound-speech-volume)
+        :min-value 0.0
+        :max-value 1.0
+        :step 0.01
+        :show-decimal? #t
+        :get-value-fn (lambda () (-> *pc-settings* memcard-volume-dialog))
+        :on-confirm (lambda ((val float))
+          (set! (-> *pc-settings* memcard-volume-dialog) val)
+          (pc-settings-save)
+          (set! (-> *setting-control* user-default dialog-volume) val)))
+
+    (new 'static 'menu-generic-carousel-option
+        :name (text-id progress-sound-format)
+        :get-max-size-fn (lambda () 3)
+        :get-item-label-fn (lambda ((index int))
+          (case index
+            ((0) (lookup-text! *common-text* (text-id progress-sound-mono) #f))
+            ((1) (lookup-text! *common-text* (text-id progress-sound-stereo) #f))
+            ((2) (lookup-text! *common-text* (text-id progress-sound-surround) #f))))
+        :get-item-index-fn (lambda () (-> *setting-control* user-default stereo-mode))
+        :on-confirm (lambda ((index int) (the-progress progress))
+          (set! (-> *setting-control* user-default stereo-mode) index)))
+
+    ;; Mario Options link — opens an inline scrolling-page subpage when
+    ;; the user clicks it.  Inlined via progress-new-generic-link-to-
+    ;; scrolling-page so the static menu-option-list backing the page
+    ;; gets allocated as part of THIS define and we don't cross
+    ;; define-boundaries.
+    (progress-new-generic-link-to-scrolling-page (text-id mario-opts-page-title)
+
+      ;; [0] PLAY SM64 MUSIC — boolean toggle.
+      (new 'static 'menu-generic-boolean-option
+        :name (text-id mario-opts-play-music)
+        :get-value-fn (lambda () (-> *mario-settings* play-sm64-music?))
+        :on-confirm (lambda ((val symbol))
+          (set! (-> *mario-settings* play-sm64-music?) val)
+          (commit-to-file *mario-settings*)
+          (when (not val)
+            (pc-sm64-stop-music))))
+
+      ;; [1] SM64 MUSIC VOLUME — slider 0..100.
+      (new 'static 'menu-generic-slider-option
+        :name (text-id mario-opts-music-volume)
+        :min-value 0.0
+        :max-value 100.0
+        :step 1.0
+        :show-decimal? #f
+        :get-value-fn (lambda () (-> *mario-settings* sm64-music-volume))
+        :on-confirm (lambda ((val float))
+          (set! (-> *mario-settings* sm64-music-volume) val)
+          (commit-to-file *mario-settings*)))
+
+      ;; [2] SM64 SOUNDS VOLUME — slider 0..100.
+      (new 'static 'menu-generic-slider-option
+        :name (text-id mario-opts-sfx-volume)
+        :min-value 0.0
+        :max-value 100.0
+        :step 1.0
+        :show-decimal? #f
+        :get-value-fn (lambda () (-> *mario-settings* sm64-sfx-volume))
+        :on-confirm (lambda ((val float))
+          (set! (-> *mario-settings* sm64-sfx-volume) val)
+          (commit-to-file *mario-settings*)))
+
+      ;; [3] RENDER MARIO CORPSES — boolean toggle.
+      (new 'static 'menu-generic-boolean-option
+        :name (text-id mario-opts-render-corpses)
+        :get-value-fn (lambda () (-> *mario-settings* render-corpses?))
+        :on-confirm (lambda ((val symbol))
+          (set! (-> *mario-settings* render-corpses?) val)
+          (commit-to-file *mario-settings*)))
+
+      ;; [4] CLEAR ALL MARIO CORPSES — button.  on-confirm clears the
+      ;; corpse list immediately; no GOAL state to persist.
+      (new 'static 'menu-generic-button-option
+        :name (text-id mario-opts-clear-corpses)
+        :on-confirm (lambda ((p progress))
+          (pc-sm64-clear-mario-corpse))))))
+
+(format 0 "[mario] mario-menu.gc loaded — Mario Options injected into Sound Options page~%")

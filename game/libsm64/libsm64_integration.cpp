@@ -2149,14 +2149,19 @@ void LibSM64Manager::load_level_collision(
   // only. Mario acts like an entity, so we need to do the same filter here
   // or he'll trip over invisible slabs that the real player can walk through.
   //
-  // pat-surface layout (see goal_src/jak1/engine/collide/pat-h.gc):
-  //   bit 0     = noentity      ← skip for player/Mario
-  //   bit 1     = nocamera
-  //   bit 2     = noedge
-  //   bits 3-5  = mode
-  //   bits 6-11 = material (6 bits, values from the pat-material enum)
-  //   bit 12    = nolineofsight
-  //   bits 14-19 = event (6 bits, values from the pat-event enum)
+  // **PAT layout differs between jak 1 and jak 2.**  Jak 2 inserts 4 extra
+  // flag bits (nogrind / nojak / noboard / nopilot) into the low byte,
+  // shifting mode / material / event up by 4 bits.  See goal_src/jak{1,2}/
+  // engine/collide/pat-h.gc for the canonical defs.
+  //
+  //                              jak1            jak2
+  //   skip / flags low byte      bits 0-2 (3)    bits 0-6 (7)
+  //   mode                       bits 3-5  (3)   bits 7-9   (3)
+  //   material                   bits 6-11 (6)   bits 10-15 (6)
+  //   nolineofsight / camera     bit 12          bit 16
+  //   event                      bits 14-19 (6)  bits 18-23 (6)
+  //
+  // noentity at bit 0 is the same on both.
   //
   // Relevant pat-material values for hot surfaces:
   //   11 = hotcoals   (fire canyon warm rock, lavatube ledges)
@@ -2174,13 +2179,30 @@ void LibSM64Manager::load_level_collision(
   // The per-triangle PAT lives on every CollisionMesh::Vertex (all 3 verts
   // of a tri share the same value) — we check vertex 0 per tri.
   constexpr uint32_t PAT_NOENTITY_BIT = 0x1;
-  constexpr uint32_t PAT_MATERIAL_SHIFT = 6;
   constexpr uint32_t PAT_MATERIAL_MASK = 0x3F;
   constexpr uint32_t PAT_MAT_HOTCOALS = 11;
   constexpr uint32_t PAT_MAT_LAVA = 12;
-  constexpr uint32_t PAT_EVENT_SHIFT = 14;
   constexpr uint32_t PAT_EVENT_MASK = 0x3F;
   constexpr uint32_t PAT_EVT_ENDLESSFALL = 2;
+  constexpr uint32_t PAT_MODE_MASK = 0x7;
+  constexpr uint32_t PAT_MODE_GROUND = 0;
+  constexpr uint32_t PAT_MODE_WALL = 1;
+  constexpr uint32_t PAT_MODE_OBSTACLE = 2;
+  // Per-version shifts.  This is the actual jak1 → jak2 fix — feeding the
+  // wrong shifts on jak 2 makes the event field read junk bits, which
+  // marks random tris as endlessfall and Mario falls through them.
+  uint32_t PAT_MODE_SHIFT;
+  uint32_t PAT_MATERIAL_SHIFT;
+  uint32_t PAT_EVENT_SHIFT;
+  if (g_game_version == GameVersion::Jak2) {
+    PAT_MODE_SHIFT = 7;
+    PAT_MATERIAL_SHIFT = 10;
+    PAT_EVENT_SHIFT = 18;
+  } else {
+    PAT_MODE_SHIFT = 3;
+    PAT_MATERIAL_SHIFT = 6;
+    PAT_EVENT_SHIFT = 14;
+  }
 
   // SM64 surface type that triggers the classic "burn your butt" launch —
   // when Mario touches a floor with this type, his butt catches fire and
@@ -2198,11 +2220,9 @@ void LibSM64Manager::load_level_collision(
   constexpr int16_t SURFACE_NOT_SLIPPERY  = 0x0015;
   constexpr int16_t TERRAIN_STONE_TYPE    = 0x0001;  // default terrain
   constexpr int16_t TERRAIN_SLIDE_TYPE    = 0x0006;  // slick (used on walls)
-  constexpr uint32_t PAT_MODE_SHIFT       = 3;
-  constexpr uint32_t PAT_MODE_MASK        = 0x7;
-  constexpr uint32_t PAT_MODE_GROUND      = 0;
-  constexpr uint32_t PAT_MODE_WALL        = 1;
-  constexpr uint32_t PAT_MODE_OBSTACLE    = 2;
+  // PAT_MODE_SHIFT, PAT_MODE_MASK, PAT_MODE_GROUND/WALL/OBSTACLE are
+  // declared above next to PAT_MATERIAL_SHIFT etc — version-aware on
+  // jak 2.  Don't redeclare here.
 
   size_t num_tris = vertices.size() / 3;
   std::vector<SM64Surface> surfaces;

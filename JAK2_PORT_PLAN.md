@@ -237,70 +237,56 @@ tomb/ruins/consite/dig → underground, hideout/hiphog → spooky,
 forest → bob-omb, intro/demo → file-select, outro → credits.
 Every entry has a one-line rationale.
 
-## What still needs porting (depends on runtime testing)
+## What still needs runtime verification
 
-These were intentionally not done overnight because they need
-visual / boot verification, which isn't possible without extracted
-Jak 2 iso assets.
+These are implemented + boot-test green, but need actual gameplay
+to verify they behave correctly:
 
-### Watcher process (sm64-mario-col)
-The Jak 1 file has a long `defbehavior sm64-mario-col-init` (~lines
-600–1300) plus `sm64-mario-col-start` / `-stop` driver functions.
-The Jak 2 port needs:
-- `*target*` accessors that match jak2's `target` type (in
-  `goal_src/jak2/engine/target/target-h.gc:123`).  `(-> *target*
-  control trans)` works the same way (control is overlaid at
-  root), so the position read pattern transfers directly.
-- State name checks updated: jak2 only has `target-title` (not
-  jak1's `target-title-play` / `target-title-wait` split).
-- `*game-info*` → `*game-info*` (same global name in jak2, but
-  field layout changed — jak2 has `game-info-jak2` deftype with
-  different fields than jak1 `game-info`).
-- Yakow grab feature is jak1-only; gate out via
-  `(if (= *game-version* 'jak1) ...)`.
+- Auto-spawn: does Mario appear at Jak when you start a save?  The
+  watcher polls `pc-sm64-spawn-mario-at-jak` until it returns 1, but
+  whether Jak's first-frame position is sensible for Mario is unverified.
+- Position sync: jak 2 process / process-drawable offsets in
+  `sm64_target_offsets()` were derived by counting fields in
+  `gkernel-h.gc` + `game-h.gc`.  If the offsets are off, Mario won't
+  follow Jak correctly (or libsm64 reads garbage and crashes).  First
+  thing to check on a real boot.
+- Death cycle: does the `'attack-invinc` send-event with mode
+  `'endlessfall` actually kill Jak?  Jak 2's attack-info system has the
+  same shape as jak 1's but particular handlers may behave differently.
+- Corpse cycle: does `pc-sm64-update-last-mario-corpse` rolling-update
+  land on Mario's death-anim final pose?  Timing-sensitive — the
+  90-frame post-respawn delay was lifted from jak 1 verbatim.
+- Mario Options page UI: pause menu integration compiles and the link
+  appears, but actually opening it + sliders behaving may need polish.
+- Music gating: title-cinematic mute uses state-name = `'target-title`,
+  which is jak 2's only title state.  Jak 1's `target-title-play` /
+  `target-title-wait` split doesn't exist here, so timing of "music
+  starts at PRESS START prompt" may be off.
 
-### mario-music.gc
-The level→music map has 25 entries hardcoded for jak1 levels
-(village1, beach, jungle, …).  Jak 2 has a totally different set
-(see `goal_src/jak2/levels/`): atoll, castle, city, consite, dig,
-drill, forest, fortress, gungame, hideout, hiphog, intro, mountain,
-nest, outro, palace, ruins, sewer, stadium, strip, test-zone, title,
-tomb, under.  Map mood-by-mood:
-- city → 'inside-castle (hub feel)
-- forest → 'bob-omb
-- water levels (atoll, sewer, under) → 'water
-- volcano / hot levels → 'hot
-- spooky / underground → 'spooky / 'underground
-- snow → 'snow (if any snow level exists)
-- title → 'title
+## Items that won't be ported
 
-The progress-screen file-select detection needs a different
-approach for jak2 — jak2's `progress` type uses `current` /
-`next` symbol fields rather than an enum-driven `display-state`.
-Reasonable first cut: skip file-select detection entirely on
-jak2 and just play the level track.
-
-### mario-menu.gc
-Hooks the pause menu and sound-options.  Jak 2 has `progress`
-not `progress2` per the field layout above.  Menu integration
-points are different — needs scoping with a fresh pass through
-`goal_src/jak2/pc/progress/progress-pc.gc`.
-
-### Yakow grab + crab-test + ROM-required dialog
-Jak-1-only features.  Yakow / lurkercrab actor types don't
-exist in jak 2; gate the entire path off via game-version check.
-The ROM-required dialog needs porting to jak2's progress menu
-flow — currently fires from `target-title-play` :code in jak1.
-
-### libsm64_integration.cpp degating
-Specific lines that need `g_game_version`-aware branching:
-- `jak1::intern_from_c` calls (lines 2411, 2423, 2463, 2481,
-  2542, 2556, 2579, 3314) — should resolve through a
-  `version_intern_from_c` helper.
-- Type-specific layouts (target, game-info, setting-control,
-  pc-settings) — most read paths gate on
-  `g_game_version == GameVersion::Jak1` already; need parallel
-  jak 2 readers.
+- Yakow grab + crab-test feature (`update_yakow_grab` in libsm64_
+  integration.cpp).  `yakow` / `lurkercrab` actor types don't exist
+  in jak 2.  The C++ side gates itself out on `g_game_version != Jak1`.
+- target-tube / target-ice features (`update_target_tube`,
+  `update_target_ice`).  Jak 2 has no `target-tube` / `target-ice`
+  state families.  Gated out on the C++ side too.
+- Glue states (launcher / warp / continue) — jak 2 has different
+  state-machine entries; `update_target_glue_states` bails on
+  non-Jak1 versions.
+- ROM-required dialog at boot — currently jak 1's mario.gc fires
+  this from `target-title-play` :code; jak 2's progress menu flow
+  is different and would need its own port.  In the meantime the
+  C++ ROM picker still works (gk auto-detects ROM from
+  `%APPDATA%/OpenGOAL/mario/baserom.us.z64`).
+- HUD override (Mario's wedges instead of Jak's HP).  Jak 2's
+  hud-health type only has a `draw` method, not `hud-update` — the
+  jak 1 method-replacement pattern doesn't transfer one-line.
+- Attack tracker / sm64-spawn-attack-tracker.  Mario punching →
+  damage to nearby enemies needs jak2's attack-info system mapping
+  (touch-tracker actor + 'attack 'punch / 'flop event payloads).
+  Defer until enemy attack-info is verified working in jak 2 mod
+  contexts.
 
 ## What did happen overnight (commits on Vzero-Jak2)
 

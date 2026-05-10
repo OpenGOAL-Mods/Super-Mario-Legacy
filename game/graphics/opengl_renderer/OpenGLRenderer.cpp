@@ -1049,6 +1049,18 @@ void OpenGLRenderer::tick_mario_sm64() {
     static int diag_target_missing = 0;
     static int diag_create_failed = 0;
     static int diag_attempts = 0;
+    // Skip auto-spawn while Jak is in his death animation.  His control
+    // trans is unstable during that window (continue-teleport pulls him
+    // around) and re-spawning Mario at those coords just kicks off
+    // another death cycle.  The watcher's death pipeline + C++
+    // mgr.respawn_pending() take care of bringing Mario back the moment
+    // Jak respawns out of target-death, so this gate doesn't lose any
+    // legitimate spawn windows — see the wedges>0 + target_dying gate
+    // on sync_jak_to_mario lower in this same function for the matching
+    // "don't drag Jak around during his death anim" half.
+    if (mgr.target_dying) {
+      return;
+    }
     // During the save-load / death-chain respawn window, skip the
     // cooldown entirely so we retry every frame — the cooldown is
     // meant for "maybe Jak hasn't been created yet" startup polling,
@@ -1256,7 +1268,21 @@ void OpenGLRenderer::tick_mario_sm64() {
         on_sunken_elev_up = true;
       }
     }
-    if (wedges > 0 && !on_sunken_elev_up) {
+    // Gate the sync on `!target_dying` too: when Jak's in his death
+    // animation, his control trans is being driven by the death state
+    // machine (continue-point teleport, etc.).  Letting follow-mario
+    // sync overwrite that trans yanks Jak back to wherever Mario was
+    // when he died, which on jak 2 was looping Jak into the void
+    // forever (Mario at no-floor coords → Jak dragged there → Jak's
+    // endlessfall fires → his death anim moves him → sync drags him
+    // back → repeat).  jak 1 didn't hit this loop in practice because
+    // its `*sm64-jak-dying*` is narrowly scoped to sharkey/dark-eco-
+    // pool deaths; jak 2's flag covers any 'target-death state, so the
+    // loop fires on every normal death and we need this gate.  Once
+    // Jak respawns and exits target-death, target_dying clears and
+    // the sync resumes — Mario auto-respawn picks up at Jak's new
+    // continue position, normal play resumes.
+    if (wedges > 0 && !on_sunken_elev_up && !mgr.target_dying) {
       mgr.sync_jak_to_mario(g_ee_main_mem, 0);
     }
   }

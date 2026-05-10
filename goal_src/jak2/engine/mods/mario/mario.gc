@@ -449,11 +449,25 @@
         (set! *sm64-jak2-auto-spawned* #f))
 
       ;; ---- Mario death → kill Jak, capture corpse, wait for respawn ----
-      (let ((dead (< (-> *sm64-mario-health* x) 0.5)))
+      (let* ((dead (< (-> *sm64-mario-health* x) 0.5))
+             ;; Don't send the kill-Jak event if Jak is ALREADY dying.
+             ;; That happens during the respawn loop: Mario falls into a
+             ;; pit, dies, sends 'endlessfall → Jak enters target-death,
+             ;; auto-respawn fires Mario at Jak's new continue position,
+             ;; that position has no floor either (or Mario's still
+             ;; mid-falling-into-pit-physics), Mario dies again — but
+             ;; Jak's still in target-death from the FIRST send-event.
+             ;; Without this gate the second send-event re-arms the
+             ;; death state, the death-timer never sees Jak respawn,
+             ;; and Jak gets infinitely yanked.  Only fire the kill-Jak
+             ;; chain when Jak is alive AND not already dying.
+             (jak-alive (and *target*
+                             (-> *target* state)
+                             (!= (-> *target* state name) 'target-death))))
         ;; Rising edge: Mario just died.  Capture a corpse, slam Jak
         ;; with an attack-invinc / endlessfall send-event (same payload
         ;; as jak 1 mario.gc), and start the respawn timer.
-        (when (and dead (not (-> self mario-dead?)) *target*)
+        (when (and dead (not (-> self mario-dead?)) jak-alive)
           (format #t "[sm64] Mario died — killing Jak (mode 'endlessfall)~%")
           (pc-sm64-capture-mario-corpse)
           (send-event *target* 'attack-invinc #f

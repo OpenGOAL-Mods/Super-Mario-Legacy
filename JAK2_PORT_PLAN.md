@@ -237,6 +237,45 @@ tomb/ruins/consite/dig → underground, hideout/hiphog → spooky,
 forest → bob-omb, intro/demo → file-select, outro → credits.
 Every entry has a one-line rationale.
 
+### Camera-relative stick rotation
+The legacy MarioInputState.cam_look_x / cam_look_z were always
+the struct defaults (0, 1) — Mario's stick was always world-Z
+aligned regardless of where the camera was looking.  Wires the
+missing piece end-to-end:
+
+- C++: `m_input_cam_look_x` / `m_input_cam_look_z` atomics +
+  `set_camera_look_from_goal(cx, cz)` setter that normalises and
+  falls back to (0, 1) on degenerate input.
+- New bridge: `pc-sm64-set-camera-look` (registered in both
+  jak1/kmachine.cpp and jak2/kmachine.cpp).
+- `read_mario_input_from_goal` now copies the cam atomics into
+  MarioInputState so Mario's input pipeline picks them up.
+- Watcher reads `(-> *math-camera* inv-camera-rot vector 2)` —
+  the camera's +Z axis in world coords (cam-interface.gc:11
+  calls this the "in front of camera" vector) — and pushes its
+  x/z components every frame.
+
+### What's verified working end-to-end on jak 2
+
+The `scripts/boot-test-jak2.sh` 12-indicator gauntlet now
+covers:
+
+  Spawning + watcher process (file-load)
+  Rendering pipeline (m_mario_renderer is wired regardless of
+    version — the only requirement is mgr.has_mario())
+  Movement input (stick + buttons via pc-sm64-set-input)
+  Camera-relative input (THIS PASS)
+  Static level collision (`Stored 20438+ collision surfaces`
+    fires from OpenGLRenderer when level set changes — engine-
+    level mechanism, version-agnostic)
+  GOAL files load + run their top-level init
+  Settings persistence (file write at first boot, file read
+    on subsequent)
+  Pause-menu integration (Mario Options page link in Sound
+    Options)
+  Debug-menu integration (Mario submenu with Sound Previewer,
+    spawn/teleport/heal/damage/stomp/hover/star-dance, colors)
+
 ## What still needs runtime verification
 
 These are implemented + boot-test green, but need actual gameplay

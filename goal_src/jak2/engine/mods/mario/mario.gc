@@ -253,13 +253,12 @@
 ;; Bridge globals — C++ libsm64 writes/reads these via EE memory each tick.
 ;; All data is packed into vectors (raw floats) to avoid fixnum/tag encoding.
 ;;
-;; **Jak 2 caveat**: libsm64_integration.cpp currently looks these up via
-;; `jak1::intern_from_c(...)`.  In a Jak 2 build that resolves against the
-;; Jak 1 symbol table which isn't loaded, so the C++ side silently no-ops
-;; on read.  Defining them here is still useful — it documents the wire
-;; format and lets later GOAL ports compile against these symbols even
-;; before the C++ side is degated.  See JAK2_PORT_PLAN.md ("Specific Jak
-;; 1-isms to gate" section) for the cleanup needed on the C++ side.
+;; libsm64_integration.cpp now reads/writes these via the version-aware
+;; `sm64_get_symbol_value` / `sm64_set_symbol_value` helpers (see commit
+;; 910727dd7), so the same symbols work on both jak 1 and jak 2.  The
+;; vector layouts below are the canonical wire format — keep them in
+;; sync with the C++ readers in libsm64_integration.cpp's write_mario_
+;; bridge_data / read_target_flags.
 ;; ---------------------------------------------------------------------------
 
 ;; C++ writes: x,y,z = Mario world position (Jak units), w = face angle (GOAL degrees).
@@ -325,29 +324,36 @@
           (-> *mario-settings* sm64-music-volume)))
 
 ;; ---------------------------------------------------------------------------
-;; sm64-mario-col — minimal Jak 2 watcher process.
+;; sm64-mario-col — Jak 2 watcher process.
 ;;
 ;; Spawned at file-load time and ticks every frame.  Drives:
-;;   1. Per-frame settings push to libsm64 (color / corpse-render)
-;;   2. update-mario-music! tick (level-aware track + volume)
-;;   3. Pad bridge (left stick + A/B/Z buttons → libsm64 input)
-;;   4. *sm64-target-flags* w = (movie?) flag so the C++ side knows
-;;      when to skip pause-gating during cinematics
-;;   5. *sm64-jak-dying* always #f for now — Jak 2 lacks state-flags
-;;      `dying` so we can't detect Jak's death the same way.  C++ will
-;;      treat Mario as always-visible until that's wired up properly.
+;;   1. Auto-spawn Mario on first frame *target* is real (debug-menu
+;;      Spawn at Jak button pressed manually = no longer required).
+;;   2. Per-frame settings push to libsm64 (color / corpse-render).
+;;   3. update-mario-music! tick (level-aware track + volume sync).
+;;   4. Pad bridge (left stick + A/B/Z buttons → libsm64 input).
+;;   5. *sm64-target-flags* writes:
+;;        x = 1.0 if target state name is 'target-grab
+;;        w = 1.0 if (movie?) — Mario stays put during cinematics
+;;   6. *sm64-jak-dying* = #t when target state name is 'target-death
+;;      so the C++ Mario-visibility hide kicks in for Jak's death anim.
+;;   7. Death sync — when Mario's wedges drop to 0, send-event Jak
+;;      'attack-invinc with mode 'endlessfall (jak2 attack-info syntax
+;;      requires explicit (id (new-attack-id))).  Capture/update/
+;;      finalize a corpse for the death, then delete Mario after Jak
+;;      respawns + 90 frames so auto-spawn can re-create him at the
+;;      new location.
 ;;
-;; Intentionally NOT ported from jak1 yet (each line item needs jak2-
-;; specific verification — see JAK2_PORT_PLAN.md):
-;;   - Mario death → kill Jak (uses *target* attack-info / fact health)
-;;   - Corpse capture / update / finalize on death
-;;   - state-flags grabbed / periscope / clone-anim writes (different
-;;     state-flags enum in jak2)
-;;   - Health sync / attack tracker / knockback bridging
+;; Mask: clears pause/menu/progress bits so the loop keeps ticking
+;; through the start menu, debug menu, progress screen — without
+;; this, music orchestration freezes the moment the user pauses.
 ;;
-;; The process clears pause/menu/progress mask bits (same trick as
-;; Jak 1) so it keeps ticking when the start menu is up — without
-;; this, music orchestration would freeze whenever the user paused.
+;; NOT yet ported from jak1 (need runtime verification first):
+;;   - state-flags periscope / clone-anim writes (no obvious jak2
+;;     state-machine equivalents)
+;;   - HUD override (display Mario's wedges instead of Jak's HP)
+;;   - sm64-spawn-attack-tracker — Jak takes damage when Mario punches
+;;     (jak1 hooks via target-handler.gc; jak2 will need similar)
 ;; ---------------------------------------------------------------------------
 
 (deftype sm64-mario-col (process)
@@ -374,11 +380,25 @@
       ;; the user has to manually click the debug-menu "Spawn at Jak"
       ;; button every session — having a default-on auto-spawn for the
       ;; jak 2 mod is friendlier.  Bridge returns 1 on success, 0 on
-      ;; no-op (libsm64 not ready / Mario already alive).
+      ;; no-op (libsm64 not ready / *target* not bound / Mario already
+      ;; alive).  Auto-spawned flag stays sticky so we don't re-spawn
+      ;; every frame Mario is alive — but we DO clear it on *sm64-mario-
+      ;; health* x = 0 (Mario got deleted, e.g. via debug menu or our
+      ;; own death pipeline), letting the next *target* tick re-spawn.
       (when (and (not *sm64-jak2-auto-spawned*) *target*)
         (when (= (pc-sm64-spawn-mario-at-jak) 1)
           (set! *sm64-jak2-auto-spawned* #t)
           (format #t "[sm64] Auto-spawned Mario at Jak's position~%")))
+      ;; Clear the flag if Mario got deleted out from under us — the
+      ;; debug menu Delete Mario button calls pc-sm64-delete-mario which
+      ;; sets the C++ side's m_mario_id = -1, and *sm64-mario-health* x
+      ;; goes to 0.0.  We use a simple "health was non-zero last tick,
+      ;; now zero, AND we previously auto-spawned" detector to avoid
+      ;; flapping during the initial pre-spawn window.
+      (when (and *sm64-jak2-auto-spawned*
+                 (= (-> *sm64-mario-health* x) 0.0)
+                 (not (-> self mario-dead?)))
+        (set! *sm64-jak2-auto-spawned* #f))
 
       ;; ---- Mario death → kill Jak, capture corpse, wait for respawn ----
       (let ((dead (< (-> *sm64-mario-health* x) 0.5)))

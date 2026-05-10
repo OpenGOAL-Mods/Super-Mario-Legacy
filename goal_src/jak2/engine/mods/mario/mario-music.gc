@@ -32,32 +32,81 @@
 ;; ---------------------------------------------------------------------------
 ;; mario-music-for-level
 ;;
-;; Map the current jak 2 level symbol to an SM64 track symbol.  Most
-;; entries default to 'bob-omb pending mood-by-mood verification.
-;; Refer to jak1/mario-music.gc for the original SM64 track palette.
+;; Map the current jak 2 level symbol to an SM64 track symbol.  Mood-
+;; matched best-guess based on each level's setting / vibe — every entry
+;; below has a one-line rationale.  Easy to revise per level: change the
+;; case RHS.
+;;
+;; SM64 track palette (see sm64-music-id in mario.gc for the full list):
+;;   'title        — "Inside the Castle Walls" intro chime
+;;   'bob-omb      — Bob-omb Battlefield (sunny outdoor)
+;;   'inside-castle — Castle hub theme (regal, indoors)
+;;   'water        — Dire, Dire Docks (underwater ambient)
+;;   'hot          — Lethal Lava Land (volcanic)
+;;   'snow         — Cool, Cool Mountain (snowy)
+;;   'slide        — Slide levels (fast tempo)
+;;   'spooky       — Big Boo's Haunt
+;;   'underground  — Hazy Maze Cave (cave/cavern)
+;;   'metal-cap    — Metal Mario powerup theme
+;;   'koopa-road   — Bowser's stages
+;;   'merry-go-round — Eerie organ
+;;   'race         — Track 17 (Koopa race)
+;;   'boss         — Mini-boss fight
+;;   'final-bowser — Final Bowser
+;;   'credits      — End credits
+;;   'file-select  — Save-file picker
+;;   'star-spawn   — Star appears jingle
 ;; ---------------------------------------------------------------------------
 (defun mario-music-for-level ((lev symbol))
-  "Return the sm64-music symbol that should play in the given Jak 2 level.
-   Default: 'bob-omb everywhere — fill in per level as desired."
+  "Return the sm64-music symbol that should play in the given Jak 2 level."
   (case lev
-    ;; Story / menu screens
-    (('title)        'title)
-    (('intro 'demo)  'bob-omb)
-    (('outro)        'credits)
-    ;; Hub world
-    (('city)         'inside-castle)
-    ;; Water-themed
-    (('atoll 'sewer 'under) 'water)
-    ;; Stronghold / palace
-    (('palace 'fortress 'stadium) 'inside-castle)
-    ;; Underground / spooky
-    (('tomb 'ruins 'consite) 'underground)
-    ;; Outdoor / mountain / forest
-    (('forest 'mountain) 'bob-omb)
-    ;; Mech / boss-y
-    (('nest)         'boss)
-    ;; Default — fill in the rest as you discover what fits
-    (else 'bob-omb)))
+    ;; ---- Story / menu / cutscene screens -----------------------------------
+    (('title)         'title)        ;; Title screen — mirrors SM64's title
+    (('intro 'demo)   'file-select)  ;; Intro / demo loops — SM64 file-select
+                                     ;; gives a "menu-y" feel that matches
+    (('outro)         'credits)      ;; End credits
+
+    ;; ---- Hub: Haven City -----------------------------------------------
+    (('city)          'inside-castle) ;; Central hub — castle theme fits a
+                                      ;; "main town" with NPCs, missions, etc.
+
+    ;; ---- Water levels --------------------------------------------------
+    (('atoll)         'water)         ;; Pumping Station - mostly underwater
+    (('sewer)         'water)         ;; Sewer - canals + underwater tubes
+    (('under)         'water)         ;; Underport - submerged Mar artifacts
+
+    ;; ---- Indoor strongholds / castles -----------------------------------
+    (('palace)        'inside-castle) ;; Baron's Palace — regal interior
+    (('castle)        'inside-castle) ;; Mar's Tomb / Mountain Temple
+    (('fortress)      'koopa-road)    ;; Krimzon Guard fortress — militaristic,
+                                      ;; "march" mood matches Bowser stages
+
+    ;; ---- Underground / cave / spooky ------------------------------------
+    (('tomb)          'underground)   ;; Mar's Tomb proper — cavernous
+    (('ruins)         'underground)   ;; Dead Town ruins — eerie ambient
+    (('consite)       'underground)   ;; Construction Site - industrial cave
+    (('dig)           'underground)   ;; Dig site — literal cave
+    (('hideout)       'spooky)        ;; Underground Hideout — secret base feel
+    (('hiphog)        'spooky)        ;; Hip-Hog Saloon — dim, smoky bar
+
+    ;; ---- High places ---------------------------------------------------
+    (('drill)         'metal-cap)     ;; Drill Platform — flying metal
+    (('mountain)      'snow)          ;; Mountain Temple — chilly heights
+    (('forest)        'bob-omb)       ;; Haven Forest — sunny outdoor
+
+    ;; ---- Combat / racing arenas ----------------------------------------
+    (('stadium)       'race)          ;; Stadium racetrack
+    (('strip)         'race)          ;; Strip Mine — vehicular combat
+    (('gungame)       'race)          ;; Gun-game course — competitive
+
+    ;; ---- Boss arenas ---------------------------------------------------
+    (('nest)          'final-bowser)  ;; Metal Head Nest - last boss
+
+    ;; ---- Mod test level ------------------------------------------------
+    (('test-zone)     'bob-omb)
+
+    ;; ---- Default catch-all ---------------------------------------------
+    (else             'bob-omb)))
 
 ;; True for screens where Jak's master-mode is intentionally NOT 'game
 ;; (so a normal sm64-music call would get pause-gated).  In jak2, only

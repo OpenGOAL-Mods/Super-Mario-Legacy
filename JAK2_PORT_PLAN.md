@@ -200,6 +200,43 @@ table, calls create_mario.  Returns 1 on success, 0 on no-op
 The watcher's auto-spawn lambda polls this every frame until it
 returns 1.
 
+### Mario Options pause-menu page
+`mario-menu.gc` injects a "MARIO OPTIONS" link at the bottom of
+the existing Sound Options page (pause → SOUND OPTIONS → MARIO
+OPTIONS).  Avoids touching `set-menu-options`' state dispatch by
+using `progress-new-generic-link-to-scrolling-page`, which embeds
+the entire mario page inline as the link's target.  Page exposes:
+play-sm64-music? toggle, music volume slider, sfx volume slider,
+render-corpses? toggle, clear-corpses button.  All on-confirm
+lambdas commit *mario-settings* to disk.
+
+Text-ids `mario-opts-page-title` etc. (#x1400..#x1405) added at
+the END of `engine/ui/text-id-h.gc`'s enum (so existing IDs stay
+stable) with English strings in `assets/jak2/text/
+game_custom_text_en-US.json`.
+
+### Mario debug menu (debug-tier)
+`mario-debug-menu.gc` (declare-file debug) appends a "Mario"
+submenu to `*debug-menu-context*` with:
+  - Sound Previewer (cycles through *sm64-sound-preview-list*)
+  - Spawn at Jak / Delete / Heal / Damage actions
+  - Colors submenu (10 presets, persisted via mario-set-color!)
+
+Differences from jak1: print-game-text's 5th arg is `bucket-id` in
+jak2 (jak1 was `int` line-height), passes
+`(bucket-id debug-no-zbuf1)` so previewer text draws over
+everything.
+
+### Per-level music mapping
+`mario-music-for-level` now has a fleshed-out per-level mood map
+covering all 25 jak 2 levels: city → inside-castle (hub),
+fortress → koopa-road (military march), nest → final-bowser,
+mountain → snow, drill → metal-cap, stadium/strip/gungame →
+race, atoll/sewer/under → water, palace/castle → inside-castle,
+tomb/ruins/consite/dig → underground, hideout/hiphog → spooky,
+forest → bob-omb, intro/demo → file-select, outro → credits.
+Every entry has a one-line rationale.
+
 ## What still needs porting (depends on runtime testing)
 
 These were intentionally not done overnight because they need

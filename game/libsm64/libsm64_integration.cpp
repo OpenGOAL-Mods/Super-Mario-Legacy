@@ -3457,22 +3457,40 @@ u64 pc_sm64_log_mario_state() {
 
 u64 pc_sm64_spawn_mario_at_jak() {
   auto& mgr = LibSM64Manager::instance();
+  // Throttled bail diagnostics — when the user calls this from the REPL or
+  // the debug menu and gets back 0, a once-per-second diag log on the gk
+  // side tells them why.  Counters reset on success.
+  static int diag_uninit = 0;
+  static int diag_has_mario = 0;
+  static int diag_no_target = 0;
   if (!mgr.is_initialized() || !g_ee_main_mem) {
-    // debug-level: GOAL-side polls this every frame until success, so a
-    // libsm64-not-ready bail isn't a real warning.
+    diag_uninit++;
+    if (diag_uninit == 1 || diag_uninit % 60 == 0) {
+      lg::info("[sm64] spawn-at-jak bail: libsm64 not initialised (or no ee_mem) "
+               "— total {}", diag_uninit);
+    }
     return 0;
   }
   if (mgr.has_mario()) {
-    // Same — silent no-op when Mario already exists.  The id+log path is
-    // useful from the C++ debug GUI button but noisy for GOAL polling.
+    diag_has_mario++;
+    if (diag_has_mario == 1 || diag_has_mario % 60 == 0) {
+      lg::info("[sm64] spawn-at-jak bail: Mario already alive (id={}, total {})",
+               mgr.get_mario_id(), diag_has_mario);
+    }
     return 0;
   }
   math::Vector3f jak_pos;
   if (!mgr.read_target_transform(g_ee_main_mem, &jak_pos, nullptr)) {
-    // *target* binding not yet pointing at a real process — GOAL polls
-    // this every frame until it stabilises, so don't spam warn-level.
+    diag_no_target++;
+    if (diag_no_target == 1 || diag_no_target % 60 == 0) {
+      lg::info("[sm64] spawn-at-jak bail: read_target_transform failed "
+               "(*target* not bound or trans unreachable) — total {}",
+               diag_no_target);
+    }
     return 0;
   }
+  // Reset bail counters on the happy path so a future failure starts fresh.
+  diag_uninit = diag_has_mario = diag_no_target = 0;
   // create_mario takes Jak units directly — it does the JAK_TO_SM64_SCALE
   // conversion internally.
   int32_t id = mgr.create_mario(jak_pos.x(), jak_pos.y(), jak_pos.z());

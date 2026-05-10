@@ -420,6 +420,23 @@
         (set! *sm64-jak2-auto-spawned* #t)
         (format #t "[sm64] Mario alive — wedges=~F (auto-spawn confirmed)~%"
                 (-> *sm64-mario-health* x)))
+
+      ;; Periodic Mario-state log when force-input is active.  Lets a
+      ;; remote observer (i.e. the boot log on a session without GUI
+      ;; access) see Mario's pos / action changing each second, which
+      ;; proves both auto-spawn fired AND force-input is moving him.
+      ;; Throttled to once every 60 frames (~ 1 sec at 60fps); silent
+      ;; when force-input is off so live play doesn't spam.  Only fires
+      ;; once Mario has health (so we don't print pre-spawn zero state).
+      (when (and *sm64-force-input*
+                 (> (-> *sm64-mario-health* x) 0.0)
+                 (zero? (mod (current-time) 300)))  ;; 300 ticks = 1 sec
+        (format #t "[sm64] tick: pos=(~F ~F ~F) wedges=~F force-input=~A~%"
+                (-> *sm64-mario-pos* x)
+                (-> *sm64-mario-pos* y)
+                (-> *sm64-mario-pos* z)
+                (-> *sm64-mario-health* x)
+                *sm64-force-input*))
       ;; Clear the flag if Mario got deleted out from under us — the
       ;; debug menu Delete Mario button calls pc-sm64-delete-mario which
       ;; sets the C++ side's m_mario_id = -1, and *sm64-mario-health* x

@@ -63,6 +63,10 @@
 ;; Returns 1 if Mario was spawned, 0 if libsm64 isn't ready / *target*
 ;; isn't bound / Mario already exists.
 (define-extern pc-sm64-spawn-mario-at-jak (function int))
+;; Push camera forward vector (world-XZ projection) so Mario's stick rotates
+;; with the camera.  Args are GOAL floats packed into u32 by the C++ bridge.
+;; Pass (0, 1) to fall back to world-Z forward.
+(define-extern pc-sm64-set-camera-look (function float float none))
 ;; pc-sm64-set-input takes float-bit-packed sticks (-1.0..1.0) + button mask
 ;; — the C++ bridge reinterprets the u32 args as floats.  Declaring as int
 ;; would cause GOAL to truncate any float passed to it.
@@ -478,6 +482,18 @@
         (set! (-> *sm64-target-flags* z) 0.0)  ;; clone-anim — no jak2 equiv
         (set! (-> *sm64-target-flags* w) (if (movie?) 1.0 0.0))
         (set! *sm64-jak-dying* (if jak-dying #t #f)))
+
+      ;; Camera bridge — push the camera's forward vector (world-XZ plane)
+      ;; so Mario's analog stick rotates with the camera.  Without this,
+      ;; pressing stick-up always sends Mario along world +Z regardless of
+      ;; where the player is looking, which is jarring once the camera spins
+      ;; around Mario.  inv-camera-rot's row-2 is the camera's +Z axis in
+      ;; world coords (cam-interface.gc:11 calls it the "in front of camera"
+      ;; direction).  Drop the y component so we project to the horizontal
+      ;; plane — libsm64 wants a 2D vector.
+      (when *math-camera*
+        (let ((fwd (-> *math-camera* inv-camera-rot vector 2)))
+          (pc-sm64-set-camera-look (-> fwd x) (-> fwd z))))
 
       ;; Pad bridge — push left stick + A/B/Z to libsm64.  Buttons via
       ;; cpad-hold? so they pick up the user's rebindings.

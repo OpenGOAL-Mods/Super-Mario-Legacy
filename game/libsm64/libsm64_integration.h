@@ -280,6 +280,12 @@ u64 pc_sm64_shove_mario(u32 x, u32 y, u32 z);
 // "summon Mario" entry point for both the C++ debug GUI button and a
 // GOAL-callable bridge — same logic in both, no duplication.
 u64 pc_sm64_spawn_mario_at_jak();
+// Push the camera's forward vector in world XZ plane to libsm64 so
+// Mario's analog stick rotates with the camera.  Args are GOAL floats
+// packed into u32 (same ABI as pc-sm64-teleport-mario).  Caller can pass
+// a (0, 0) "no camera" sentinel — set_camera_look_from_goal will fall
+// back to (0, 1) world-Z forward.
+u64 pc_sm64_set_camera_look(u32 cam_x_bits, u32 cam_z_bits);
 
 class LibSM64Manager {
  public:
@@ -583,6 +589,24 @@ class LibSM64Manager {
     m_input_stick_x.store(sx, std::memory_order_release);
     m_input_stick_y.store(sy, std::memory_order_release);
     m_input_buttons.store(buttons, std::memory_order_release);
+  }
+  // Set the camera forward vector in world XZ plane.  Caller should pass a
+  // (mostly) normalised 2D vector pointing the same direction the camera
+  // is looking, in world coords (x = +X, z = +Z).  We renormalise here so
+  // GOAL doesn't have to be precise — drop magnitude < 0.001 to (0, 1) so
+  // a degenerate read doesn't lock Mario's rotation to a frozen direction.
+  void set_camera_look_from_goal(float cx, float cz) {
+    float mag2 = cx * cx + cz * cz;
+    if (mag2 < 0.000001f) {
+      cx = 0.0f;
+      cz = 1.0f;
+    } else {
+      float inv = 1.0f / std::sqrt(mag2);
+      cx *= inv;
+      cz *= inv;
+    }
+    m_input_cam_look_x.store(cx, std::memory_order_release);
+    m_input_cam_look_z.store(cz, std::memory_order_release);
   }
 
   // Flags set by read_target_flags(), used by OpenGLRenderer for render/input control.
@@ -931,6 +955,14 @@ class LibSM64Manager {
   std::atomic<float> m_input_stick_x{0.0f};
   std::atomic<float> m_input_stick_y{0.0f};
   std::atomic<uint32_t> m_input_buttons{0};
+  // Camera forward vector in world XZ plane — drives Mario's analog-stick
+  // rotation so "stick up" maps to "screen up" instead of always world +Z.
+  // Defaults to (0, 1) = world +Z so a missing pc-sm64-set-camera-look call
+  // degrades to the old "world-relative stick" behaviour.  GOAL pushes a
+  // normalised 2D vector each frame from the watcher process; libsm64 reads
+  // these in tick() and sets sm64_input.camLookX / camLookZ.
+  std::atomic<float> m_input_cam_look_x{0.0f};
+  std::atomic<float> m_input_cam_look_z{1.0f};
   // Mario color tint preset (see set_mario_color_preset for the table).
   // std::atomic so the renderer thread can read it lock-free.
   std::atomic<int> m_mario_color_preset{0};

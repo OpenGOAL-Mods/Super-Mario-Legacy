@@ -3524,13 +3524,18 @@ void LibSM64Manager::read_target_flags(u8* ee_mem) {
 }
 
 MarioInputState LibSM64Manager::read_mario_input_from_goal(u8* /*ee_mem*/) {
-  // Return the latest values latched by pc-sm64-set-input.  Atomics make
-  // this lock-free across the GOAL kernel thread (writer) and GL thread
-  // (reader); torn reads of the floats don't matter because both sides
-  // write-then-read in tight loops every frame.
+  // Return the latest values latched by pc-sm64-set-input + pc-sm64-set-
+  // camera-look.  Atomics make this lock-free across the GOAL kernel thread
+  // (writer) and GL thread (reader); torn reads of the floats don't matter
+  // because both sides write-then-read in tight loops every frame.
   MarioInputState input{};
   input.stick_x = m_input_stick_x.load(std::memory_order_acquire);
   input.stick_y = m_input_stick_y.load(std::memory_order_acquire);
+  // Camera forward vector — defaults to (0, 1) world-Z when the GOAL side
+  // hasn't called pc-sm64-set-camera-look yet, which preserves the legacy
+  // "world-relative stick" feel during the pre-spawn / no-camera window.
+  input.cam_look_x = m_input_cam_look_x.load(std::memory_order_acquire);
+  input.cam_look_z = m_input_cam_look_z.load(std::memory_order_acquire);
   uint32_t b = m_input_buttons.load(std::memory_order_acquire);
   input.button_a = (b & 1u) != 0;
   input.button_b = (b & 2u) != 0;
@@ -3543,6 +3548,20 @@ u64 pc_sm64_set_input(u32 stick_x_bits, u32 stick_y_bits, u32 buttons) {
   std::memcpy(&sx, &stick_x_bits, 4);
   std::memcpy(&sy, &stick_y_bits, 4);
   LibSM64Manager::instance().set_input_from_goal(sx, sy, buttons);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// pc-sm64-set-camera-look — push the camera's world-XZ forward vector to
+// libsm64 so Mario's stick rotates with the camera.  GOAL passes float bits
+// packed into u32 (same ABI as teleport / shove).  Manager-side normalises
+// the vector and falls back to (0, 1) world-Z if magnitude is too small.
+// ---------------------------------------------------------------------------
+u64 pc_sm64_set_camera_look(u32 cam_x_bits, u32 cam_z_bits) {
+  float cx, cz;
+  std::memcpy(&cx, &cam_x_bits, 4);
+  std::memcpy(&cz, &cam_z_bits, 4);
+  LibSM64Manager::instance().set_camera_look_from_goal(cx, cz);
   return 0;
 }
 

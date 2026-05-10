@@ -648,6 +648,7 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-sm64-teleport-mario", (void*)sm64::pc_sm64_teleport_mario);
   make_function_symbol_from_c("pc-sm64-shove-mario", (void*)sm64::pc_sm64_shove_mario);
   make_function_symbol_from_c("pc-sm64-spawn-mario-at-jak", (void*)sm64::pc_sm64_spawn_mario_at_jak);
+  make_function_symbol_from_c("pc-sm64-set-camera-look", (void*)sm64::pc_sm64_set_camera_look);
 
   // setup string constants
   auto user_dir_path = file_util::get_user_config_dir();

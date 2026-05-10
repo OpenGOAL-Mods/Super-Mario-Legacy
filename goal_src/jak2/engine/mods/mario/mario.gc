@@ -530,4 +530,45 @@
 ;; Auto-start on load.
 (sm64-mario-col-start)
 
+;; ---------------------------------------------------------------------------
+;; REPL diagnostic: (mario-status)
+;;
+;; Prints the current state of every mario-mod global — handy when
+;; iterating in goalc and you need to know "is Mario alive? what's the
+;; watcher seeing? did auto-spawn fire?" without spelunking around with
+;; bare format calls.  Output goes to the console (format #t).
+;; ---------------------------------------------------------------------------
+(defun mario-status ()
+  "Print every mario-mod global's current value.  REPL-friendly diagnostic."
+  (format #t "[mario-status] *mario-settings*:~%")
+  (when *mario-settings*
+    (format #t "  play-sm64-music? = ~A~%" (-> *mario-settings* play-sm64-music?))
+    (format #t "  sm64-music-volume = ~f~%" (-> *mario-settings* sm64-music-volume))
+    (format #t "  sm64-sfx-volume   = ~f~%" (-> *mario-settings* sm64-sfx-volume))
+    (format #t "  mario-color       = ~D~%" (-> *mario-settings* mario-color))
+    (format #t "  render-corpses?   = ~A~%" (-> *mario-settings* render-corpses?)))
+  (format #t "[mario-status] watcher state:~%")
+  (format #t "  *target* bound?            = ~A~%" (if *target* #t #f))
+  (format #t "  *sm64-jak2-auto-spawned*   = ~A~%" *sm64-jak2-auto-spawned*)
+  (format #t "  *sm64-jak-dying*           = ~A~%" *sm64-jak-dying*)
+  (format #t "  watcher process running?   = ~A~%"
+          (if (process-by-name "sm64-mario-col" *active-pool*) #t #f))
+  (format #t "[mario-status] bridge data (libsm64 → GOAL):~%")
+  (format #t "  *sm64-mario-pos*    = (~f ~f ~f) angle=~f~%"
+          (-> *sm64-mario-pos* x) (-> *sm64-mario-pos* y)
+          (-> *sm64-mario-pos* z) (-> *sm64-mario-pos* w))
+  (format #t "  *sm64-mario-health* x = ~f (wedges)~%" (-> *sm64-mario-health* x))
+  (format #t "  *sm64-mario-info*   = (~f ~f ~f ~f)~%"
+          (-> *sm64-mario-info* x) (-> *sm64-mario-info* y)
+          (-> *sm64-mario-info* z) (-> *sm64-mario-info* w))
+  (format #t "  *sm64-mario-damage* = (~f ~f ~f ~f)~%"
+          (-> *sm64-mario-damage* x) (-> *sm64-mario-damage* y)
+          (-> *sm64-mario-damage* z) (-> *sm64-mario-damage* w))
+  (format #t "[mario-status] target-flags (GOAL → libsm64):~%")
+  (format #t "  *sm64-target-flags* = (~f ~f ~f ~f)~%"
+          (-> *sm64-target-flags* x) (-> *sm64-target-flags* y)
+          (-> *sm64-target-flags* z) (-> *sm64-target-flags* w))
+  (format #t "    [x=grabbed, y=periscope, z=clone-anim, w=movie?]~%")
+  (none))
+
 (format 0 "[mario] Jak 2 mario.gc loaded — watcher live, see JAK2_PORT_PLAN.md~%")

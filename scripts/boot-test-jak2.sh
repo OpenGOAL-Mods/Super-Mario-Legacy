@@ -125,6 +125,7 @@ declare -a REQUIRED=(
   "\[mario\] mario-music.gc loaded"
   "\[sm64\] Mario collision process started"
   "\[mario\] mario-menu.gc loaded"
+  "\[mario\] mario-debug-menu.gc loaded"
 )
 
 declare -a FORBIDDEN=(

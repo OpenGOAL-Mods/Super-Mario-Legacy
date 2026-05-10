@@ -471,4 +471,5 @@
   "mario.o" ;; added
   "mario-music.o" ;; added
   "mario-menu.o" ;; added
+  "mario-debug-menu.o" ;; added
  ))

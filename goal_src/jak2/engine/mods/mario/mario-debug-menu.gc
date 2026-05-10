@@ -1,0 +1,154 @@
+;;-*-Lisp-*-
+(in-package goal)
+
+;; name: mario-debug-menu.gc
+;; name in dgo: mario-debug-menu
+;; dgos: GAME
+
+;; Debug-only — `*debug-menu-context*` / `debug-menu-append-item` /
+;; `debug-menu-make-from-template` all live in `(declare-file (debug))`
+;; sources (engine/debug/menu.gc + engine/debug/default-menu.gc).  In
+;; retail builds those symbols don't link, so anything that references
+;; them must be gated out of retail.  Marking the whole file debug-only
+;; is cleaner than sprinkling defun-debug everywhere because the sound
+;; previewer involves a deftype + defstate + defbehavior, none of which
+;; have debug-only variants.
+(declare-file (debug))
+
+;; ---------------------------------------------------------------------------
+;; SM64 Sound Previewer — debug-menu utility (Jak 2 port).
+;;
+;; Lifted from goal_src/jak1/engine/mods/mario/mario-debug-menu.gc.
+;; Same UX as the jak1 version:
+;;   R1       — next sound
+;;   L1       — previous sound
+;;   Triangle — replay current
+;;   Square   — exit previewer
+;;
+;; Differences from jak1:
+;;   - print-game-text's 5th arg is `bucket-id` in jak2 (vs `int`
+;;     line-height in jak1) — we pass `(bucket-id debug-no-zbuf1)`
+;;     so the previewer text draws over everything.
+;;   - 4th arg flipped from 128 (alpha) to 44 to match the jak2 call
+;;     convention seen across game-save.gc / process-taskable.gc.
+;;   - mario-set-color presets table indices are persisted to disk via
+;;     *mario-settings*, identical to jak1.
+;; ---------------------------------------------------------------------------
+
+(deftype sm64-sound-previewer (process)
+  ((idx int32))
+  :heap-base #x100)
+
+(defstate sm64-sound-previewer-idle (sm64-sound-previewer)
+  :trans
+    (behavior ()
+      ;; ---- Input -----------------------------------------------------------
+      (let ((n (-> *sm64-sound-preview-list* length)))
+        (cond
+          ((cpad-pressed? 0 square)
+           (deactivate self))
+          ((cpad-pressed? 0 r1)
+           (set! (-> self idx) (mod (+ (-> self idx) 1) n))
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))
+          ((cpad-pressed? 0 l1)
+           (set! (-> self idx) (mod (+ (-> self idx) (- n 1)) n))
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))
+          ((cpad-pressed? 0 triangle)
+           (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* (-> self idx) id))))))
+
+      ;; ---- HUD -------------------------------------------------------------
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 40 0.0
+                      (font-color default) (font-flags shadow kerning))))
+        (set! (-> ctx flags) (font-flags shadow kerning large))
+        (print-game-text (string-format "SM64 SOUND PREVIEWER") ctx #f 44 (bucket-id debug-no-zbuf1)))
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 70 0.0
+                      (font-color default) (font-flags shadow kerning)))
+            (cur (-> *sm64-sound-preview-list* (-> self idx))))
+        (print-game-text
+          (string-format "Sound ~D / ~D: ~A   id=#x~8,'0X"
+                         (+ (-> self idx) 1)
+                         (-> *sm64-sound-preview-list* length)
+                         (-> cur name)
+                         (-> cur id))
+          ctx #f 44 (bucket-id debug-no-zbuf1)))
+      (let ((ctx (new 'stack 'font-context *font-default-matrix* 30 100 0.0
+                      (font-color default) (font-flags shadow kerning))))
+        (print-game-text
+          (string-format "R1 = next   L1 = prev   Triangle = replay   Square = exit")
+          ctx #f 44 (bucket-id debug-no-zbuf1))))
+  :code
+    (behavior ()
+      (loop (suspend))))
+
+(defbehavior sm64-sound-previewer-init sm64-sound-previewer ()
+  "Seed idx + enter idle.  Plays the first sound on activation so the
+   user hears something immediately instead of waiting for an L1/R1.
+   Clear pause/menu/progress mask bits so the previewer keeps ticking
+   while the debug menu is still on screen."
+  (logclear! (-> self mask) (process-mask pause menu progress))
+  (set! (-> self idx) 0)
+  (pc-sm64-play-sound (the int (-> *sm64-sound-preview-list* 0 id)))
+  (go sm64-sound-previewer-idle))
+
+(defun start-sm64-sound-previewer ()
+  "Spawn the SM64 sound previewer process.  Safe to call repeatedly —
+   any existing instance is deactivated first so a fresh one starts at
+   index 0 instead of accumulating duplicates in *active-pool*."
+  (let ((existing (process-by-name "sm64-sound-previewer" *active-pool*)))
+    (when existing (deactivate existing)))
+  (process-spawn sm64-sound-previewer
+                 :init sm64-sound-previewer-init
+                 :name "sm64-sound-previewer")
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; Mario color preset selector — recolors Mario's red fabric (hat + shirt
+;; sleeves).  Persisted via *mario-settings* (mario-color slot) so the
+;; choice survives relaunches.  Preset table mirrors kMarioColorPresets
+;; in libsm64_integration.cpp — 10 entries.  Indices ARE the persisted
+;; value; don't reorder, only append.
+;;
+;; This menu is the ONLY UI for color (deliberately not in the regular
+;; pause menu — kept as a debug-only toy).
+;; ---------------------------------------------------------------------------
+(defun mario-set-color! ((preset int))
+  "Write preset to *mario-settings*, persist, and the next-frame
+   settings push (mario.gc watcher loop) will hand it to libsm64."
+  (set! (-> *mario-settings* mario-color) preset)
+  (commit-to-file *mario-settings*)
+  (none))
+
+;; ---------------------------------------------------------------------------
+;; Debug-menu registration.
+;;
+;; Appends a "Mario" submenu to the already-built root of
+;; `*debug-menu-context*`.  default-menu.gc's body runs at file-load
+;; and wires up Artist / Game / Sound / Shader / etc submenus; we run
+;; later (game.gd lists mario-debug-menu.o after default-menu-pc.o) so
+;; the root menu is live by the time this code executes — we just push
+;; one more submenu onto it.
+;; ---------------------------------------------------------------------------
+(when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
+  (debug-menu-append-item
+    (-> *debug-menu-context* root-menu)
+    (debug-menu-make-from-template
+      *debug-menu-context*
+      '(menu "Mario"
+             (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))
+             (function "Spawn at Jak"   #f ,(lambda () (pc-sm64-spawn-mario-at-jak) (none)))
+             (function "Delete Mario"   #f ,(lambda () (pc-sm64-delete-mario) (none)))
+             (function "Heal Mario"     #f ,(lambda () (pc-sm64-full-heal-mario) (none)))
+             (function "Damage Mario"   #f ,(lambda () (pc-sm64-damage-mario) (none)))
+             (menu "Colors"
+                   (function "Red"     #f ,(lambda () (mario-set-color! 0) (none)))
+                   (function "Orange"  #f ,(lambda () (mario-set-color! 1) (none)))
+                   (function "Yellow"  #f ,(lambda () (mario-set-color! 2) (none)))
+                   (function "Lime"    #f ,(lambda () (mario-set-color! 3) (none)))
+                   (function "Green"   #f ,(lambda () (mario-set-color! 4) (none)))
+                   (function "Cyan"    #f ,(lambda () (mario-set-color! 5) (none)))
+                   (function "Blue"    #f ,(lambda () (mario-set-color! 6) (none)))
+                   (function "Purple"  #f ,(lambda () (mario-set-color! 7) (none)))
+                   (function "Magenta" #f ,(lambda () (mario-set-color! 8) (none)))
+                   (function "Pink"    #f ,(lambda () (mario-set-color! 9) (none))))))))
+
+(format 0 "[mario] mario-debug-menu.gc loaded — debug menu populated~%")

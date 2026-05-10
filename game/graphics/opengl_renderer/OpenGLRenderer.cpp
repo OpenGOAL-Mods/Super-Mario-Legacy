@@ -1797,6 +1797,24 @@ void OpenGLRenderer::dispatch_buckets_jak2(DmaFollower dma,
       auto p = prof.make_scoped_child("collision-draw");
       m_collide_renderer.render(&m_render_state, p);
     }
+
+    // Draw Mario at the same depth tier as jak's character merc (after
+    // the last PRIS2 bucket — the GMERC_LCOM_PRIS2 is the final
+    // foreground-prim renderer in jak 2's pipeline, equivalent to
+    // jak 1's GENERIC_PRIS hook point).  This makes Mario render
+    // through level geometry like a character should, and keeps him
+    // BEHIND alpha / water / HUD / menu / progress overlays.
+    //
+    // The same target_periscope guard as jak 1 — when Jak's first-
+    // person periscope is up, hide Mario so the FPV overlay isn't
+    // obscured.  jak 2 has periscope too (target's first-person-
+    // mode state-flag).
+    if (bucket_id + 1 == (int)jak2::BucketId::GMERC_LCOM_PRIS2) {
+      if (!sm64::LibSM64Manager::instance().target_periscope) {
+        auto p = prof.make_scoped_child("mario-sm64");
+        render_mario_sm64(p);
+      }
+    }
   }
   vif_interrupt_callback(m_bucket_renderers.size());
 

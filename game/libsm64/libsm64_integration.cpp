@@ -166,24 +166,31 @@ namespace sm64 {
 // ---------------------------------------------------------------------------
 // Version-aware GOAL struct field offsets.
 //
-// process / process-drawable layouts diverge between jak 1 and jak 2 because
-// jak 2 adds two fields to process: `level` (4) and `pad-unknown-0` (8).
-// All offsets are RUNTIME offsets (i.e. relative to the basic-pointer that
+// process / process-drawable layouts diverge between jak 1 and jak 2.
+// Jak 2 adds:
+//   - process-tree: a `clock` field (4 bytes, between `mask` and `parent`)
+//   - process: a `level` field (4 bytes, between `entity` and `state`)
+//   - process: `pad-unknown-0` (uint32 2 = 8 bytes) before heap fields
+// All three add +4 each → +16 bytes total, NOT +12 as the first attempt
+// at this table assumed.  Missing the `clock` field made the runtime read
+// 4 bytes early, which on the live test gave coords that LOOKED like
+// Jak's position (because the GOAL heap stores adjacent pointers to
+// related struct slots) but actually read into the connection-list
+// inline, so Mario spawned at a "weird spot."
+//
+// All offsets are RUNTIME offsets (relative to the basic-pointer that
 // `intern_from_c(name)->value()` returns — the basic header tag is at -4
 // from this pointer).
 //
-// Layouts (computed by stepping through gkernel-h.gc field-by-field):
+// Layouts (computed by stepping through gkernel-h.gc + game-h.gc):
 //
 //                  jak1   jak2   delta
-//   process.state    52     56    +4   (jak2 inserts `level` before state)
-//   pd.root         108    120   +12   (above + 8-byte pad-unknown-0)
-//   pd.node-list    112    124   +12
+//   process.state    52     60    +8   (jak2: +clock @ pt + +level @ p)
+//   pd.root         108    124   +16   (+8 above + 8-byte pad-unknown-0)
+//   pd.node-list    112    128   +16
+//   pd.water        152    168   +16
 //   trsqv.trans      12     12    0    (engine struct, identical layout)
 //   trsqv.quat       28     28    0
-//
-// Use these helpers everywhere — never hardcode 108 / 52 etc.  The wrong
-// offset on jak 2 reads garbage out of EE memory and either crashes
-// (out-of-bounds) or quietly desyncs Mario from Jak.
 // ---------------------------------------------------------------------------
 struct TargetOffsets {
   u32 process_state;               // process.state runtime offset
@@ -198,15 +205,15 @@ struct TargetOffsets {
 
 [[maybe_unused]] static TargetOffsets sm64_target_offsets() {
   if (g_game_version == GameVersion::Jak2) {
-    // jak 2: process is 12 bytes larger than jak 1 (extra `level` ptr +
-    // `pad-unknown-0` uint32[2]).  Engine struct trsqv is unchanged.
-    // process-drawable's own fields shift by the same +12 since they all
-    // sit after the process header.
+    // jak 2: process-tree adds `clock` (+4), process adds `level` (+4) and
+    // `pad-unknown-0` (+8).  Total +16 bytes vs jak 1.  Engine struct
+    // trsqv is unchanged.  process-drawable's own fields shift by the
+    // same +16 since they all sit after the process header.
     return TargetOffsets{
-        /*process_state=*/56,
-        /*process_drawable_root=*/120,
-        /*process_drawable_node_list=*/124,
-        /*process_drawable_water=*/164,  // root(120) + 44 (11th 4-byte field)
+        /*process_state=*/60,
+        /*process_drawable_root=*/124,
+        /*process_drawable_node_list=*/128,
+        /*process_drawable_water=*/168,  // root(124) + 44 (11th 4-byte field)
         /*trsqv_trans=*/12,
         /*trsqv_quat=*/28,
     };

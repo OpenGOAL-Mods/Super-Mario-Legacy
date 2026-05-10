@@ -126,6 +126,9 @@ declare -a REQUIRED=(
   "\[sm64\] Mario collision process started"
   "\[mario\] mario-menu.gc loaded"
   "\[mario\] mario-debug-menu.gc loaded"
+  # Runtime pipeline events that fire after the title screen as levels stream
+  # in.  Boot-wait must be long enough for the first level load to complete.
+  "Stored .* collision surfaces from level geometry"
 )
 
 declare -a FORBIDDEN=(

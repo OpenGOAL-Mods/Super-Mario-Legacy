@@ -366,8 +366,9 @@
 ;; ---------------------------------------------------------------------------
 
 (deftype sm64-mario-col (process)
-  ((mario-dead?  symbol)
-   (death-timer  int))
+  ((mario-dead?     symbol)
+   (death-timer     int)
+   (prev-jak-health float))
   (:state-methods
     idle))
 
@@ -403,6 +404,7 @@
     ;; pipeline; flips to #f on the first tick where Mario has any HP.
     (set! (-> self mario-dead?) #t)
     (set! (-> self death-timer) 0)
+    (set! (-> self prev-jak-health) 0.0)
     (loop
       ;; Mario spawning is handled by the C++ auto-spawn at
       ;; OpenGLRenderer.cpp:1042 — it polls read_target_transform from
@@ -447,6 +449,43 @@
                  (= (-> *sm64-mario-health* x) 0.0)
                  (not (-> self mario-dead?)))
         (set! *sm64-jak2-auto-spawned* #f))
+
+      ;; ---- Health sync: Jak takes damage → kill Mario via matching mode ----
+      ;; This is the missing piece that makes jak 1's death loop work
+      ;; perfectly.  When Jak walks off a ledge / takes lava damage / etc.,
+      ;; HIS HP drops first (his own attack-info mode tells us what kind of
+      ;; damage).  Without this hook Mario stays alive while Jak dies, sync
+      ;; drags Jak around, infinite loop.  Detect the rising edge of Jak HP
+      ;; going DOWN and route the cause through to Mario:
+      ;;   Jak mode 'endlessfall  → pc-sm64-endlessfall-mario  (instant OOB kill)
+      ;;   Jak mode 'lava / 'burn → pc-sm64-burn-mario         (lava bounce + HP loss)
+      ;;   Jak mode 'drown-death  → pc-sm64-drown-mario        (instant drowning)
+      ;;   anything else          → pc-sm64-knockback-mario    (generic damage)
+      ;;
+      ;; Mirrors goal_src/jak1/engine/mods/mario/mario.gc:809-862.
+      (when (and *target* (-> *target* fact))
+        (let* ((jak-hp (-> *target* fact health))
+               (jak-edge (< jak-hp (-> self prev-jak-health))))
+          (when jak-edge
+            (let* ((damage-wedges (the int (* (- (-> self prev-jak-health) jak-hp) 2.0)))
+                   (mode (-> *target* attack-info mode)))
+              (format #t "[sync-debug] JAK-EDGE jak-hp:~f->~f damage-wedges=~D mode=~A~%"
+                      (-> self prev-jak-health) jak-hp damage-wedges mode)
+              (cond
+                ((= mode 'endlessfall)
+                 (format #t "[sync-debug]   -> ENDLESSFALL kill Mario~%")
+                 (pc-sm64-endlessfall-mario))
+                ((or (= mode 'lava) (= mode 'burn))
+                 (format #t "[sync-debug]   -> BURN ~D wedges~%" damage-wedges)
+                 (pc-sm64-burn-mario damage-wedges))
+                ((or (= mode 'drown-death) (= mode 'drown))
+                 (format #t "[sync-debug]   -> DROWN (fatal)~%")
+                 (pc-sm64-drown-mario))
+                (else
+                 (format #t "[sync-debug]   -> KNOCKBACK ~D wedges~%" damage-wedges)
+                 (pc-sm64-knockback-mario (max 1 damage-wedges))))))
+          ;; Track for next-frame edge detection.
+          (set! (-> self prev-jak-health) jak-hp)))
 
       ;; ---- Mario death → kill Jak, capture corpse, wait for respawn ----
       (let* ((dead (< (-> *sm64-mario-health* x) 0.5))

@@ -128,17 +128,33 @@
 ;; the root menu is live by the time this code executes — we just push
 ;; one more submenu onto it.
 ;; ---------------------------------------------------------------------------
+;; Helper: teleport Mario to Jak's current position, even if Mario is
+;; already alive (the auto-spawn bridge bails when has_mario(); this
+;; reads Jak's pos and shoves Mario to it via the live teleport bridge).
+(defun mario-teleport-to-jak ()
+  "Read *target* trans, send Mario there via pc-sm64-teleport-mario.
+   No-op if *target* isn't bound or Mario doesn't exist."
+  (when (and *target* (-> *target* control))
+    (let ((trans (-> *target* control trans)))
+      (pc-sm64-teleport-mario (-> trans x) (-> trans y) (-> trans z))))
+  (none))
+
 (when (and *debug-menu-context* (-> *debug-menu-context* root-menu))
   (debug-menu-append-item
     (-> *debug-menu-context* root-menu)
     (debug-menu-make-from-template
       *debug-menu-context*
       '(menu "Mario"
-             (function "Sound Previewer" #f ,(lambda () (start-sm64-sound-previewer) (none)))
-             (function "Spawn at Jak"   #f ,(lambda () (pc-sm64-spawn-mario-at-jak) (none)))
-             (function "Delete Mario"   #f ,(lambda () (pc-sm64-delete-mario) (none)))
-             (function "Heal Mario"     #f ,(lambda () (pc-sm64-full-heal-mario) (none)))
-             (function "Damage Mario"   #f ,(lambda () (pc-sm64-damage-mario) (none)))
+             (function "Sound Previewer"  #f ,(lambda () (start-sm64-sound-previewer) (none)))
+             (function "Spawn at Jak"     #f ,(lambda () (pc-sm64-spawn-mario-at-jak) (none)))
+             (function "Teleport to Jak"  #f ,(lambda () (mario-teleport-to-jak) (none)))
+             (function "Delete Mario"     #f ,(lambda () (pc-sm64-delete-mario) (none)))
+             (function "Heal Mario"       #f ,(lambda () (pc-sm64-full-heal-mario) (none)))
+             (function "Damage Mario"     #f ,(lambda () (pc-sm64-damage-mario) (none)))
+             (function "Stomp Bounce"     #f ,(lambda () (pc-sm64-stomp-bounce-mario) (none)))
+             (function "Hover (R2)"       #f ,(lambda () (pc-sm64-hover-mario) (none)))
+             (function "Star Dance"       #f ,(lambda () (pc-sm64-star-dance-mario) (none)))
+             (function "Print Status"     #f ,(lambda () (mario-status) (none)))
              (menu "Colors"
                    (function "Red"     #f ,(lambda () (mario-set-color! 0) (none)))
                    (function "Orange"  #f ,(lambda () (mario-set-color! 1) (none)))

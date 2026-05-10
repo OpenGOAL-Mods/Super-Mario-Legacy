@@ -1082,18 +1082,25 @@ void OpenGLRenderer::tick_mario_sm64() {
         spawn_cooldown = 0;
         lg::info("[sm64] Auto-spawned Mario at ({:.1f}, {:.1f}, {:.1f}) yaw={:.2f}",
                  tpos.x(), tpos.y(), tpos.z(), tyaw);
-      } else if (!respawn_urgent) {
+      } else {
+        // create_mario rejected — usually "no floor under target".
+        // Always log on the urgent respawn path (user explicitly killed
+        // Mario, or our death pipeline did) so we can see why he's not
+        // coming back; rate-limit the startup-polling path so it doesn't
+        // spam during the title screen.
         diag_create_failed++;
-        if (diag_create_failed <= 5 || diag_create_failed % 10 == 0) {
+        if (respawn_urgent ||
+            diag_create_failed <= 5 || diag_create_failed % 10 == 0) {
           lg::warn("[sm64] auto-spawn: create_mario rejected pos=({:.1f}, {:.1f}, {:.1f}) "
-                   "(attempt #{}, total fails {}); no floor under target?",
-                   tpos.x(), tpos.y(), tpos.z(), diag_attempts, diag_create_failed);
+                   "(urgent={}, attempt #{}, total fails {})",
+                   tpos.x(), tpos.y(), tpos.z(),
+                   respawn_urgent, diag_attempts, diag_create_failed);
         }
-        // No collision at spawn point — retry after ~2s (for regular
-        // startup polling, not the urgent respawn path; during urgent
-        // we just keep retrying next frame — by the time *target* is
-        // at a continue-point trans the floor query should succeed).
-        spawn_cooldown = 60;
+        // Even on the urgent path, set a small cooldown so we don't
+        // hammer create_mario every frame while waiting for streaming
+        // collision to populate.  ~2s for non-urgent, ~0.25s for urgent
+        // (15 frames at 60fps) so post-respawn Mario comes back fast.
+        spawn_cooldown = respawn_urgent ? 15 : 60;
       }
     } else if (!respawn_urgent) {
       diag_target_missing++;

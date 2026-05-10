@@ -1443,6 +1443,15 @@ void LibSM64Manager::delete_mario(int32_t mario_id) {
     clear_tar_floor();
     sm64_mario_delete(m_mario_id);
     m_mario_id = -1;
+    // Invalidate the streaming-collision cache so the next create_mario
+    // forces a fresh load around the new spawn point.  Without this the
+    // distance-threshold short-circuit in update_streaming_collision can
+    // skip the reload — if Jak respawned at a continue point near where
+    // Mario died (common in pit-fall + respawn loops where both end up
+    // at similar XZ) the new spawn would inherit the stale "Mario died
+    // in empty void, no nearby surfaces" subset and create_mario would
+    // reject every new position for lack of floor.
+    m_stream_loaded = false;
   }
 }
 

@@ -1525,8 +1525,25 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     // on the pseudo floor during normal play.
     // Stream in nearby collision surfaces before the tick so find_floor /
     // find_ceil / find_wall only iterate over a small subset.
-    update_streaming_collision(m_state.position.x() * JAK_TO_SM64_SCALE,
-                               m_state.position.z() * JAK_TO_SM64_SCALE);
+    //
+    // When the launcher/warp/continue glue is active we know Mario is
+    // about to be pinned to `m_launcher_target_jak` after the tick — so
+    // stream around THAT position instead of Mario's stale pre-override
+    // coords.  Otherwise the subset stays anchored to where Mario was
+    // pre-warp; the post-tick override teleports him into empty space
+    // and he falls one tick before m_state.position catches up and the
+    // next frame re-streams around the new location.  Same logic for
+    // the settle window so Mario keeps a floor under him while the
+    // glue ramps down.
+    {
+      float stream_x_sm64 = m_state.position.x() * JAK_TO_SM64_SCALE;
+      float stream_z_sm64 = m_state.position.z() * JAK_TO_SM64_SCALE;
+      if (m_in_launcher || m_post_glue_settle_frames > 0) {
+        stream_x_sm64 = m_launcher_target_jak.x() * JAK_TO_SM64_SCALE;
+        stream_z_sm64 = m_launcher_target_jak.z() * JAK_TO_SM64_SCALE;
+      }
+      update_streaming_collision(stream_x_sm64, stream_z_sm64);
+    }
 
     update_safety_floor(m_state.position.x() * JAK_TO_SM64_SCALE,
                         m_state.position.y() * JAK_TO_SM64_SCALE,
@@ -1590,6 +1607,13 @@ void LibSM64Manager::tick(const MarioInputState& input) {
     // m_in_launcher is set by update_launcher_glue (runs before tick).
     // m_post_glue_settle_frames > 0 means the glue state just ended but we're
     // still pinning Mario to Jak while collision reloads after a level change.
+    //
+    // Also zero Mario's velocity each frame we're gluing.  Without this, the
+    // first tick after a warp (where Mario's old position had no nearby
+    // streamed surfaces → he free-falls during the tick) bakes in downward
+    // velocity that survives the position teleport.  The next frame's
+    // physics tick then drives him through the freshly streamed floor at
+    // the new location.
     if (m_in_launcher || m_post_glue_settle_frames > 0) {
       float lx = m_launcher_target_jak.x() * JAK_TO_SM64_SCALE;
       float ly = m_launcher_target_jak.y() * JAK_TO_SM64_SCALE;
@@ -1599,6 +1623,14 @@ void LibSM64Manager::tick(const MarioInputState& input) {
       sm64_state.position[0] = lx;
       sm64_state.position[1] = ly;
       sm64_state.position[2] = lz;
+
+      // Reset velocity so accumulated freefall momentum doesn't punch
+      // Mario through the new floor on the following tick.
+      sm64_set_mario_velocity(m_mario_id, 0.0f, 0.0f, 0.0f);
+      sm64_state.velocity[0] = 0.0f;
+      sm64_state.velocity[1] = 0.0f;
+      sm64_state.velocity[2] = 0.0f;
+      sm64_state.forwardVelocity = 0.0f;
     }
 
     // --- Debug hover: R2 in debug mode slowly lifts Mario upward ----------
@@ -6536,19 +6568,24 @@ bool LibSM64Manager::update_launcher_glue(u8* ee_mem) {
   const u32 false_val = s7.offset;
   if (false_val == 0) return false;
 
-  // Launcher / warp / continue glue is built around jak 1's target state
-  // names — jak 2 has different states, so skip the whole detection.
-  if (g_game_version != GameVersion::Jak1) {
-    m_in_launcher = false;
-    m_post_glue_settle_frames = 0;
-    return false;
-  }
-
+  // Launcher / warp / continue glue detection.  Originally jak 1-only, but
+  // every state symbol it looks up (`target-warp-in`, `target-continue`,
+  // `target-launch`, `target-high-jump`, `target-duck-high-jump`,
+  // `target-duck-high-jump-jump`, `target-warp-out`) also exists in jak 2
+  // — see goal_src/jak2/{engine/target/{target,target2,target-death}.gc,
+  // levels/common/warp-gate.gc}.  Without this glue on jak 2, debug-menu
+  // warps / continue-point teleports leave Mario at his old position and
+  // the next sync_jak_to_mario yanks Jak back to those stale coords
+  // (often in a level that's now unloaded → black screen).
+  //
+  // Version difference: jak 2's process.state runtime offset is +8 (60 vs
+  // 52) because process-tree added `clock` and process added `level` +
+  // `pad-unknown-0`.  Use the per-version helper rather than the old
+  // hardcoded 52.
   u32 target_ptr = sm64_get_symbol_value("*target*");
   if (target_ptr == 0 || target_ptr == false_val) return false;
 
-  // process.state is at GOAL offset 56 → runtime offset 52.
-  constexpr u32 STATE_RUNTIME_OFF = 52;
+  const u32 STATE_RUNTIME_OFF = sm64_target_offsets().process_state;
   if (target_ptr + STATE_RUNTIME_OFF + 4 > EE_MAIN_MEM_SIZE) return false;
 
   u32 state_ptr;

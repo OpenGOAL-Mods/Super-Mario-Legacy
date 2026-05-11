@@ -1015,6 +1015,23 @@ void OpenGLRenderer::tick_mario_sm64() {
   static int acc_frames = 0;
 
   // 1. Auto-sync collision
+  //
+  // The loader's `get_in_use_levels()` returns every level rendered in the
+  // last 5 frames — in jak 2 that's typically 3-6 simultaneous levels
+  // (city subsections, mission interiors etc.), not the 1-2 you'd see in
+  // jak 1.  We accumulate ALL of them into `all_verts`, so the merged
+  // surface set scales with however many levels are live; there's no
+  // hardcoded cap.
+  //
+  // Default trigger: level-id set changed (a new level streamed in or an
+  // old one unloaded) → rebuild.  But that misses one case important on
+  // jak 2: a continue-point checkpoint that teleports Jak to a different
+  // part of the SAME level-set keeps `current_ids` identical, so the
+  // streaming subset stays anchored to the OLD position and create_mario
+  // rejects the new spawn for "no floor".  Force-rebuild when Mario is
+  // mid-respawn (delete_mario set m_respawn_pending=true; cleared on
+  // successful create) so the merged set is always fresh when auto-spawn
+  // probes the new Jak position.
   auto t0 = Clock::now();
   if (mgr.auto_sync_collision && m_render_state.loader) {
     auto levels = m_render_state.loader->get_in_use_levels();
@@ -1022,7 +1039,9 @@ void OpenGLRenderer::tick_mario_sm64() {
     for (auto* lev : levels) {
       current_ids.insert(lev->load_id);
     }
-    if (current_ids != m_sm64_last_level_ids) {
+    const bool level_set_changed = (current_ids != m_sm64_last_level_ids);
+    const bool force_rebuild_for_respawn = !mgr.has_mario() && mgr.respawn_pending();
+    if (level_set_changed || force_rebuild_for_respawn) {
       m_sm64_last_level_ids = current_ids;
       std::vector<tfrag3::CollisionMesh::Vertex> all_verts;
       for (auto* lev : levels) {
@@ -1032,6 +1051,11 @@ void OpenGLRenderer::tick_mario_sm64() {
         }
       }
       if (!all_verts.empty()) {
+        lg::info(
+            "[sm64] Auto-sync collision: {} level(s), {} verts "
+            "(level-set-changed={}, force-respawn={})",
+            current_ids.size(), all_verts.size(), level_set_changed,
+            force_rebuild_for_respawn);
         mgr.load_level_collision(all_verts);
       }
     }

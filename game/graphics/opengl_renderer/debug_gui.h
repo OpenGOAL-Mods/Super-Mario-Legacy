@@ -9,6 +9,8 @@
 #include "common/util/Timer.h"
 #include "common/versions/versions.h"
 
+#include "game/mario/common/mario_debug_gui.h"
+
 class FrameTimeRecorder {
  public:
   static constexpr int SIZE = 60 * 5;
@@ -63,6 +65,8 @@ class OpenGlDebugGui {
     return false;
   }
 
+  sm64::SM64DebugGui& sm64_debug_gui() { return m_sm64_debug_gui; }
+
   bool small_profiler = false;
   bool record_events = false;
   int max_event_buffer_size = 65536;
@@ -84,6 +88,7 @@ class OpenGlDebugGui {
   bool m_filters_menu = false;
   bool m_want_screenshot = false;
   float target_fps_input = 60.f;
+  sm64::SM64DebugGui m_sm64_debug_gui;
 };
 
 namespace ImGui {

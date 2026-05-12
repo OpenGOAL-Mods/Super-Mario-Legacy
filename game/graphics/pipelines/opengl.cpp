@@ -567,6 +567,7 @@ void GLDisplay::render() {
   if (is_imgui_visible()) {
     auto p = scoped_prof("debug-gui");
     g_gfx_data->debug_gui.draw(g_gfx_data->dma_copier.get_last_result().stats);
+    g_gfx_data->debug_gui.sm64_debug_gui().draw(g_gfx_data->loader);
   }
   {
     auto p = scoped_prof("imgui-render");

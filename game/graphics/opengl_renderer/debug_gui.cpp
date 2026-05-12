@@ -127,6 +127,11 @@ void OpenGlDebugGui::draw(const DmaStats& dma_stats) {
       }
       ImGui::MenuItem("Subtitle Editor", nullptr, &m_subtitle_editor);
       ImGui::MenuItem("Debug Text Filter", nullptr, &m_filters_menu);
+      {
+        bool mario_menu_vis = m_sm64_debug_gui.is_visible();
+        ImGui::MenuItem("Mario Debug", nullptr, &mario_menu_vis);
+        m_sm64_debug_gui.set_visible(mario_menu_vis);
+      }
       ImGui::EndMenu();
     }
 

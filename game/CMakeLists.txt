@@ -109,6 +109,7 @@ set(RUNTIME_SOURCE
         kernel/common/ksound.cpp
         mario/common/mario.cpp
         mario/common/mario_audio.cpp
+        mario/common/mario_debug_gui.cpp
         kernel/jak1/fileio.cpp
         kernel/jak1/kboot.cpp
         kernel/jak1/kdgo.cpp

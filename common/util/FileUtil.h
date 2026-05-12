@@ -43,6 +43,7 @@ bool create_dir_if_needed_for_file(const std::string& path);
 bool create_dir_if_needed_for_file(const fs::path& path);
 std::string get_current_executable_path();
 std::optional<std::string> try_get_project_path_from_path(const std::string& path);
+std::optional<std::string> try_get_project_path_from_path_from_modbase(const std::string& path);
 bool setup_project_path(std::optional<fs::path> project_path_override, bool skip_logs = false);
 void override_user_config_dir(fs::path user_config_dir_override,
                               bool use_overridden_config_dir_for_saves);

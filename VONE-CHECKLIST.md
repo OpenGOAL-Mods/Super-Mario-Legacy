@@ -59,7 +59,7 @@
 - [ ] Hook into `OpenGLRenderer` to draw Mario in Jak's render bucket
 - [ ] Color preset system (10 recolors: red, orange, yellow, lime, green, cyan, blue, purple, magenta, pink)
 
-## 4. Audio System (`sm64_audio`)
+## 4. Audio System (`mario_audio`)
 - [ ] `SM64AudioPlayer` with cubeb worker thread
 - [ ] 32kHz stereo output from SM64 native audio engine
 - [ ] Ring buffer (interleaved int16, read/write cursors)

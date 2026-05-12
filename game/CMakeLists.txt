@@ -107,6 +107,7 @@ set(RUNTIME_SOURCE
         kernel/common/kscheme.cpp
         kernel/common/ksocket.cpp
         kernel/common/ksound.cpp
+        mario/common/mario.cpp
         kernel/jak1/fileio.cpp
         kernel/jak1/kboot.cpp
         kernel/jak1/kdgo.cpp

@@ -346,4 +346,5 @@
   "ropebridge.o"
   "ticky.o"
   "hud-classes-pc.o" ;; added
+  "mario.o"
  ))

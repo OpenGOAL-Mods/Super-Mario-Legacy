@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: "Create metadata.json"
         env:
           SCHEMA_VERSION: "0.1.0"
@@ -122,11 +122,11 @@ jobs:
     if: ${{ !inputs.skipWindows && inputs.buildBinaries }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.create_release.outputs.bundleTagName }}
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Prepare Artifact Folder
         run: mkdir -p ./ci-artifacts
       - uses: actions/download-artifact@v4
@@ -170,11 +170,11 @@ jobs:
     if: ${{ !inputs.skipLinux && inputs.buildBinaries }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.create_release.outputs.bundleTagName }}
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Prepare Artifact Folder
         run: mkdir -p ./ci-artifacts
       - uses: actions/download-artifact@v4
@@ -220,11 +220,11 @@ jobs:
     if: ${{ !inputs.skipMacOS && inputs.buildBinaries }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.create_release.outputs.bundleTagName }}
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Prepare Artifact Folder
         run: mkdir -p ./ci-artifacts
       - uses: actions/download-artifact@v4
@@ -260,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: "Create Windows Release"
         env:
           outputDir: ${{ inputs.outputDir }}
@@ -282,7 +282,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: "Create Linux Release"
         env:
           outputDir: ${{ inputs.outputDir }}
@@ -304,7 +304,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: "Create MacOS Intel Release"
         env:
           outputDir: ${{ inputs.outputDir }}
@@ -334,7 +334,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout Repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Prepare Output Folder
         run: mkdir -p ${{ inputs.outputDir }}/dist
       - name: Download all Artifacts
